@@ -94,14 +94,15 @@ def smoke(exe):
             path, out = fixture(name, tmp), Path(tmp) / ('out-' + name)
             out.mkdir()
             r = subprocess.run([str(exe), 'extract', str(path), str(out), str(1 << 20)], capture_output=True,
-                               text=True)
+                               text=True, encoding='utf-8', errors='replace')
             got = out / file
             if r.returncode or not got.is_file() or got.stat().st_size != size:
                 raise RuntimeError(f'xcx-unpack failed on {name}: {r.stdout}{r.stderr}')
         link = fixture('test_read_format_rar5_symlink.rar', tmp)
         out = Path(tmp) / 'out-link'
         out.mkdir()
-        r = subprocess.run([str(exe), 'extract', str(link), str(out), str(1 << 20)], capture_output=True, text=True)
+        r = subprocess.run([str(exe), 'extract', str(link), str(out), str(1 << 20)], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
         if r.returncode == 0 or 'unsafe_name' not in r.stdout:
             raise RuntimeError(f'xcx-unpack did not refuse a symlink: {r.stdout}{r.stderr}')
 

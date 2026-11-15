@@ -187,7 +187,9 @@ static int extract(const char *path, const char *dir, unsigned long long limit) 
     while ((r = archive_read_next_header(a, &e)) == ARCHIVE_OK || r == ARCHIVE_WARN) {
         const char *rel = safe_name(e, name);
         const char *type = type_of(e);
-        const char *shown = archive_entry_pathname_utf8(e) ? archive_entry_pathname_utf8(e) : "";
+        // a copy: the entry's own string goes away with archive_read_free, before the error line is printed
+        char shown[4096];
+        snprintf(shown, sizeof shown, "%s", archive_entry_pathname_utf8(e) ? archive_entry_pathname_utf8(e) : "");
         if (!rel || (strcmp(type, "file") && strcmp(type, "dir")) || archive_entry_sparse_count(e)) {
             archive_read_free(a);
             return fail("archive.unsafe_name", shown);

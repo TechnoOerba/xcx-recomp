@@ -31,7 +31,7 @@ jobs:
       - name: Build xcx-unpack and run it on libarchive's test archives
         shell: bash
         run: |
-          out=build/unpack/xcx-unpack$([ "$RUNNER_OS" = Windows ] && echo .exe)
+          out=build/unpack/xcx-unpack${{ runner.os == 'Windows' && '.exe' || '' }}
           PATH="/c/msys64/ucrt64/bin:$PATH" python tools/build_unpack.py --cc '${{ matrix.clang }}' --out "$out"
           PATH="/c/msys64/ucrt64/bin:$PATH" python -c "import sys; sys.path.insert(0, 'tools'); import build_unpack; build_unpack.smoke('$out')"
       - name: Tests

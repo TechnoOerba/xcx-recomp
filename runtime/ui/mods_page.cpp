@@ -26,13 +26,14 @@ static char requested_owner[65],requested_page[65];
 void mods_page_select(const char *owner,const char *page){snprintf(requested_owner,sizeof requested_owner,"%s",owner);snprintf(requested_page,sizeof requested_page,"%s",page);}
 
 // The game-file mods that are on, highest priority first as romfs-enabled.txt lists them (runtime/romfs_mods.c,
-// romfs_mods_priority), with Up and Down to change which one wins, and what the data table merges did this run (runtime/bdat_merge_serve.c). Shown
+// romfs_mods_priority), with Up and Down to change which one wins, and what the data table merges did this run
+// (runtime/bdat_merge_serve.c): a summary per file, then its changes left out (orange) and caveats (yellow). Shown
 // when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
 static void mod_priority(const ModLibView &v,bool idle) {
     static char ids[32][65];static int n;static uint64_t seen=~0ull;static double next;
     double now=ImGui::GetTime();
     if(v.generation!=seen||now>=next){n=romfs_mods_priority(ids,32);seen=v.generation;next=now+1.0;}
-    char line[256];bool merges=bdat_merge_status(0,line,sizeof line)!=0;
+    char line[320];int kind=0;bool merges=bdat_merge_status(0,line,sizeof line,&kind)!=0;
     if(n<2&&!merges)return;
     ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_PRIORITY));
     if(n>=2){
@@ -53,7 +54,11 @@ static void mod_priority(const ModLibView &v,bool idle) {
     if(merges){
         ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));
         ImGui::PushTextWrapPos(0);
-        for(int i=0;bdat_merge_status(i,line,sizeof line);++i)ImGui::TextUnformatted(line);
+        for(int i=0;bdat_merge_status(i,line,sizeof line,&kind);++i){
+            if(kind)ImGui::PushStyleColor(ImGuiCol_Text,kind==1?ImVec4(1.0f,0.7f,0.4f,1):ImVec4(1.0f,0.9f,0.5f,1));
+            ImGui::TextUnformatted(line);
+            if(kind)ImGui::PopStyleColor();
+        }
         ImGui::PopTextWrapPos();
     }
 }

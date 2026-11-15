@@ -1,5 +1,5 @@
 // Merging the BDAT data tables of several game-file mods, so that mods which each ship a whole bdat/common.bdat can
-// be on together (bdat_merge.h has the rules).
+// be on together. The rules, and why: docs/bdat-merge.md.
 //
 // The layout (version 4 with hashed names, as XCX DE 2.0.0 ships it), all little-endian:
 //   file   'BDAT', 0x01001004, table count, file size, then one u32 offset per table; tables are 4-byte aligned
@@ -14,8 +14,7 @@
 // The game's own tables also hold a block of plain-text debug names before the columns. Mod tools drop it, and so
 // does write_table, which only runs for tables merged from several mods; every other table keeps its bytes.
 //
-// Rows are matched by position: the mods made for 2.0.0 edit tables in place, and some append rows at the end. Mod
-// files come from anywhere, so every offset is checked before it is read.
+// Mod files come from anywhere, so every offset is checked before it is read.
 #include "bdat_merge.h"
 
 #include <stdarg.h>
@@ -24,6 +23,7 @@
 #include <string.h>
 
 #define MAX_MODS 64
+#define NONE UINT32_MAX
 
 static const uint8_t TSIZE[14] = {0, 1, 2, 4, 1, 2, 4, 4, 4, 4, 1, 4, 1, 2};
 #define IS_STR(t) ((t) == 7 || (t) == 11)
@@ -39,7 +39,6 @@ typedef struct {
     uint32_t cc, rc, base, ro, rl, so, sl, name, extra;
     const uint8_t *cols;        // cc columns of 3 bytes
     uint32_t *off;              // each column's offset in a row
-    uint32_t *keys;             // column 0 values, sorted (built when a reorder check needs them)
 } Tab;
 
 typedef struct {
@@ -48,10 +47,7 @@ typedef struct {
 } File;
 
 static void file_free(File *f) {
-    for (uint32_t i = 0; f->t && i < f->count; i++) {
-        free(f->t[i].off);
-        free(f->t[i].keys);
-    }
+    for (uint32_t i = 0; f->t && i < f->count; i++) free(f->t[i].off);
     free(f->t);
     f->t = NULL;
 }
@@ -59,6 +55,7 @@ static void file_free(File *f) {
 static const uint8_t *cell(const Tab *t, uint32_t r, uint32_t c) { return t->p + t->ro + (size_t)r * t->rl + t->off[c]; }
 static uint8_t ctype(const Tab *t, uint32_t c) { return t->cols[3 * c]; }
 static uint32_t cname(const Tab *t, uint32_t c) { return rd32(t->p + t->so + rd16(t->cols + 3 * c + 1)); }
+static uint32_t key(const Tab *t, uint32_t r) { return rd32(cell(t, r, 0)); }
 
 // The string a string cell points at (checked when the table was read), its length in *n.
 static const char *cstr(const Tab *t, uint32_t r, uint32_t c, size_t *n) {
@@ -106,21 +103,21 @@ static int read_table(const uint8_t *p, uint32_t len, Tab *t) {
     return 1;
 }
 
-static int read_file(const uint8_t *p, size_t n, File *f, char *why, size_t cap, const char *name) {
+static int read_file(const uint8_t *p, size_t n, File *f, char *why, size_t cap) {
     memset(f, 0, sizeof *f);
     if (n < 16 || n > 0xffffffffu || memcmp(p, "BDAT", 4) || rd32(p + 4) != 0x01001004 || rd32(p + 12) != n) {
-        snprintf(why, cap, "%s: not a BDAT file of the 2.0.0 layout", name);
+        snprintf(why, cap, "not a BDAT file of the 2.0.0 layout");
         return 0;
     }
     f->count = rd32(p + 8);
     if (!f->count || 16 + 4ull * f->count > n || !(f->t = calloc(f->count, sizeof *f->t))) {
-        snprintf(why, cap, "%s: damaged table list", name);
+        snprintf(why, cap, "damaged table list");
         return 0;
     }
     for (uint32_t i = 0; i < f->count; i++) {
         uint32_t s = rd32(p + 16 + 4 * i), e = i + 1 < f->count ? rd32(p + 20 + 4 * i) : (uint32_t)n;
         if (s < 16 + 4 * f->count || e < s || e > n || !read_table(p + s, e - s, &f->t[i])) {
-            snprintf(why, cap, "%s: table %u is damaged", name, i);
+            snprintf(why, cap, "table %u is damaged", i);
             file_free(f);
             return 0;
         }
@@ -150,43 +147,193 @@ static int same_cols(const Tab *a, const Tab *b) {
     return 1;
 }
 
-static int by_u32(const void *a, const void *b) {
-    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
-    return (x > y) - (x < y);
+// ---- sorted keys
+
+typedef struct { uint32_t key, row; } Pair;
+
+static int by_pair(const void *a, const void *b) {
+    const Pair *x = a, *y = b;
+    if (x->key != y->key) return (x->key > y->key) - (x->key < y->key);
+    return (x->row > y->row) - (x->row < y->row);
 }
 
-static int has_key(Tab *t, uint32_t k) {
-    if (!t->keys) {
-        if (!(t->keys = malloc((t->rc ? t->rc : 1) * sizeof *t->keys))) return 1;   // no memory: treat as moved
-        for (uint32_t r = 0; r < t->rc; r++) t->keys[r] = rd32(cell(t, r, 0));
-        qsort(t->keys, t->rc, sizeof *t->keys, by_u32);
-    }
-    return bsearch(&k, t->keys, t->rc, sizeof *t->keys, by_u32) != NULL;
+// The table's (key, row) pairs sorted by key, NULL when out of memory; *unique says whether no key repeats.
+static Pair *sorted_keys(const Tab *t, int *unique) {
+    Pair *p = malloc((t->rc ? t->rc : 1) * sizeof *p);
+    if (!p) return NULL;
+    for (uint32_t r = 0; r < t->rc; r++) p[r] = (Pair){key(t, r), r};
+    qsort(p, t->rc, sizeof *p, by_pair);
+    *unique = 1;
+    for (uint32_t r = 1; r < t->rc; r++)
+        if (p[r].key == p[r - 1].key) *unique = 0;
+    return p;
 }
 
-enum { SAME, CELLS, WHOLE };
+static uint32_t find_key(const Pair *p, uint32_t n, uint32_t k) {
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (p[mid].key < k) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < n && p[lo].key == k ? p[lo].row : NONE;
+}
 
-// How mod table m differs from base table b; *reason says why for WHOLE.
-static int classify(Tab *b, const Tab *m, const char **reason) {
-    if (!same_cols(b, m)) {
-        *reason = "other columns";
-        return WHOLE;
+// A set of u32 values: open addressing, 0 stored apart.
+typedef struct { uint32_t *v; uint32_t cap, n; int zero; } Set;
+
+static int set_add(Set *s, uint32_t x) {
+    if (!x) return s->zero = 1;
+    if (2 * (s->n + 1) > s->cap) {
+        Set t = {calloc(s->cap ? s->cap * 2 : 64, 4), s->cap ? s->cap * 2 : 64, 0, s->zero};
+        if (!t.v) return 0;
+        for (uint32_t i = 0; i < s->cap; i++)
+            if (s->v[i]) set_add(&t, s->v[i]);
+        free(s->v);
+        *s = t;
     }
-    if (m->base != b->base || m->rc < b->rc) {
-        *reason = "rows removed or renumbered";
-        return WHOLE;
+    uint32_t i = (x * 2654435761u) & (s->cap - 1);
+    while (s->v[i] && s->v[i] != x) i = (i + 1) & (s->cap - 1);
+    if (!s->v[i]) {
+        s->v[i] = x;
+        s->n++;
     }
-    int keyed = ctype(b, 0) == 9, changed = m->rc != b->rc;
+    return 1;
+}
+
+static int set_has(const Set *s, uint32_t x) {
+    if (!x) return s->zero;
+    if (!s->cap) return 0;
+    uint32_t i = (x * 2654435761u) & (s->cap - 1);
+    while (s->v[i]) {
+        if (s->v[i] == x) return 1;
+        i = (i + 1) & (s->cap - 1);
+    }
+    return 0;
+}
+
+// ---- one mod's change to one table
+
+enum { SAME, CHANGES, OPAQUE };
+
+typedef struct {
+    uint8_t kind;
+    const char *reason;        // OPAQUE
+    uint32_t *pos;             // per mod row: the base row it is, or NONE (a row the mod adds)
+    uint32_t *mpos;            // per base row: its mod row, or NONE (a row the mod removes)
+    uint8_t *edited;           // per base row: some cell differs
+    uint32_t ndeleted, ninserts;
+    int layout;                // base rows at other numbers or in another order
+} Change;
+
+static void change_free(Change *c) {
+    free(c->pos);
+    free(c->mpos);
+    free(c->edited);
+    memset(c, 0, sizeof *c);
+}
+
+// Half or more of the cells but the key are equal: a row whose key was renamed.
+static int similar(const Tab *a, uint32_t ra, const Tab *b, uint32_t rb) {
+    uint32_t n = a->cc - 1, eq = 0;
+    for (uint32_t c = 1; c < a->cc; c++) eq += (uint32_t)same_cell(a, ra, b, rb, c);
+    return n && eq * 2 >= n;
+}
+
+static int finish(Change *ch, const Tab *b, const Tab *m) {
+    if (!(ch->mpos = malloc((b->rc ? b->rc : 1) * sizeof *ch->mpos)) || !(ch->edited = calloc(b->rc + 1, 1))) return 0;
+    for (uint32_t r = 0; r < b->rc; r++) ch->mpos[r] = NONE;
+    for (uint32_t i = 0; i < m->rc; i++) {
+        uint32_t r = ch->pos[i];
+        if (r == NONE) {
+            ch->ninserts++;
+            continue;
+        }
+        ch->mpos[r] = i;
+        ch->edited[r] = !same_row(b, r, m, i);
+        if (i != r) ch->layout = 1;
+    }
+    int any = ch->ninserts || ch->layout;
     for (uint32_t r = 0; r < b->rc; r++) {
-        if (same_row(b, r, m, r)) continue;
-        changed = 1;
-        uint32_t k = rd32(cell(m, r, 0));
-        if (keyed && k != rd32(cell(b, r, 0)) && has_key(b, k)) {   // the row has another row's key: rows moved
-            *reason = "rows reordered";
-            return WHOLE;
+        ch->ndeleted += ch->mpos[r] == NONE;
+        any |= ch->edited[r];
+    }
+    if (!any && !ch->ndeleted) {
+        change_free(ch);
+        ch->kind = SAME;
+    }
+    return 1;
+}
+
+static int align_keyed(const Tab *b, const Pair *bk, const Tab *m, Change *ch) {
+    if (!(ch->pos = malloc((m->rc ? m->rc : 1) * sizeof *ch->pos))) return 0;
+    int order = 1;
+    uint32_t last = NONE;
+    for (uint32_t i = 0; i < m->rc; i++) {
+        ch->pos[i] = find_key(bk, b->rc, key(m, i));
+        if (ch->pos[i] != NONE) {
+            if (last != NONE && ch->pos[i] <= last) order = 0;
+            last = ch->pos[i];
         }
     }
-    return changed ? CELLS : SAME;
+    if (order) {
+        // rows left over on both sides between the same matched rows: paired in order when similar (renamed keys)
+        uint32_t m0 = 0, b0 = 0;   // the first mod and base rows after the last matched pair
+        for (uint32_t i = 0; i <= m->rc; i++) {
+            if (i < m->rc && ch->pos[i] == NONE) continue;
+            uint32_t b1 = i < m->rc ? ch->pos[i] : b->rc, free_row = b0;
+            for (uint32_t mi = m0; mi < i; mi++)
+                for (uint32_t r = free_row; r < b1; r++)
+                    if (similar(m, mi, b, r)) {
+                        ch->pos[mi] = r;
+                        free_row = r + 1;
+                        break;
+                    }
+            m0 = i + 1;
+            b0 = b1 + 1;
+        }
+    }
+    return finish(ch, b, m);
+}
+
+static int align_positional(const Tab *b, const Pair *bk, const Tab *m, Change *ch) {
+    uint32_t n = b->rc < m->rc ? b->rc : m->rc;
+    for (uint32_t i = 0; bk && i < n; i++)
+        if (key(m, i) != key(b, i) && find_key(bk, b->rc, key(m, i)) != NONE) {
+            ch->kind = OPAQUE;
+            ch->reason = "rows moved (it gives a row another row's key)";
+            return 1;
+        }
+    if (!(ch->pos = malloc((m->rc ? m->rc : 1) * sizeof *ch->pos))) return 0;
+    for (uint32_t i = 0; i < m->rc; i++) ch->pos[i] = i < n ? i : NONE;
+    return finish(ch, b, m);
+}
+
+// bk: base's sorted keys (NULL when column 0 isn't a hash), bunique: no key repeats.
+static int classify(const Tab *b, const Pair *bk, int bunique, const Tab *m, Change *ch) {
+    memset(ch, 0, sizeof *ch);
+    if (!same_cols(b, m)) {
+        ch->kind = OPAQUE;
+        ch->reason = "other columns";
+        return 1;
+    }
+    if (m->base != b->base) {
+        ch->kind = OPAQUE;
+        ch->reason = "another first row number";
+        return 1;
+    }
+    int same = m->rc == b->rc;
+    for (uint32_t r = 0; same && r < b->rc; r++) same = same_row(b, r, m, r);
+    if (same) return 1;
+    ch->kind = CHANGES;
+    if (bk && bunique) {
+        int munique;
+        Pair *mk = sorted_keys(m, &munique);
+        if (!mk) return 0;
+        free(mk);
+        if (munique) return align_keyed(b, bk, m, ch);
+    }
+    return align_positional(b, bk, m, ch);
 }
 
 // ---- writing a merged table
@@ -232,18 +379,12 @@ static uint32_t intern(Interns *in, Buf *st, const char *s, size_t n) {
     return off;
 }
 
-typedef struct { uint32_t key, row; } Pair;
+// Where an output cell comes from: src[t] (0 the base table, k + 1 mods[k]'s), at row r.
+typedef struct { uint32_t r; uint8_t t; } Src;
 
-static int by_pair(const void *a, const void *b) {
-    const Pair *x = a, *y = b;
-    if (x->key != y->key) return (x->key > y->key) - (x->key < y->key);
-    return (x->row > y->row) - (x->row < y->row);
-}
-
-// Table b's columns and base id with rows rows; cell (r, c) comes from src[own[r * cc + c]] at row r. extra is the
-// string table's kept word.
-static int write_table(Buf *out, const Tab *b, const Tab *const *src, const uint8_t *own, uint32_t rows,
-                       uint32_t extra) {
+// Table b's columns and base id with rows rows; cell (r, c) comes from from[r * cc + c]. extra is the string table's
+// kept word.
+static int write_table(Buf *out, const Tab *b, const Tab *const *src, const Src *from, uint32_t rows, uint32_t extra) {
     uint32_t cc = b->cc, rl = b->rl;
     Buf st = {0}, rb = {0};
     Interns in = {0};
@@ -267,16 +408,17 @@ static int write_table(Buf *out, const Tab *b, const Tab *const *src, const uint
     if (!(in.slot = calloc(in.cap, sizeof *in.slot)) || !put(&rb, NULL, (size_t)rl * rows)) goto done;
     for (uint32_t r = 0; r < rows; r++)
         for (uint32_t c = 0; c < cc; c++) {
-            const Tab *s = src[own[(size_t)r * cc + c]];
+            const Src *f = &from[(size_t)r * cc + c];
+            const Tab *s = src[f->t];
             uint8_t *d = rb.p + (size_t)r * rl + b->off[c];
             if (IS_STR(ctype(b, c))) {
                 size_t n;
-                const char *str = cstr(s, r, c, &n);
+                const char *str = cstr(s, f->r, c, &n);
                 uint32_t o = intern(&in, &st, str, n);
                 if (o == UINT32_MAX) goto done;
                 wr32(d, o);
             } else {
-                memcpy(d, cell(s, r, c), TSIZE[ctype(b, c)]);
+                memcpy(d, cell(s, f->r, c), TSIZE[ctype(b, c)]);
             }
         }
     uint32_t keys = 0;
@@ -315,142 +457,448 @@ done:
     return ok;
 }
 
-// ---- merging
+// ---- events
 
-static void notef(BdatNote note, void *ctx, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
-static void notef(BdatNote note, void *ctx, const char *fmt, ...) {
-    if (!note) return;
-    char line[512];
+typedef struct {
+    BdatNote note;
+    void *ctx;
+    BdatSummary *s;
+    const BdatInput *mods;
+} Events;
+
+static void event(Events *ev, int kind, int mod, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static void event(Events *ev, int kind, int mod, const char *fmt, ...) {
+    static const char *const names[] = {"priority", "left out", "caveat"};
+    if (kind == 0) ev->s->priority++;
+    else if (kind == 1) ev->s->left_out++;
+    else ev->s->caveats++;
+    if (!ev->note) return;
+    char line[700];
+    int n = snprintf(line, sizeof line, "%s: ", names[kind]);
+    if (mod >= 0) n += snprintf(line + n, sizeof line - (size_t)n, "%s: ", ev->mods[mod].name);
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(line, sizeof line, fmt, ap);
+    vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
-    note(ctx, line);
+    ev->note(ev->ctx, line);
+}
+enum { PRIORITY, LEFT_OUT, CAVEAT };
+
+static void rowname(const Tab *t, uint32_t r, char *out, size_t cap) {
+    if (ctype(t, 0) == 9) snprintf(out, cap, "row %u (key %08X)", t->base + r, key(t, r));
+    else snprintf(out, cap, "row %u", t->base + r);
+}
+
+// ---- merging one table that several mods change
+
+typedef struct { uint32_t row; uint8_t kind, mod; } Entry;   // kind 0: base row; 1: mods[mod]'s added row
+
+typedef struct {
+    const Tab *b;
+    const Tab *m[MAX_MODS];        // the mods' copies of the table (NULL: the mod's file is left out)
+    Change *ch[MAX_MODS];
+    const Set *refs;               // per mod: the hash values its changes put in cells
+    int n;
+    Events *ev;
+} Job;
+
+static int grow(Entry **v, uint32_t *cap, uint32_t need) {
+    if (need <= *cap) return 1;
+    uint32_t c = *cap ? *cap * 2 : 64;
+    while (c < need) c *= 2;
+    Entry *q = realloc(*v, c * sizeof *q);
+    if (!q) return 0;
+    *v = q;
+    *cap = c;
+    return 1;
+}
+
+// Merges into out; 0 when out of memory.
+static int merge_table(Job *j, int *P, int np, Buf *out, char *why, size_t why_cap) {
+    const Tab *t = j->b;
+    Events *ev = j->ev;
+    char rn[64];
+    int owner = -1;
+    for (int w = 0; w < np; w++) {
+        Change *c = j->ch[P[w]];
+        if (!c->layout && !c->ndeleted) continue;
+        if (owner < 0) owner = P[w];
+        else
+            event(ev, LEFT_OUT, P[w], "table %08X: its removed or reordered rows are not used; %s's row layout is "
+                  "(rows it adds are kept, at the end)", t->name, ev->mods[owner].name);
+    }
+    int keyed = 0;
+    if (ctype(t, 0) == 9) {
+        Pair *bk = sorted_keys(t, &keyed);
+        free(bk);
+    }
+    uint32_t cap = 0, n = 0;
+    Entry *seq = NULL;
+    uint8_t *present = calloc(t->rc + 1, 1);
+    Src *from = NULL;
+    uint8_t *drop = NULL;
+    Set added = {0};
+    int ok = 0;
+    if (!present) goto oom;
+    if (owner >= 0) {
+        const Change *c = j->ch[owner];
+        if (!grow(&seq, &cap, j->m[owner]->rc + 1)) goto oom;
+        for (uint32_t i = 0; i < j->m[owner]->rc; i++)
+            seq[n++] = c->pos[i] != NONE ? (Entry){c->pos[i], 0, 0} : (Entry){i, 1, (uint8_t)owner};
+    } else {
+        if (!grow(&seq, &cap, t->rc + 1)) goto oom;
+        for (uint32_t r = 0; r < t->rc; r++) seq[n++] = (Entry){r, 0, 0};
+    }
+    uint32_t prefix = 0;
+    while (prefix < n && !seq[prefix].kind && seq[prefix].row == prefix) prefix++;
+    for (uint32_t i = 0; i < n; i++)
+        if (!seq[i].kind) present[seq[i].row] = 1;
+    // rows the layout's mod removes: kept for a higher mod's edits or another mod's reference, where no row moves
+    if (owner >= 0)
+        for (uint32_t r = 0; r < t->rc; r++) {
+            if (j->ch[owner]->mpos[r] != NONE) continue;
+            int higher[MAX_MODS], refd[MAX_MODS], nh = 0, nr = 0;
+            for (int w = 0; w < np && P[w] < owner; w++) {
+                Change *c = j->ch[P[w]];
+                if (c->mpos[r] != NONE && c->edited[r]) higher[nh++] = P[w];
+            }
+            for (int k = 0; keyed && k < j->n; k++)
+                if (k != owner && j->m[k] && set_has(&j->refs[k], key(t, r))) refd[nr++] = k;
+            if (!nh && !nr) continue;
+            rowname(t, r, rn, sizeof rn);
+            if (n == r && prefix == r) {
+                if (!grow(&seq, &cap, n + 1)) goto oom;
+                seq[n++] = (Entry){r, 0, 0};
+                present[r] = 1;
+                prefix++;
+                char who[400] = "";
+                size_t wl = 0;
+                for (int k = 0; k < j->n && wl < sizeof who - 70; k++) {
+                    int in = 0;
+                    for (int x = 0; x < nh; x++) in |= higher[x] == k;
+                    for (int x = 0; x < nr; x++) in |= refd[x] == k;
+                    if (in) wl += (size_t)snprintf(who + wl, sizeof who - wl, "%s%s", wl ? ", " : "", ev->mods[k].name);
+                }
+                event(ev, CAVEAT, owner, "table %08X: %s is kept, although it removes it, for %s", t->name, rn, who);
+            } else {
+                for (int x = 0; x < nh; x++)
+                    event(ev, LEFT_OUT, higher[x], "table %08X: its edits to %s: %s removes the row, and putting it "
+                          "back would renumber the rows after it", t->name, rn, ev->mods[owner].name);
+                for (int x = 0; x < nr; x++) {
+                    int dup = 0;
+                    for (int y = 0; y < nh; y++) dup |= higher[y] == refd[x];
+                    if (!dup)
+                        event(ev, CAVEAT, refd[x], "table %08X: it refers to %s, which %s removes", t->name, rn,
+                              ev->mods[owner].name);
+                }
+            }
+        }
+    // edits of lower mods to rows that are gone
+    for (int w = 0; owner >= 0 && w < np; w++) {
+        int k = P[w];
+        if (k <= owner) continue;
+        uint32_t lost = 0, first = NONE;
+        for (uint32_t r = 0; r < t->rc; r++)
+            if (j->ch[k]->mpos[r] != NONE && j->ch[k]->edited[r] && !present[r]) {
+                lost++;
+                if (first == NONE) first = r;
+            }
+        if (lost) {
+            rowname(t, first, rn, sizeof rn);
+            event(ev, LEFT_OUT, k, "table %08X: its edits to %u row%s that %s removes (%s%s)", t->name, lost,
+                  lost > 1 ? "s" : "", ev->mods[owner].name, rn, lost > 1 ? ", ..." : "");
+        }
+    }
+    // rows the other mods add, after the layout's: by key, the higher mod's; without keys, each list once
+    for (uint32_t i = 0; keyed && i < n; i++)
+        if (seq[i].kind && !set_add(&added, key(j->m[seq[i].mod], seq[i].row))) goto oom;
+    int lists[MAX_MODS], nl = 0;
+    for (int w = 0; w < np; w++) {
+        int k = P[w];
+        const Tab *m = j->m[k];
+        const Change *c = j->ch[k];
+        if (k == owner || !c->ninserts) continue;
+        if (!keyed) {
+            int dup = 0;
+            for (int x = 0; x < nl && !dup; x++) {
+                const Tab *o = j->m[lists[x]];
+                const Change *oc = j->ch[lists[x]];
+                if (oc->ninserts != c->ninserts) continue;
+                dup = 1;
+                for (uint32_t a = 0, b2 = 0; dup && a < m->rc; a++) {
+                    if (c->pos[a] != NONE) continue;
+                    while (oc->pos[b2] != NONE) b2++;
+                    dup = same_row(m, a, o, b2++);
+                }
+            }
+            if (dup) continue;
+            lists[nl++] = k;
+        }
+        if (!grow(&seq, &cap, n + c->ninserts + 1)) goto oom;
+        for (uint32_t i = 0; i < m->rc; i++) {
+            if (c->pos[i] != NONE) continue;
+            if (keyed) {
+                uint32_t kv = key(m, i);
+                if (set_has(&added, kv)) {
+                    // added already, by a higher mod (or the layout's): the same row is kept once, silently
+                    for (uint32_t x = 0; x < n; x++)
+                        if (seq[x].kind && key(j->m[seq[x].mod], seq[x].row) == kv) {
+                            if (!same_row(j->m[seq[x].mod], seq[x].row, m, i))
+                                event(ev, PRIORITY, -1, "table %08X: added row (key %08X): %s's, not %s's", t->name,
+                                      kv, ev->mods[seq[x].mod].name, ev->mods[k].name);
+                            break;
+                        }
+                    continue;
+                }
+                if (!set_add(&added, kv)) goto oom;
+            }
+            seq[n++] = (Entry){i, 1, (uint8_t)k};
+        }
+    }
+    // cells: the base row with the edits applied lowest priority first, or the added row
+    uint32_t cc = t->cc;
+    const Tab *src[MAX_MODS + 1];
+    src[0] = t;
+    for (int k = 0; k < j->n; k++) src[k + 1] = j->m[k];
+    if (!(from = malloc(((size_t)n * cc + 1) * sizeof *from)) || !(drop = calloc(n + 1, 1))) goto oom;
+    for (uint32_t i = 0; i < n; i++) {
+        Src *f = from + (size_t)i * cc;
+        if (seq[i].kind) {
+            for (uint32_t c = 0; c < cc; c++) f[c] = (Src){seq[i].row, (uint8_t)(seq[i].mod + 1)};
+            continue;
+        }
+        uint32_t r = seq[i].row;
+        for (uint32_t c = 0; c < cc; c++) f[c] = (Src){r, 0};
+        for (int w = np - 1; w >= 0; w--) {
+            int k = P[w];
+            const Change *ch = j->ch[k];
+            uint32_t mr = ch->mpos[r];
+            if (mr == NONE || !ch->edited[r]) continue;
+            for (uint32_t c = 0; c < cc; c++) {
+                if (same_cell(t, r, j->m[k], mr, c)) continue;
+                if (f[c].t && !same_cell(src[f[c].t], f[c].r, j->m[k], mr, c)) {
+                    rowname(t, r, rn, sizeof rn);
+                    event(ev, PRIORITY, -1, "table %08X %s column %u: %s's value, not %s's", t->name, rn, c,
+                          ev->mods[k].name, ev->mods[f[c].t - 1].name);
+                }
+                f[c] = (Src){mr, (uint8_t)(k + 1)};
+            }
+        }
+    }
+    // keys stay unique: the game's key, then the higher mod's
+    if (keyed) {
+        Pair *at = malloc((n + 1) * sizeof *at);
+        if (!at) goto oom;
+        int again = 1;
+        for (int round = 0; again && round < 4; round++) {
+            again = 0;
+            uint32_t na = 0;
+            for (uint32_t i = 0; i < n; i++)
+                if (!drop[i]) at[na++] = (Pair){rd32(cell(src[from[(size_t)i * cc].t], from[(size_t)i * cc].r, 0)), i};
+            qsort(at, na, sizeof *at, by_pair);
+            for (uint32_t x = 0; x + 1 < na; x++) {
+                if (at[x].key != at[x + 1].key) continue;
+                uint32_t a = at[x].row, b2 = at[x + 1].row;
+                int ra = from[(size_t)a * cc].t ? from[(size_t)a * cc].t - 1 : -1;
+                int rb = from[(size_t)b2 * cc].t ? from[(size_t)b2 * cc].t - 1 : -1;
+                uint32_t lose = rb >= ra ? b2 : a;
+                at[x + 1].row = lose == a ? b2 : a;   // the kept row meets the next one with this key
+                if (seq[lose].kind) {
+                    drop[lose] = 1;
+                    event(ev, LEFT_OUT, seq[lose].mod, "table %08X: its added row (key %08X): another row has that key",
+                          t->name, at[x].key);
+                } else {
+                    rowname(t, seq[lose].row, rn, sizeof rn);
+                    event(ev, LEFT_OUT, from[(size_t)lose * cc].t - 1, "table %08X: its new key %08X for %s: another "
+                          "row has that key", t->name, at[x].key, rn);
+                    from[(size_t)lose * cc] = (Src){seq[lose].row, 0};
+                    again = 1;
+                }
+            }
+        }
+        free(at);
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (drop[i]) continue;
+        seq[kept] = seq[i];
+        memmove(from + (size_t)kept * cc, from + (size_t)i * cc, cc * sizeof *from);
+        kept++;
+    }
+    n = kept;
+    // row numbers against each mod's own copy
+    for (int w = 0; w < np; w++) {
+        int k = P[w];
+        uint32_t moved = 0, at_i = 0, at_p = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t p = !seq[i].kind ? j->ch[k]->mpos[seq[i].row] : seq[i].mod == k ? seq[i].row : NONE;
+            if (p != NONE && p != i) {
+                if (!moved++) {
+                    at_i = i;
+                    at_p = p;
+                }
+            }
+        }
+        if (moved)
+            event(ev, CAVEAT, k, "table %08X: %u of its rows have other row numbers than in its copy (first: row %u "
+                  "is its row %u); what points at them by number may point elsewhere", t->name, moved, t->base + at_i,
+                  t->base + at_p);
+    }
+    if (!write_table(out, t, src, from, n, j->m[P[0]]->extra)) {
+        snprintf(why, why_cap, "table %08X could not be written", t->name);
+        goto done;
+    }
+    ok = 1;
+    goto done;
+oom:
+    snprintf(why, why_cap, "out of memory");
+done:
+    free(added.v);
+    free(seq);
+    free(present);
+    free(from);
+    free(drop);
+    return ok;
+}
+
+// The hash values a mod's changes put in cells other than keys: what its added and edited rows refer to.
+static int refs_of(const File *bf, const File *mf, const Change *ch, Set *out) {
+    for (uint32_t j = 0; j < bf->count; j++) {
+        const Change *c = &ch[j];
+        if (c->kind != CHANGES) continue;
+        const Tab *b = &bf->t[j], *m = &mf->t[j];
+        for (uint32_t i = 0; i < m->rc; i++) {
+            uint32_t r = c->pos[i];
+            if (r != NONE && !c->edited[r]) continue;
+            for (uint32_t col = 1; col < m->cc; col++)
+                if (ctype(m, col) == 9 && (r == NONE || !same_cell(b, r, m, i, col)) && !set_add(out, rd32(cell(m, i, col))))
+                    return 0;
+        }
+    }
+    return 1;
+}
+
+static uint8_t *copy_of(const BdatInput *in, size_t *out_n) {
+    uint8_t *p = malloc(in->size ? in->size : 1);
+    if (p) {
+        memcpy(p, in->data, in->size);
+        *out_n = in->size;
+    }
+    return p;
 }
 
 uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t *out_n, BdatSummary *sum,
                     BdatNote note, void *ctx, char *why, size_t why_cap) {
     BdatSummary s = {0};
+    s.file_mod = -1;
+    Events ev = {note, ctx, &s, mods};
     File bf = {0}, mf[MAX_MODS] = {{0}};
-    uint8_t *kind = NULL;
-    const char **reason = NULL;
+    int live[MAX_MODS], nlive = 0;
+    Change *ch[MAX_MODS] = {0};
+    Set refs[MAX_MODS] = {{0}};
     Buf body = {0};
     uint32_t *offs = NULL;
     uint8_t *result = NULL;
+    Pair **bkeys = NULL;
+    int *bunique = NULL;
+    char r[300];
     if (n < 1 || n > MAX_MODS) {
         snprintf(why, why_cap, "%d mods (1 to %d can be merged)", n, MAX_MODS);
         return NULL;
     }
-    if (!read_file(base->data, base->size, &bf, why, why_cap, base->name)) return NULL;
+    if (!read_file(base->data, base->size, &bf, r, sizeof r)) {
+        snprintf(why, why_cap, "the game's copy: %s", r);
+        return NULL;
+    }
     for (int k = 0; k < n; k++) {
-        if (!read_file(mods[k].data, mods[k].size, &mf[k], why, why_cap, mods[k].name)) goto done;
+        if (!read_file(mods[k].data, mods[k].size, &mf[k], r, sizeof r)) {
+            event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", r);
+            continue;
+        }
         int same = mf[k].count == bf.count;
         for (uint32_t j = 0; same && j < bf.count; j++) same = mf[k].t[j].name == bf.t[j].name;
-        if (!same) {
-            snprintf(why, why_cap, "%s: its list of tables differs from the game's", mods[k].name);
+        if (same) {
+            live[nlive++] = k;
+            continue;
+        }
+        file_free(&mf[k]);
+        if (!nlive) {
+            // the top mod that can be read has another list of tables: its whole file, the others left out
+            for (int x = k + 1; x < n; x++)
+                event(&ev, LEFT_OUT, x, "its changes to this file are not used: %s's copy has another list of tables "
+                      "and is used whole", mods[k].name);
+            s.file_mode = BDAT_FILE_WHOLE;
+            s.file_mod = k;
+            if (!(result = copy_of(&mods[k], out_n))) snprintf(why, why_cap, "out of memory");
             goto done;
         }
+        event(&ev, LEFT_OUT, k, "its changes to this file are not used: its copy has another list of tables");
     }
-    kind = malloc((size_t)bf.count * n);
-    reason = calloc((size_t)bf.count * n, sizeof *reason);
-    offs = malloc(bf.count * sizeof *offs);
-    if (!kind || !reason || !offs) {
-        snprintf(why, why_cap, "out of memory");
+    if (!nlive) {
+        snprintf(why, why_cap, "no mod's copy can be read");
         goto done;
     }
+    if (nlive == 1) {
+        s.file_mode = BDAT_FILE_COPIED;
+        s.file_mod = live[0];
+        if (!(result = copy_of(&mods[live[0]], out_n))) snprintf(why, why_cap, "out of memory");
+        goto done;
+    }
+    // every mod's change to every table, and what its changes refer to
+    bkeys = calloc(bf.count, sizeof *bkeys);
+    bunique = calloc(bf.count, sizeof *bunique);
+    if (!bkeys || !bunique) goto oom;
     for (uint32_t j = 0; j < bf.count; j++)
-        for (int k = 0; k < n; k++)
-            kind[(size_t)j * n + k] = (uint8_t)classify(&bf.t[j], &mf[k].t[j], &reason[(size_t)j * n + k]);
+        if (ctype(&bf.t[j], 0) == 9 && !(bkeys[j] = sorted_keys(&bf.t[j], &bunique[j]))) goto oom;
+    for (int x = 0; x < nlive; x++) {
+        int k = live[x];
+        if (!(ch[k] = calloc(bf.count, sizeof *ch[k]))) goto oom;
+        for (uint32_t j = 0; j < bf.count; j++)
+            if (!classify(&bf.t[j], bkeys[j], bunique[j], &mf[k].t[j], &ch[k][j])) goto oom;
+    }
+    for (int x = 0; x < nlive; x++)
+        if (!refs_of(&bf, &mf[live[x]], ch[live[x]], &refs[live[x]])) goto oom;
+    s.file_mode = BDAT_FILE_MERGED;
+    if (!(offs = malloc(bf.count * sizeof *offs))) goto oom;
     for (uint32_t j = 0; j < bf.count; j++) {
-        Tab *b = &bf.t[j];
-        const uint8_t *kj = kind + (size_t)j * n;
-        int who[MAX_MODS], nw = 0;
-        for (int k = 0; k < n; k++)
-            if (kj[k] != SAME) who[nw++] = k;
+        const Tab *b = &bf.t[j];
+        int touch[MAX_MODS], nt = 0;
+        for (int x = 0; x < nlive; x++)
+            if (ch[live[x]][j].kind != SAME) touch[nt++] = live[x];
         offs[j] = (uint32_t)body.n;
         const Tab *copy = NULL;
-        if (!nw) copy = b;
-        else if (nw == 1) copy = &mf[who[0]].t[j];
-        if (nw) s.tables_changed++;
+        if (!nt) copy = b;
+        else if (nt == 1) copy = &mf[touch[0]].t[j];
+        else if (ch[touch[0]][j].kind == OPAQUE) {
+            copy = &mf[touch[0]].t[j];
+            for (int x = 1; x < nt; x++)
+                event(&ev, LEFT_OUT, touch[x], "table %08X: its changes are not used; %s's whole table is (%s)",
+                      b->name, mods[touch[0]].name, ch[touch[0]][j].reason);
+            s.tables_whole++;
+        }
+        if (nt) s.tables_changed++;
         if (!copy) {
-            // several mods: any change that isn't cell edits, or two different sets of appended rows, means the top
-            // mod's whole table
-            const char *lost = NULL, *by = NULL;
-            int app = -1;
-            for (int w = 0; w < nw && !lost; w++) {
-                int k = who[w];
-                const Tab *m = &mf[k].t[j];
-                if (kj[k] == WHOLE) {
-                    lost = reason[(size_t)j * n + k];
-                    by = mods[k].name;
-                } else if (m->rc > b->rc) {
-                    if (app < 0) {
-                        app = k;
-                        continue;
-                    }
-                    const Tab *a = &mf[app].t[j];
-                    int same = a->rc == m->rc;
-                    for (uint32_t r = b->rc; same && r < m->rc; r++) same = same_row(a, r, m, r);
-                    if (!same) {
-                        lost = "add different rows";
-                        by = NULL;
-                    }
-                }
+            int P[MAX_MODS], np = 0;
+            for (int x = 0; x < nt; x++) {
+                if (ch[touch[x]][j].kind == OPAQUE)
+                    event(&ev, LEFT_OUT, touch[x], "table %08X: its change is not used (%s, and %s changes the table "
+                          "too)", b->name, ch[touch[x]][j].reason, mods[touch[0]].name);
+                else P[np++] = touch[x];
             }
-            if (lost) {
-                copy = &mf[who[0]].t[j];
-                s.tables_whole++;
-                char losers[400] = "";
-                size_t ln = 0;
-                for (int w = 1; w < nw && ln < sizeof losers - 80; w++)
-                    ln += (size_t)snprintf(losers + ln, sizeof losers - ln, "%s%s", w > 1 ? ", " : "",
-                                           mods[who[w]].name);
-                if (by)
-                    notef(note, ctx, "table %08X: %s's whole table is used (%s: %s); left out: %s", b->name,
-                          mods[who[0]].name, by, lost, losers);
-                else
-                    notef(note, ctx, "table %08X: %s's whole table is used (two mods %s); left out: %s", b->name,
-                          mods[who[0]].name, lost, losers);
+            if (np == 1) {
+                copy = &mf[P[0]].t[j];
             } else {
-                uint32_t rows = app >= 0 ? mf[app].t[j].rc : b->rc;
-                uint8_t *own = calloc((size_t)rows * b->cc, 1);   // 0 = base, k + 1 = mods[k]
-                const Tab *src[MAX_MODS + 1];
-                src[0] = b;
-                for (int k = 0; k < n; k++) src[k + 1] = &mf[k].t[j];
-                if (!own) {
-                    snprintf(why, why_cap, "out of memory");
-                    goto done;
+                Job job = {.b = b, .refs = refs, .n = n, .ev = &ev};
+                for (int k = 0; k < n; k++) {
+                    job.m[k] = mf[k].t ? &mf[k].t[j] : NULL;
+                    job.ch[k] = ch[k] ? &ch[k][j] : NULL;
                 }
-                if (app >= 0) memset(own + (size_t)b->rc * b->cc, app + 1, (size_t)(rows - b->rc) * b->cc);
-                for (int w = nw - 1; w >= 0; w--) {   // lowest priority first, so the top mod is applied last
-                    int k = who[w];
-                    const Tab *m = &mf[k].t[j];
-                    for (uint32_t r = 0; r < b->rc; r++)
-                        for (uint32_t c = 0; c < b->cc; c++) {
-                            if (same_cell(b, r, m, r, c)) continue;
-                            uint8_t *o = own + (size_t)r * b->cc + c;
-                            if (*o && !same_cell(src[*o], r, m, r, c)) {
-                                s.cells_overridden++;
-                                notef(note, ctx, "table %08X row %u column %u: %s's value, not %s's", b->name,
-                                      b->base + r, c, mods[k].name, mods[*o - 1].name);
-                            }
-                            *o = (uint8_t)(k + 1);
-                        }
-                }
-                int ok = write_table(&body, b, src, own, rows, mf[who[0]].t[j].extra);
-                free(own);
-                if (!ok) {
-                    snprintf(why, why_cap, "table %08X could not be written", b->name);
-                    goto done;
-                }
+                if (!merge_table(&job, P, np, &body, why, why_cap)) goto done;
                 s.tables_merged++;
                 continue;
             }
         }
-        if (!put(&body, copy->p, copy->len)) {
-            snprintf(why, why_cap, "out of memory");
-            goto done;
-        }
+        if (!put(&body, copy->p, copy->len)) goto oom;
     }
     size_t head = 16 + 4 * (size_t)bf.count, total = head + body.n;
     if (total > 0xffffffffu || !(result = malloc(total))) {
@@ -464,30 +912,43 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     for (uint32_t j = 0; j < bf.count; j++) wr32(result + 16 + 4 * j, (uint32_t)(head + offs[j]));
     memcpy(result + head, body.p, body.n);
     *out_n = total;
-    if (sum) *sum = s;
+    goto done;
+oom:
+    snprintf(why, why_cap, "out of memory");
 done:
+    if (bkeys)
+        for (uint32_t j = 0; j < bf.count; j++) free(bkeys[j]);
+    free(bkeys);
+    free(bunique);
+    for (int k = 0; k < n; k++) {
+        if (ch[k])
+            for (uint32_t j = 0; j < bf.count; j++) change_free(&ch[k][j]);
+        free(ch[k]);
+        free(refs[k].v);
+        file_free(&mf[k]);
+    }
     file_free(&bf);
-    for (int k = 0; k < n; k++) file_free(&mf[k]);
-    free(kind);
-    free(reason);
     free(offs);
     free(body.p);
+    if (sum) *sum = s;
     return result;
 }
 
 int bdat_rewrite_check(const uint8_t *data, size_t size) {
     File f;
     char why[200];
-    if (!read_file(data, size, &f, why, sizeof why, "file")) return -1;
+    if (!read_file(data, size, &f, why, sizeof why)) return -1;
     int bad = 0;
     for (uint32_t j = 0; j < f.count; j++) {
         Tab *t = &f.t[j];
-        uint8_t *own = calloc((size_t)t->rc * t->cc + 1, 1);
+        Src *from = malloc(((size_t)t->rc * t->cc + 1) * sizeof *from);
         const Tab *src[1] = {t};
         Buf out = {0};
-        if (!own || !write_table(&out, t, src, own, t->rc, t->extra) || out.n != t->len || memcmp(out.p, t->p, t->len))
+        for (uint32_t r = 0; from && r < t->rc; r++)
+            for (uint32_t c = 0; c < t->cc; c++) from[(size_t)r * t->cc + c] = (Src){r, 0};
+        if (!from || !write_table(&out, t, src, from, t->rc, t->extra) || out.n != t->len || memcmp(out.p, t->p, t->len))
             bad++;
-        free(own);
+        free(from);
         free(out.p);
     }
     file_free(&f);

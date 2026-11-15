@@ -1,10 +1,13 @@
-"""runtime/bdat_merge.c on made-up BDAT files: cell merges, priority, appended rows, the tables taken whole from the top
-mod, refused files and the writer's round trip. No game data: the tables are written here.
+"""runtime/bdat_merge.c on made-up BDAT files, one case per rule of docs/bdat-merge.md: cells and priority, opaque
+changes, rows matched by key and renamed keys, row layouts, removed rows put back or not, references, unique keys,
+tables without unique keys, files that can't be merged, and the writer's round trip. No game data: the tables are
+written here.
 
     python tests/bdat_merge_test.py        (needs clang: MSYS2 UCRT64, or XCX_CLANG=<path to clang>)
 
 With XCX_BDAT_FILES=<a.bdat;b.bdat;...> it also checks that the writer rebuilds every table of those files (mods'
-copies of bdat/common.bdat, for example) byte for byte.
+copies of bdat/common.bdat, for example) byte for byte. With XCX_BDAT_MERGE_PY=<script> the merge cases run on a
+script with tests/bdat_merge_check.c's command line instead (another implementation of the rules, to compare).
 """
 import os
 import shutil
@@ -114,6 +117,7 @@ def read_file(b):
 
 
 COLS = [(0x11111111, 9), (0x22222222, 1), (0x33333333, 5), (0x44444444, 8), (0x55555555, 7), (0x66666666, 13)]
+REF_COLS = [(0x77777771, 9), (0x77777772, 9), (0x77777773, 1)]   # column 1 refers to rows of table 0 by key
 
 
 def make_rows(n, seed):
@@ -122,11 +126,15 @@ def make_rows(n, seed):
 
 
 def game():
+    """0, 1: keyed; 2: keyed, base id 10; 3: keyed, three columns; 4: duplicate keys (matched by row number);
+    5: keyed, column 1 refers to table 0's keys."""
     return [Table(0xA0000001, COLS, make_rows(8, 0), debug=True, extra=0x12345678),
             Table(0xA0000002, COLS, make_rows(6, 1), debug=True, extra=0x9abcdef0),
             Table(0xA0000003, [(0x77777777, 9), (0x88888888, 2)], [(0x5000 + r, r) for r in range(5)], base=10,
                   debug=True),
-            Table(0xA0000004, COLS[:3], [(0x6000 + r, r, r) for r in range(4)], debug=True)]
+            Table(0xA0000004, COLS[:3], [(0x6000 + r, r, r) for r in range(4)], debug=True),
+            Table(0xA0000005, COLS[:3], [(0x6100 + r // 2, r, r) for r in range(6)], debug=True),
+            Table(0xA0000006, REF_COLS, [(0x7000 + r, 0x1000 + r, r) for r in range(3)], debug=True)]
 
 
 def mod_of(tables):
@@ -145,66 +153,101 @@ def edit(t, r, c, v):
     t.rows[r] = tuple(row)
 
 
-@unittest.skipUnless(clang(), 'needs clang (MSYS2 UCRT64, or XCX_CLANG)')
+def keys(t):
+    return [r[0] for r in t.rows]
+
+
+def engine():
+    """('c', clang) or ('py', prototype path), or None."""
+    py = os.environ.get('XCX_BDAT_MERGE_PY')
+    if py:
+        return 'py', py
+    return ('c', clang()) if clang() else None
+
+
+@unittest.skipUnless(engine(), 'needs clang (MSYS2 UCRT64, or XCX_CLANG)')
 class BdatMerge(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.dir = Path(cls.tmp.name)
-        cls.exe = cls.dir / ('bdat_merge_check' + ('.exe' if os.name == 'nt' else ''))
+        kind, path = engine()
+        if kind == 'py':
+            cls.cmd = [sys.executable, path]
+            return
+        exe = cls.dir / ('bdat_merge_check' + ('.exe' if os.name == 'nt' else ''))
         rt = ROOT / 'runtime'
-        subprocess.run([clang(), '-O1', '-Wall', '-Werror', f'-I{rt}', str(ROOT / 'tests/bdat_merge_check.c'),
-                        str(rt / 'bdat_merge.c'), '-o', str(cls.exe)], check=True)
+        subprocess.run([path, '-O1', '-Wall', '-Werror', f'-I{rt}', str(ROOT / 'tests/bdat_merge_check.c'),
+                        str(rt / 'bdat_merge.c'), '-o', str(exe)], check=True)
+        cls.cmd = [str(exe)]
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
-
-    def merge(self, base, *mods, expect=0):
-        """mods: (name, tables) highest priority first. Returns (tables, notes, summary dict)."""
-        args = [str(self.exe), 'merge', self.put('game.bdat', write_file(base)), str(self.dir / 'out.bdat')]
-        for name, tables in mods:
-            args.append('%s=%s' % (name, self.put(name + '.bdat', write_file(tables))))
-        r = subprocess.run(args, capture_output=True, text=True)
-        self.assertEqual(r.returncode, expect, r.stdout + r.stderr)
-        lines = r.stdout.splitlines()
-        if expect:
-            return None, lines, None
-        notes = [x[5:] for x in lines if x.startswith('note ')]
-        summary = dict(kv.split('=') for kv in next(x for x in lines if x.startswith('summary ')).split()[1:])
-        return read_file((self.dir / 'out.bdat').read_bytes()), notes, {k: int(v) for k, v in summary.items()}
 
     def put(self, name, data):
         p = self.dir / name
         p.write_bytes(data)
         return str(p)
 
+    def merge(self, base, *mods, expect=0):
+        """mods: (name, tables or bytes) highest priority first. Returns (tables, notes, summary)."""
+        args = self.cmd + ['merge', self.put('game.bdat', write_file(base)), str(self.dir / 'out.bdat')]
+        for name, tables in mods:
+            data = tables if isinstance(tables, bytes) else write_file(tables)
+            args.append('%s=%s' % (name, self.put(name + '.bdat', data)))
+        r = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(r.returncode, expect, r.stdout + r.stderr)
+        lines = r.stdout.splitlines()
+        notes = [x[5:] for x in lines if x.startswith('note ')]
+        if expect:
+            return None, notes, lines
+        summary = dict(kv.split('=', 1) for kv in next(x for x in lines if x.startswith('summary ')).split()[1:])
+        summary = {k: v if k == 'file' else int(v) for k, v in summary.items()}
+        return read_file((self.dir / 'out.bdat').read_bytes()), notes, summary
+
+    def has(self, notes, *parts):
+        self.assertTrue(any(all(p in n for p in parts) for n in notes), '%s not in %s' % (parts, notes))
+
+    # ---- the writer
+
     def test_round_trip(self):
+        if self.cmd[0] == sys.executable:
+            self.skipTest('the C writer only')
         tables = mod_of(game())
         edit(tables[0], 2, 4, b'')
         path = self.put('rt.bdat', write_file(tables))
-        out = subprocess.run([str(self.exe), 'rewrite', path], capture_output=True, text=True, check=True).stdout
+        out = subprocess.run(self.cmd + ['rewrite', path], capture_output=True, text=True, check=True).stdout
         self.assertEqual(out.split()[-1], '0')
+
+    def test_real_files_round_trip(self):
+        files = [f for f in os.environ.get('XCX_BDAT_FILES', '').split(';') if f]
+        if not files or self.cmd[0] == sys.executable:
+            self.skipTest('XCX_BDAT_FILES not set (the C writer only)')
+        out = subprocess.run(self.cmd + ['rewrite', *files], capture_output=True, text=True, check=True).stdout
+        for line in out.splitlines():
+            self.assertTrue(line.endswith(' 0'), line)
+
+    # ---- cells and whole tables
 
     def test_cells_merge_and_the_top_mod_wins_a_clash(self):
         g = game()
         a, b = mod_of(g), mod_of(g)
-        edit(a[0], 1, 2, 100)            # both set table 1 row 1 column 2
+        edit(a[0], 1, 2, 100)            # both set table 0 row 1 column 2
         edit(b[0], 1, 2, 200)
         edit(b[0], 2, 3, 9.5)            # only B
         edit(a[0], 3, 4, b'from a')      # only A, a string
         edit(b[0], 4, 4, b'name1')       # B reuses a string that is already there
+        edit(b[0], 5, 1, 9)              # both set the same value: no clash
+        edit(a[0], 5, 1, 9)
         for order, winner in (((('a', a), ('b', b)), 100), ((('b', b), ('a', a)), 200)):
             out, notes, s = self.merge(g, *order)
             t = out[0]
             self.assertEqual(t.rows[1][2], winner)
-            self.assertEqual(t.rows[2][3], 9.5)
-            self.assertEqual(t.rows[3][4], b'from a')
-            self.assertEqual(t.rows[4][4], b'name1')
-            self.assertEqual(t.rows[5], g[0].rows[5])
-            self.assertEqual(s, {'changed': 1, 'merged': 1, 'whole': 0, 'overridden': 1})
-            self.assertEqual(len(notes), 1)
-            self.assertIn("%s's value, not %s's" % (order[0][0], order[1][0]), notes[0])
+            self.assertEqual((t.rows[2][3], t.rows[3][4], t.rows[4][4], t.rows[5][1]), (9.5, b'from a', b'name1', 9))
+            self.assertEqual(t.rows[6], g[0].rows[6])
+            self.assertEqual((s['changed'], s['merged'], s['priority'], s['leftout'], s['caveat']), (1, 1, 1, 0, 0))
+            self.has(notes, 'priority', "column 2: %s's value, not %s's" % (order[0][0], order[1][0]))
             self.assertEqual([x.rows for x in out[1:]], [x.rows for x in g[1:]])
 
     def test_tables_keep_their_bytes(self):
@@ -212,96 +255,183 @@ class BdatMerge(unittest.TestCase):
         a, b = mod_of(g), mod_of(g)
         edit(a[1], 0, 1, 7)
         del b[2].rows[4]                 # one mod only: any change is fine, its own table is used
-        raw = write_file(g)
         out, notes, s = self.merge(g, ('a', a), ('b', b))
         got = (self.dir / 'out.bdat').read_bytes()
-        self.assertEqual(s['changed'], 2)
-        self.assertEqual(s['merged'], 0)
-        self.assertEqual(out[2].rows, b[2].rows)
-        self.assertEqual(out[1].rows, a[1].rows)
-        # unchanged tables are the game's bytes, debug block included
-        self.assertIn(write_table(g[0]), got)
-        self.assertIn(write_table(g[3]), got)
-        self.assertIn(write_table(a[1]), got)
-        self.assertIn(write_table(b[2]), got)
+        self.assertEqual((s['changed'], s['merged']), (2, 0))
+        self.assertEqual((out[1].rows, out[2].rows), (a[1].rows, b[2].rows))
+        for t in (g[0], g[3], a[1], b[2]):   # unchanged tables are the game's bytes, debug block included
+            self.assertIn(write_table(t), got)
         self.assertNotIn(write_table(g[1]), got)
-        self.assertLess(len(got), len(raw))
 
-    def test_appended_rows(self):
+    def test_opaque_changes(self):
+        for top in ('a', 'b'):
+            with self.subTest(top=top):
+                g = game()
+                a, b = mod_of(g), mod_of(g)
+                edit(a[1], 2, 2, 77)
+                b[1].cols, b[1].rows = b[1].cols[:-1], [r[:-1] for r in b[1].rows]   # B drops a column
+                order = (('a', a), ('b', b)) if top == 'a' else (('b', b), ('a', a))
+                out, notes, s = self.merge(g, *order)
+                if top == 'b':
+                    self.assertEqual((out[1].cols, out[1].rows), (b[1].cols, b[1].rows))
+                    self.assertEqual(s['whole'], 1)
+                    self.has(notes, 'left out: a:', "b's whole table is (other columns)")
+                else:
+                    self.assertEqual((out[1].cols, out[1].rows), (a[1].cols, a[1].rows))
+                    self.has(notes, 'left out: b:', 'other columns')
+                self.assertEqual(s['leftout'], 1)
+
+    # ---- rows
+
+    def test_rows_added_by_several_mods(self):
         g = game()
         a, b = mod_of(g), mod_of(g)
         edit(a[0], 0, 1, 50)
         b[0].rows += [(0x9001, 1, 2, 3.0, b'new row', 4), (0x9002, 5, 6, 7.0, b'', 8)]
         out, notes, s = self.merge(g, ('a', a), ('b', b))
-        self.assertEqual(out[0].rows[:-2], a[0].rows)
-        self.assertEqual(out[0].rows[-2:], b[0].rows[-2:])
+        self.assertEqual(out[0].rows, a[0].rows + b[0].rows[-2:])
         self.assertEqual(s['merged'], 1)
-        a[0].rows += b[0].rows[-2:]      # the same rows from both: merged once
-        out, notes, s = self.merge(g, ('a', a), ('b', b))
-        self.assertEqual(len(out[0].rows), len(g[0].rows) + 2)
-        self.assertEqual(s['merged'], 1)
-        a[0].rows[-1] = (0x9003,) + a[0].rows[-1][1:]   # different rows: the top mod's whole table
+        a[0].rows += [b[0].rows[-2]]                          # the same row from both: kept once, silently
+        a[0].rows += [(0x9002, 9, 9, 9.0, b'a', 9)]           # the same key, other cells: the higher mod's
+        a[0].rows += [(0x9003, 0, 0, 0.0, b'', 0)]            # another key: kept too
         out, notes, s = self.merge(g, ('a', a), ('b', b))
         self.assertEqual(out[0].rows, a[0].rows)
-        self.assertEqual(s['whole'], 1)
-        self.assertIn('two mods add different rows', notes[0])
+        self.assertEqual((s['priority'], s['leftout']), (1, 0))
+        self.has(notes, 'priority', "added row (key 00009002): a's, not b's")
 
-    def test_whole_tables(self):
-        cases = {
-            'rows removed or renumbered': lambda t: t.rows.pop(),
-            'other columns': lambda t: (setattr(t, 'cols', t.cols[:-1]), setattr(t, 'rows', [r[:-1] for r in t.rows])),
-            'rows reordered': lambda t: t.rows.__setitem__(slice(0, 2), [t.rows[1], t.rows[0]]),
-        }
-        for reason, change in cases.items():
-            with self.subTest(reason):
-                g = game()
-                a, b = mod_of(g), mod_of(g)
-                edit(a[1], 2, 2, 77)
-                change(b[1])
-                for (top, tt), (other, ot) in ((('a', a), ('b', b)), (('b', b), ('a', a))):
-                    out, notes, s = self.merge(g, (top, tt), (other, ot))
-                    self.assertEqual(out[1].rows, tt[1].rows)
-                    self.assertEqual(out[1].cols, tt[1].cols)
-                    self.assertEqual(s['whole'], 1)
-                    self.assertEqual(len(notes), 1)
-                    self.assertIn("%s's whole table is used (b: %s); left out: %s" % (top, reason, other), notes[0])
-
-    def test_a_renamed_key_is_an_edit(self):
+    def test_a_renamed_key_is_the_same_row(self):
         g = game()
         a, b = mod_of(g), mod_of(g)
-        edit(a[0], 3, 0, 0xdeadbeef)     # a new key: an edit, not a reorder
-        edit(b[0], 3, 1, 9)
+        edit(a[0], 3, 0, 0xdeadbeef)     # A renames row 3; its other cells stay
+        edit(b[0], 3, 2, 99)             # B edits row 3 under its old key
+        b[0].rows.insert(0, (0x9000, 0, 0, 0.0, b'', 0))     # and adds a row at the top, so the match is by key
         out, notes, s = self.merge(g, ('a', a), ('b', b))
-        self.assertEqual(out[0].rows[3][:2], (0xdeadbeef, 9))
-        self.assertEqual(s['merged'], 1)
+        t = out[0]
+        k = keys(t).index(0xdeadbeef)
+        self.assertEqual(t.rows[k][2], 99)
+        self.assertNotIn(0x1003, keys(t))
+        self.assertEqual(len(t.rows), 9)
 
-    def test_refused(self):
+    def test_rows_removed_in_the_middle(self):
         g = game()
-        a = mod_of(g)
-        _, lines, _ = self.merge(g, ('a', a), ('b', mod_of(g)[:3]), expect=2)
-        self.assertIn('unmergeable b: its list of tables differs', lines[-1])
-        good = write_file(a)
+        a, b = mod_of(g), mod_of(g)
+        del b[0].rows[3]                 # B removes row 3: its row layout
+        edit(a[0], 5, 1, 55)             # A edits a row after it, by key
+        edit(a[0], 3, 1, 33)             # and the removed row
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        t = out[0]
+        self.assertEqual(keys(t), keys(b[0]))
+        self.assertEqual(t.rows[keys(t).index(0x1005)][1], 55)
+        self.has(notes, 'left out: a:', 'putting it back would renumber')
+        self.has(notes, 'caveat: a:', 'other row numbers than in its copy')
+        out, notes, s = self.merge(g, ('b', b), ('a', a))      # B on top: A's edit to the removed row is lost
+        self.assertEqual(keys(out[0]), keys(b[0]))
+        self.has(notes, 'left out: a:', 'that b removes')
+
+    def test_rows_removed_at_the_end(self):
+        g = game()
+        a, b = mod_of(g), mod_of(g)
+        del b[0].rows[6:]                # B removes rows 6 and 7
+        edit(a[0], 6, 1, 66)             # A (higher) edits row 6: it comes back at its own number
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual(keys(out[0]), keys(g[0])[:7])
+        self.assertEqual(out[0].rows[6][1], 66)
+        self.has(notes, 'caveat: b:', 'row 7 (key 00001006) is kept, although it removes it, for a')
+        a2 = mod_of(g)
+        edit(a2[0], 7, 1, 77)            # row 7 alone can't come back at its number
+        out, notes, s = self.merge(g, ('a', a2), ('b', b))
+        self.assertEqual(keys(out[0]), keys(b[0]))
+        self.has(notes, 'left out: a:', 'putting it back would renumber')
+        out, notes, s = self.merge(g, ('b', b), ('a', a))      # A lower: the removal stands
+        self.assertEqual(keys(out[0]), keys(b[0]))
+        self.has(notes, 'left out: a:', 'that b removes')
+
+    def test_a_row_another_mod_refers_to_is_kept(self):
+        g = game()
+        b, c = mod_of(g), mod_of(g)
+        del b[0].rows[7]                 # B removes the last row of table 0
+        edit(b[0], 0, 1, 1)
+        c[5].rows.append((0x7003, 0x1007, 3))     # C adds a row to table 5 that refers to it
+        edit(c[0], 1, 1, 2)
+        out, notes, s = self.merge(g, ('b', b), ('c', c))
+        self.assertIn(0x1007, keys(out[0]))
+        self.has(notes, 'caveat: b:', 'kept, although it removes it, for c')
+        b2 = mod_of(g)
+        del b2[0].rows[2]                # in the middle it can't come back: reported
+        c[5].rows[-1] = (0x7003, 0x1002, 3)
+        out, notes, s = self.merge(g, ('b', b2), ('c', c))
+        self.assertNotIn(0x1002, keys(out[0]))
+        self.has(notes, 'caveat: c:', 'it refers to row 3 (key 00001002), which b removes')
+
+    def test_two_row_layouts(self):
+        g = game()
+        a, b = mod_of(g), mod_of(g)
+        del a[0].rows[2]
+        del b[0].rows[4]
+        b[0].rows.append((0x9009, 1, 1, 1.0, b'b', 1))
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual(keys(out[0]), keys(a[0]) + [0x9009])
+        self.has(notes, 'left out: b:', "a's row layout is")
+
+    def test_keys_stay_unique(self):
+        g = game()
+        a, b = mod_of(g), mod_of(g)
+        edit(a[0], 3, 0, 0x9999)                          # A renames row 3 to 9999
+        b[0].rows.append((0x9999, 1, 2, 3.0, b'b', 4))     # B adds a row 9999
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual(keys(out[0]).count(0x9999), 1)
+        self.assertEqual(out[0].rows[3][0], 0x9999)
+        self.has(notes, 'left out: b:', 'its added row (key 00009999): another row has that key')
+        out, notes, s = self.merge(g, ('b', b), ('a', a))
+        self.assertEqual(keys(out[0]).count(0x9999), 1)
+        self.assertEqual(out[0].rows[3][0], 0x1003)
+        self.has(notes, 'left out: a:', 'its new key 00009999 for row 4')
+
+    def test_tables_without_unique_keys(self):
+        g = game()
+        a, b = mod_of(g), mod_of(g)
+        a[4].rows.append((0x6200, 1, 1))
+        b[4].rows.append((0x6201, 2, 2))
+        edit(b[4], 1, 2, 5)
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual(out[4].rows[6:], [a[4].rows[-1], b[4].rows[-1]])
+        self.assertEqual(out[4].rows[1][2], 5)
+        self.has(notes, 'caveat: b:', '1 of its rows have other row numbers')
+        b2 = mod_of(g)
+        edit(b2[4], 0, 0, 0x6102)        # a row given another row's key: rows moved, B's table can't be matched
+        out, notes, s = self.merge(g, ('a', a), ('b', b2))
+        self.assertEqual(out[4].rows, a[4].rows)
+        self.has(notes, 'left out: b:', 'rows moved')
+
+    # ---- files
+
+    def test_files_that_cant_be_merged(self):
+        g = game()
+        a, b = mod_of(g), mod_of(g)
+        edit(a[0], 0, 1, 1)
+        edit(b[0], 0, 2, 2)
+        out, notes, s = self.merge(g, ('a', a), ('b', b[:5]))      # B lacks a table: left out
+        self.assertEqual(s['file'], 'copied:a')
+        self.assertEqual(out[0].rows, a[0].rows)
+        self.has(notes, 'left out: b:', 'another list of tables')
+        out, notes, s = self.merge(g, ('b', b[:5]), ('a', a))      # on top: its whole file
+        self.assertEqual(s['file'], 'whole:b')
+        self.assertEqual(len(out), 5)
+        self.has(notes, 'left out: a:', "b's copy has another list of tables and is used whole")
+        good = write_file(b)
         t0 = struct.unpack_from('<I', good, 16)[0]
         ro = struct.unpack_from('<I', good, t0 + 32)[0]
-        bad_string = bytearray(good)   # row 0's string cell (column 4, at byte 11 of the row) points past the strings
+        bad_string = bytearray(good)     # row 0's string cell (column 4, byte 11 of the row) points past the strings
         struct.pack_into('<I', bad_string, t0 + ro + 11, 0xffffff00)
         for name, data in (('short', good[:100]), ('magic', b'XDAT' + good[4:]),
                            ('offset', good[:16] + struct.pack('<I', len(good) + 8) + good[20:]),
                            ('string', bytes(bad_string))):
             with self.subTest(name):
-                path = self.put('bad.bdat', data)
-                r = subprocess.run([str(self.exe), 'merge', self.put('game.bdat', write_file(g)),
-                                    str(self.dir / 'out.bdat'), 'a=' + path], capture_output=True, text=True)
-                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-                self.assertIn('unmergeable a:', r.stdout)
-
-    def test_real_files_round_trip(self):
-        files = [f for f in os.environ.get('XCX_BDAT_FILES', '').split(';') if f]
-        if not files:
-            self.skipTest('XCX_BDAT_FILES not set')
-        out = subprocess.run([str(self.exe), 'rewrite', *files], capture_output=True, text=True, check=True).stdout
-        for line in out.splitlines():
-            self.assertTrue(line.endswith(' 0'), line)
+                out, notes, s = self.merge(g, ('a', a), ('b', data))
+                self.assertEqual(s['file'], 'copied:a')
+                self.has(notes, 'left out: b:', "can't be read")
+        _, notes, lines = self.merge(g, ('a', good[:100]), ('b', good[:50]), expect=2)
+        self.assertTrue(any(x.startswith('unmergeable') for x in lines), lines)
 
 
 if __name__ == '__main__':

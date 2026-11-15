@@ -8,7 +8,8 @@
 //
 // The merged file is named after a SHA-256 of the game's copy and the mods' copies in order, so a set of inputs is
 // merged once and a change to any of them (a mod update, another order) makes a new file. Older merges of the same
-// game file are deleted. Next to the file, <file>.txt lists the mods and every clash.
+// game file are deleted. Next to the file, <file>.txt lists the mods, one line per event (bdat_merge.h) and, last,
+// the summary, which a later start shows again when it reuses the file.
 #include "bdat_merge.h"
 
 #include <stdarg.h>
@@ -23,15 +24,17 @@
 #include "sha256.h"
 #include "platform/platform.h"
 
-#define VERSION "bdat-merge 1"   // part of the cache name: a change to the merge rules makes new files
-#define LOG_NOTES 20             // clash lines in the log per merge; the report file has all of them
-#define STATUS_CAP 16
+#define VERSION "bdat-merge 2"   // part of the cache name: a change to the merge rules makes new files
+#define LOG_NOTES 20             // event lines in the log per merge; the report file has all of them
+#define STATUS_CAP 48
+#define STATUS_EVENTS 8          // left-out and caveat lines per merge in the Mods tab; the report has all
 
 static PlatMutex lock = PLAT_MUTEX_INIT;     // one merge at a time; guards the archive index and the status lines
 static uint8_t *arh;
 static uint64_t arh_size;
 static int arh_state;                        // 0 not read, 1 read, -1 missing
-static char status[STATUS_CAP][256];
+static char status[STATUS_CAP][320];
+static int status_kind[STATUS_CAP];
 static int nstatus;
 
 // ---- XXH64, seed 0 (the archive's path hash), after the xxHash specification
@@ -144,24 +147,30 @@ static uint8_t *game_copy(const char *mount, const char *key, size_t *n, char *w
     return NULL;
 }
 
-// ---- status lines and notes
+// ---- status lines and events
 
-static void add_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void add_status(const char *fmt, ...) {
+// kind 0: a summary line; 1: a change left out; 2: a caveat. The oldest lines go first when the list is full.
+static void add_status(int kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void add_status(int kind, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     if (nstatus == STATUS_CAP) {
         memmove(status, status + 1, sizeof status[0] * (STATUS_CAP - 1));
+        memmove(status_kind, status_kind + 1, sizeof status_kind[0] * (STATUS_CAP - 1));
         nstatus--;
     }
+    status_kind[nstatus] = kind;
     vsnprintf(status[nstatus++], sizeof status[0], fmt, ap);
     va_end(ap);
 }
 
-int bdat_merge_status(int i, char *out, size_t cap) {
+int bdat_merge_status(int i, char *out, size_t cap, int *kind) {
     plat_mutex_lock_shared(&lock);
     int ok = i >= 0 && i < nstatus;
-    if (ok) snprintf(out, cap, "%s", status[i]);
+    if (ok) {
+        snprintf(out, cap, "%s", status[i]);
+        if (kind) *kind = status_kind[i];
+    }
     plat_mutex_unlock_shared(&lock);
     return ok;
 }
@@ -191,6 +200,24 @@ static void on_note(void *ctx, const char *line) {
     add_line(s, line);
 }
 
+// The left-out and caveat lines of a report (one event per line), up to STATUS_EVENTS, into the status lines.
+static void status_events(const char *key, const char *text) {
+    int shown = 0, more = 0;
+    for (const char *p = text; p && *p;) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        int kind = !strncmp(p, "left out: ", 10) ? 1 : !strncmp(p, "caveat: ", 8) ? 2 : 0;
+        if (kind && shown < STATUS_EVENTS) {
+            add_status(kind, "%s: %.*s", key, (int)n, p);
+            shown++;
+        } else if (kind) {
+            more++;
+        }
+        p = e ? e + 1 : NULL;
+    }
+    if (more) add_status(0, "%s: %d more in the report", key, more);
+}
+
 // ---- the cache
 
 typedef struct { const char *suffix; const char *keep; char dir[2100]; } Prune;
@@ -212,6 +239,18 @@ static int prune_entry(const char *name, int kind, uint64_t size, void *ctx) {
 
 static void hex(const uint8_t *d, int n, char *out) {
     for (int i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", d[i]);
+}
+
+// The status line of a merge: what was done and how much didn't go to plan.
+static void summary_line(char *out, size_t cap, int n, const BdatSummary *s, char *const *ids) {
+    if (s->file_mode == BDAT_FILE_COPIED)
+        snprintf(out, cap, "only %s's copy is used (the other mods' copies can't be)", ids[s->file_mod]);
+    else if (s->file_mode == BDAT_FILE_WHOLE)
+        snprintf(out, cap, "%s's whole copy is used (it has another list of tables)", ids[s->file_mod]);
+    else
+        snprintf(out, cap, "%d mods merged: %d table%s from several mods, %d settled by priority, %d change%s left out, "
+                 "%d caveat%s", n, s->tables_merged, s->tables_merged == 1 ? "" : "s", s->priority, s->left_out,
+                 s->left_out == 1 ? "" : "s", s->caveats, s->caveats == 1 ? "" : "s");
 }
 
 int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, char *const *ids, int n, char *out,
@@ -249,7 +288,7 @@ int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, cha
     }
     sha256_final(&s, d);
     Prune pr;
-    char name[300], flat[256], file[2400];
+    char name[300], flat[256], file[2400], report[2500];
     snprintf(flat, sizeof flat, "%s", key);
     for (char *c = flat; *c; c++)
         if (*c == '/' || *c == '\\') *c = '_';
@@ -258,12 +297,31 @@ int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, cha
     snprintf(name + 33, sizeof name - 33, "%s", flat);
     snprintf(pr.dir, sizeof pr.dir, "%s/bdat-merge", cfg->profile);
     snprintf(file, sizeof file, "%s/%s", pr.dir, name);
+    snprintf(report, sizeof report, "%s.txt", file);
     if (strlen(file) >= cap) goto done;
     if (plat_file_size(file) > 0) {
+        // made before: its report's last line is the summary, the lines before it the events
+        uint64_t rn = 0;
+        char *text = (char *)plat_file_read(report, &rn);
+        char *last = NULL;
+        if (text) {
+            char *t = realloc(text, rn + 1);
+            if (t) {
+                text = t;
+                text[rn] = 0;
+                while (rn && (text[rn - 1] == '\n' || text[rn - 1] == '\r')) text[--rn] = 0;
+                last = strrchr(text, '\n');
+            }
+        }
         snprintf(out, cap, "%s", file);
         ok = 1;
-        rt_log("bdat merge: %s: the merge of %d mods made before (%s)", key, n, file);
-        add_status("%s: %d mods merged (as before)", key, n);
+        rt_log("bdat merge: %s: the merge made before (%s)", key, file);
+        add_status(0, "%s: %s (as before)", key, last ? last + 1 : "merged");
+        if (last) {
+            *last = 0;
+            status_events(key, text);
+        }
+        free(text);
         goto done;
     }
 
@@ -281,26 +339,23 @@ int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, cha
         snprintf(why, sizeof why, "%s can't be written", file);
         goto done;
     }
-    char counts[300], report[2500];
-    snprintf(counts, sizeof counts, "%d tables changed, %d merged from several mods, %d taken whole from the top mod, "
-             "%d values overridden", sum.tables_changed, sum.tables_merged, sum.tables_whole, sum.cells_overridden);
-    add_line(&notes, counts);
-    snprintf(report, sizeof report, "%s.txt", file);
+    char line[400];
+    summary_line(line, sizeof line, n, &sum, ids);
+    add_line(&notes, line);
     plat_file_write_atomic(report, notes.text, notes.n);
     pr.suffix = flat;
     pr.keep = name;
     plat_fs_list(pr.dir, prune_entry, &pr);
     snprintf(out, cap, "%s", file);
     ok = 1;
-    rt_log("bdat merge: %s: %d mods merged in %llu ms: %s (report %s)", key, n,
-           (unsigned long long)(plat_now_ms() - t0), counts, report);
-    add_status("%s: %d mods merged, %d values overridden, %d tables taken whole from the top mod", key, n,
-               sum.cells_overridden, sum.tables_whole);
+    rt_log("bdat merge: %s: %s, in %llu ms (report %s)", key, line, (unsigned long long)(plat_now_ms() - t0), report);
+    add_status(0, "%s: %s", key, line);
+    status_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "");
 done:
     if (!ok) {
         rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",
                ids[0]);
-        add_status("%s: not merged (%s); %s's whole file is used", key, why, ids[0]);
+        add_status(1, "%s: not merged (%s); %s's whole file is used", key, why, ids[0]);
     }
     plat_mutex_unlock(&lock);
     for (int k = 0; k < n; k++) free(data[k]);

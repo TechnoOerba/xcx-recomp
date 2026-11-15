@@ -69,8 +69,12 @@ int main(int argc, char **argv) {
         FILE *f = fopen(argv[3], "wb");
         if (!f || fwrite(out, 1, out_n, f) != out_n) return 1;
         fclose(f);
-        printf("summary changed=%d merged=%d whole=%d overridden=%d\n", s.tables_changed, s.tables_merged,
-               s.tables_whole, s.cells_overridden);
+        char file[100] = "merged";
+        if (s.file_mode != BDAT_FILE_MERGED)
+            snprintf(file, sizeof file, "%s:%s", s.file_mode == BDAT_FILE_WHOLE ? "whole" : "copied",
+                     mods[s.file_mod].name);
+        printf("summary changed=%d merged=%d whole=%d priority=%d leftout=%d caveat=%d file=%s\n", s.tables_changed,
+               s.tables_merged, s.tables_whole, s.priority, s.left_out, s.caveats, file);
         return 0;
     }
     fprintf(stderr, "usage: bdat_merge_check rewrite FILE... | merge BASE OUT MOD...\n");

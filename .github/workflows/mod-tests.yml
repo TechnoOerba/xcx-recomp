@@ -1,0 +1,44 @@
+# The mod manager's tests on Linux and Windows: zip layouts, the layout planner, manual library entries and RAR
+# through xcx-unpack, built from deps/libarchive (tools/build_unpack.py). Windows builds with MSYS2 UCRT64 clang,
+# the mingw target the release's llvm-mingw has; Linux with the runner's clang. No game files.
+name: Mod manager tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            clang: clang
+          - runner: windows-2025
+            clang: C:\msys64\ucrt64\bin\clang.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: runner.os == 'Windows'
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-clang"
+      - name: Build xcx-unpack and run it on libarchive's test archives
+        shell: bash
+        run: |
+          out=build/unpack/xcx-unpack$([ "$RUNNER_OS" = Windows ] && echo .exe)
+          PATH="/c/msys64/ucrt64/bin:$PATH" python tools/build_unpack.py --cc '${{ matrix.clang }}' --out "$out"
+          PATH="/c/msys64/ucrt64/bin:$PATH" python -c "import sys; sys.path.insert(0, 'tools'); import build_unpack; build_unpack.smoke('$out')"
+      - name: Tests
+        shell: bash
+        env:
+          XCX_CLANG: ${{ matrix.clang }}
+        run: |
+          export PATH="/c/msys64/ucrt64/bin:$PATH"
+          python tests/mods_archive_test.py -v
+          python tests/mods_manager_test.py -v

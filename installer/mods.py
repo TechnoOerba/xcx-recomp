@@ -2,7 +2,8 @@
 
     python -m installer.mods --dest DIR list                 installed mods and the library, as JSON
     python -m installer.mods --dest DIR install ID           from the library (github.com/jmars125/xcx-recomp-mods)
-    python -m installer.mods --dest DIR add-zip FILE [--id ID]   a game-file mod zip downloaded by hand
+    python -m installer.mods --dest DIR install ID --file FILE   a library mod the player downloaded from its page
+    python -m installer.mods --dest DIR add FILE [--id ID] [--top FOLDER] [--yes]   a mod archive downloaded by hand
     python -m installer.mods --dest DIR remove|enable|disable ID
 
 Two kinds of mod, as the library's index.json lists them:
@@ -11,10 +12,15 @@ Two kinds of mod, as the library's index.json lists them:
   romfs  mods/<id>/romfs/<game path>, files in place of the game's own (runtime/romfs_mods.c). On when listed in
          mods/romfs-enabled.txt, which the game reads again twice a second, so they switch while it runs. Earlier
          lines win when two mods have the same file; a mod turned on goes first.
-A game-file mod comes from its author's page as a zip in the Switch layout: romfs/<path>, or romfs/mod/<path> for mods
-made for the XCXDE mod loader, possibly inside top folders (atmosphere/contents/<title id>/romfs). exefs/ (Switch code)
-is not used. The zip must match the library's size and SHA-256 before anything is unpacked. A mod unpacked into mods/
-by hand in any of those layouts is moved to mods/<id>/romfs the next time the mods are listed (normalise).
+A game-file mod comes from its author's page as a zip or RAR (installer/archive.py), ideally in the Switch layout:
+romfs/<path>, or romfs/mod/<path> for mods made for the XCXDE mod loader, possibly inside top folders
+(atmosphere/contents/<title id>/romfs). exefs/ (Switch code) is not used. An archive without a romfs folder is read
+by installer/mod_layout.py, which finds the game's folders in it by the install's own game files and says what it
+will install; the window shows that before anything is written. A library download must match the library's size and
+SHA-256 before anything is unpacked. Some sites allow downloads only from their own page ("download": "manual" in
+the index): the player downloads the file there and picks it, and the same size and SHA-256 check applies. A mod
+unpacked into mods/ by hand in any of those layouts is moved to mods/<id>/romfs the next time the mods are listed
+(normalise).
 
 mods/library.json records what this manager installed (kind, version, name) so updates and removals know the kind.
 """
@@ -27,8 +33,10 @@ import sys
 import tempfile
 import time
 import urllib.request
-import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+from . import archive, mod_layout
+from .game_paths import GamePaths
 
 LIBRARY = 'https://raw.githubusercontent.com/jmars125/xcx-recomp-mods/main/'
 INDEX_FORMAT = 2
@@ -299,7 +307,32 @@ def fetch_index(source=None):
         raise ModError('mods.index_failed', detail=str(e)) from e
     if not isinstance(data, dict) or data.get('format') != INDEX_FORMAT or not isinstance(data.get('mods'), list):
         raise ModError('mods.index_format')
-    return [m for m in data['mods'] if isinstance(m, dict) and valid_id(m.get('id')) and m.get('kind') in LISTS]
+    return [m for m in data['mods'] if isinstance(m, dict) and valid_id(m.get('id')) and m.get('kind') in LISTS
+            and (not is_manual(m) or str(m.get('page', '')).startswith('https://') and m.get('sha256')
+                 and m.get('size'))]
+
+
+def is_manual(entry):
+    """Whether a library entry is downloaded by the player from its page ("download": "manual"), not by the manager:
+    a site that allows downloads only from its own page, such as Nexus Mods."""
+    return entry.get('download') == 'manual'
+
+
+def check_file(path, entry):
+    """Raises ModError('mods.file_mismatch') unless the file at path is the one a manual entry lists."""
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+        h = hashlib.sha256()
+        if size == int(entry['size']):
+            with open(path, 'rb') as f:
+                for block in iter(lambda: f.read(CHUNK), b''):
+                    h.update(block)
+    except OSError as e:
+        raise ModError('mods.failed', detail=str(e)) from e
+    if size != int(entry['size']) or h.hexdigest() != entry['sha256']:
+        raise ModError('mods.file_mismatch', picked=path.name, file=entry.get('file') or entry['name'],
+                       size=max(1, int(entry['size']) >> 20))
 
 
 def download(url, size, sha256, out, progress=None):
@@ -323,55 +356,37 @@ def download(url, size, sha256, out, progress=None):
 
 # ---- unpacking -----------------------------------------------------------------------------------------------------
 
-def romfs_members(z):
-    """[(member, game path)] for the game files in a mod zip. The game path follows the last 'romfs' folder, without
-    a leading 'mod/' (the XCXDE mod loader's layout)."""
-    out = []
-    for info in z.infolist():
-        name = info.filename.replace('\\', '/')
-        parts = PurePosixPath(name).parts
-        if info.is_dir() or not parts:
-            continue
-        mode = (info.external_attr >> 16) & 0o170000
-        if mode == 0o120000 or name.startswith('/') or ':' in parts[0] or '..' in parts:
-            raise ModError('mods.zip_unsafe', name=name)
-        low = [p.lower() for p in parts]
-        if 'romfs' not in low:
-            continue
-        title = other_game(parts[:len(low) - low[::-1].index('romfs')])
-        if title:
-            raise ModError('mods.zip_other_game', title=title)
-        rest = parts[len(low) - low[::-1].index('romfs'):]
-        if rest and rest[0].lower() == 'mod' and len(rest) > 1:
-            rest = rest[1:]
-        if rest:
-            out.append((info, '/'.join(rest)))
-    return out
+def setup_layout():
+    """The layout of the setup this runs in, for xcx-unpack (installer/archive.py)."""
+    from . import layout
+    return layout.find()
 
 
-def unpack_romfs(zip_path, folder):
-    """Unpacks the zip's game files into folder/romfs/; folder must not exist yet."""
+def preview(dest, path, top=None, layout=None):
+    """The mod_layout.Plan for the archive at path: which of its files go where, read against the install's game
+    files. Raises ModError; 'layout.several' carries the choices for top."""
     try:
-        z = zipfile.ZipFile(zip_path)
-    except (OSError, zipfile.BadZipFile) as e:
-        raise ModError('mods.zip_bad', detail=str(e)) from e
-    with z:
-        members = romfs_members(z)
-        if not members:
-            raise ModError('mods.zip_no_romfs')
-        if sum(i.file_size for i, _ in members) > UNPACK_LIMIT:
-            raise ModError('mods.zip_too_big')
-        seen = set()
-        for info, game_path in members:
-            key = game_path.lower()
-            if key in seen:
-                raise ModError('mods.zip_duplicate', name=game_path)
-            seen.add(key)
-            target = folder / 'romfs' / game_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(info) as src, open(target, 'wb') as dst:
-                shutil.copyfileobj(src, dst, CHUNK)
-    return len(members)
+        if archive.kind_of(path) == 'rar' and layout is None:
+            layout = setup_layout()
+        members = archive.members(path, layout)
+        p = mod_layout.plan(members, GamePaths.of_install(dest), top)
+    except (archive.ArchiveError, mod_layout.LayoutError) as e:
+        raise ModError(e.id, **e.params) from e
+    if sum(m.size for m in members if m.name in p.files) > UNPACK_LIMIT:
+        raise ModError('mods.zip_too_big')
+    return p
+
+
+def unpack_romfs(path, folder, dest=None, plan=None, layout=None):
+    """Unpacks an archive's game files into folder/romfs/ by plan (default: preview's against dest); folder exists
+    and holds no romfs/ yet. Returns the number of files."""
+    p = plan or preview(dest or folder, path, layout=layout)
+    try:
+        if archive.kind_of(path) == 'rar' and layout is None:
+            layout = setup_layout()
+        return archive.extract(path, layout, p.files, Path(folder) / 'romfs', UNPACK_LIMIT)
+    except archive.ArchiveError as e:
+        raise ModError(e.id, **e.params) from e
 
 
 # ---- operations ----------------------------------------------------------------------------------------------------
@@ -412,18 +427,26 @@ def place(root, mid, staged):
         shutil.rmtree(old, ignore_errors=True)
 
 
-def install(dest, entry, progress=None):
-    """Installs or updates a library entry. A mod that was on stays on; a new one starts off."""
+def install(dest, entry, progress=None, file=None, layout=None):
+    """Installs or updates a library entry. A mod that was on stays on; a new one starts off. A manual entry
+    (is_manual) installs from file, the player's download of it, which must be the file the entry lists."""
     mid, kind = entry['id'], entry['kind']
     root = mods_dir(dest)
     root.mkdir(parents=True, exist_ok=True)
+    if is_manual(entry):
+        if not file:
+            raise ModError('mods.manual_needs_file', name=entry.get('name', mid))
+        check_file(file, entry)
     with tempfile.TemporaryDirectory(dir=root, prefix='.install-') as tmp:
         staged = Path(tmp) / mid
         staged.mkdir()
         if kind == 'romfs':
-            zpath = Path(tmp) / 'mod.zip'
-            download(entry['url'], int(entry['size']), entry['sha256'], zpath, progress)
-            unpack_romfs(zpath, staged)
+            if is_manual(entry):
+                apath = Path(file)
+            else:
+                apath = Path(tmp) / 'mod.download'
+                download(entry['url'], int(entry['size']), entry['sha256'], apath, progress)
+            unpack_romfs(apath, staged, dest, layout=layout)
         else:
             files = entry.get('files') or []
             if not files or any(f.get('name') not in LUA_FILES for f in files):
@@ -445,11 +468,26 @@ def install(dest, entry, progress=None):
             write_list(root / 'catalog.txt', catalog + [mid])
 
 
-def add_zip(dest, zip_path, mid=None, name=None):
-    """Installs a game-file mod zip the player downloaded; the id comes from the file name when not given."""
-    zip_path = Path(zip_path)
+def archive_name(path):
+    """The mod's name from an archive's file name. A Nexus Mods download is named <file>-<mod id>-<version parts>-
+    <upload time>; that tail is dropped ('all tweaks mod-10-1-0-1745514276.rar' -> 'all tweaks mod')."""
+    stem = Path(path).stem
+    parts = stem.split('-')
+    if len(parts) >= 4 and len(parts[-1]) >= 9 and all(p.isdigit() for p in parts[-3:]):
+        head = parts[:-1]
+        while len(head) > 1 and head[-1].isdigit():
+            head = head[:-1]
+        stem = '-'.join(head)
+    return stem
+
+
+def add_archive(dest, path, mid=None, name=None, plan=None, layout=None):
+    """Installs a game-file mod archive (zip or RAR) the player downloaded, by plan (default: preview's); the id
+    and name come from the file name when not given."""
+    path = Path(path)
+    shown = name or archive_name(path)
     if not mid:
-        mid = slug(zip_path.stem)
+        mid = slug(shown)
     if not valid_id(mid):
         raise ModError('mods.bad_id', id=mid)
     root = mods_dir(dest)
@@ -457,13 +495,17 @@ def add_zip(dest, zip_path, mid=None, name=None):
     with tempfile.TemporaryDirectory(dir=root, prefix='.install-') as tmp:
         staged = Path(tmp) / mid
         staged.mkdir()
-        unpack_romfs(zip_path, staged)
-        write_info(staged, 'romfs', name or zip_path.stem, source='zip')
+        unpack_romfs(path, staged, dest, plan, layout)
+        source = archive.kind_of(path) or 'archive'   # 'zip' or 'rar'
+        write_info(staged, 'romfs', shown, source=source)
         place(root, mid, staged)
     record = load_record(root)
-    record[mid] = {'kind': 'romfs', 'version': '', 'name': name or zip_path.stem, 'source': 'zip'}
+    record[mid] = {'kind': 'romfs', 'version': '', 'name': shown, 'source': source}
     save_record(root, record)
     return mid
+
+
+add_zip = add_archive   # its name before RAR support
 
 
 def set_enabled(dest, mid, on):
@@ -506,6 +548,10 @@ def status(dest, index, notes=None):
     return out
 
 
+def english_catalog():
+    return json.loads((Path(__file__).resolve().parent / 'text' / 'en.json').read_text(encoding='utf-8'))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='python -m installer.mods', description=__doc__.splitlines()[0])
     ap.add_argument('--dest', type=Path, required=True, help='install folder (the one with xcx.exe)')
@@ -514,9 +560,13 @@ def main(argv=None):
     sub.add_parser('list')
     for c in ('install', 'remove', 'enable', 'disable'):
         sub.add_parser(c).add_argument('id')
-    z = sub.add_parser('add-zip')
-    z.add_argument('zip', type=Path)
-    z.add_argument('--id')
+    sub.choices['install'].add_argument('--file', type=Path, help='the download of a manual library entry')
+    for c in ('add', 'add-zip'):
+        z = sub.add_parser(c)
+        z.add_argument('zip', type=Path)
+        z.add_argument('--id')
+        z.add_argument('--top', help='the folder of the archive that holds the game folders (after layout.several)')
+        z.add_argument('--yes', action='store_true', help='install even when the layout needs a look')
     args = ap.parse_args(argv)
     try:
         if args.cmd == 'list':
@@ -528,10 +578,17 @@ def main(argv=None):
             entry = next((e for e in fetch_index(args.index) if e['id'] == args.id), None)
             if not entry:
                 raise ModError('mods.not_in_library', id=args.id)
-            install(args.dest, entry)
+            install(args.dest, entry, file=args.file)
             print(f'installed {args.id}')
-        elif args.cmd == 'add-zip':
-            print(f'installed {add_zip(args.dest, args.zip, args.id)}')
+        elif args.cmd in ('add', 'add-zip'):
+            p = preview(args.dest, args.zip, args.top)
+            english = english_catalog()
+            for line in mod_layout.describe(p, lambda i, **k: english.get(i, i).format(**k)):
+                print(line)
+            if mod_layout.needs_confirm(p) and not args.yes:
+                print('not installed: check the lines above, then run again with --yes', file=sys.stderr)
+                return 1
+            print(f'installed {add_archive(args.dest, args.zip, args.id, plan=p)}')
         elif args.cmd == 'remove':
             remove(args.dest, args.id)
             print(f'removed {args.id}')

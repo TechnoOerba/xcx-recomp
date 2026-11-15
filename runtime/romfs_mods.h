@@ -21,7 +21,7 @@ void romfs_mods_reload(void);
 // the change up within CHECK_MS of romfs_mods.c.
 int romfs_mods_set(const char *id, int on);
 // The ids of romfs-enabled.txt in order, the top (winning) mod first, into ids; the count.
-int romfs_mods_order(char (*ids)[65], int cap);
+int romfs_mods_priority(char (*ids)[65], int cap);
 // Swaps the mod with the one above it (up) or below it in romfs-enabled.txt; 1 when the list was written. Files follow
 // the new order the next time the game loads them, as with romfs_mods_set; the game reads its data tables at
 // start-up, so a new order for those applies at the next start.

@@ -409,7 +409,7 @@ int romfs_mods_set(const char *id, int on) {
     return ok;
 }
 
-int romfs_mods_order(char (*ids)[65], int cap) {
+int romfs_mods_priority(char (*ids)[65], int cap) {
     if (!mods_root() || cap <= 0) return 0;
     return read_enabled(ids, cap < MOD_CAP ? cap : MOD_CAP);
 }
@@ -429,7 +429,7 @@ int romfs_mods_move(const char *id, int up) {
     for (int k = 0; k < n && len + 66 < sizeof text; k++) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", ids[k]);
     snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
     int ok = plat_file_write_atomic(path, text, len);
-    rt_log("romfs mods: %s moved %s in the load order from the menu%s", id, up ? "up" : "down",
+    rt_log("romfs mods: %s moved %s in the priority list from the menu%s", id, up ? "up" : "down",
            ok ? "" : " (the list could not be written)");
     __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);
     return ok;

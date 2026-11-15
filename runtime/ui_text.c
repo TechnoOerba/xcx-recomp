@@ -80,11 +80,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_CHEATS_UNSUPPORTED] = "Changes the game's code in a way the setup cannot build into the recompiled game yet.",
     [UI_CHEATS_NOTE_SETUP] = "needs the setup again",
     [UI_CHEATS_BUTTONS] = "\n\nActs only while its buttons are held (button mask %X).",
-    [UI_MODS_ORDER] = "Load order",
-    [UI_MODS_ORDER_DESC] = "Game-file mods that are on, the top one first. Where two have the same file, the higher "
-                           "one's copy is used. Data tables (bdat) that several of them change are merged, and where "
-                           "two set the same value the higher one's is kept. The game reads its data tables at start-up, "
-                           "so a new order for them applies at the next start.",
+    [UI_MODS_PRIORITY] = "Mod priority",
+    [UI_MODS_PRIORITY_DESC] = "Game-file mods that are on, highest priority first. Where two have the same file, the "
+                              "higher one's copy is used. Data tables (bdat) that several of them change are merged, "
+                              "and where two set the same value the higher one's is kept. The game reads its data "
+                              "tables at start-up, so a change of priority for them applies at the next start.",
     [UI_MODS_UP] = "Up",
     [UI_MODS_DOWN] = "Down",
     [UI_MODS_MERGES] = "Data tables this run",
@@ -416,11 +416,12 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_CHEATS_UNSUPPORTED] = "Меняет код игры так, что установщик пока не может встроить это в рекомпилированную игру.",
     [UI_CHEATS_NOTE_SETUP] = "нужен повторный запуск установщика",
     [UI_CHEATS_BUTTONS] = "\n\nДействует, только пока зажаты его кнопки (маска кнопок %X).",
-    [UI_MODS_ORDER] = "Порядок загрузки",
-    [UI_MODS_ORDER_DESC] = "Включённые моды файлов игры, верхний первым. Если у двух модов есть один и тот же файл, "
-                           "используется копия верхнего. Таблицы данных (bdat), которые меняют несколько модов, "
-                           "объединяются, а если два мода задают одно значение, остаётся значение верхнего. Игра читает "
-                           "таблицы данных при запуске, поэтому новый порядок для них действует после следующего запуска.",
+    [UI_MODS_PRIORITY] = "Приоритет модов",
+    [UI_MODS_PRIORITY_DESC] = "Включённые моды файлов игры, сначала с наивысшим приоритетом. Если у двух модов есть "
+                              "один и тот же файл, используется копия того, что выше. Таблицы данных (bdat), которые "
+                              "меняют несколько модов, объединяются, а если два мода задают одно значение, остаётся "
+                              "значение того, что выше. Игра читает таблицы данных при запуске, поэтому новый "
+                              "приоритет для них действует после следующего запуска.",
     [UI_MODS_UP] = "Выше",
     [UI_MODS_DOWN] = "Ниже",
     [UI_MODS_MERGES] = "Таблицы данных в этом запуске",

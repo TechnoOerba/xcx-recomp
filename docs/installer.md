@@ -59,7 +59,7 @@ what is in `mods/`:
   id, a zip) gets a line saying why, in the F1 Mods tab and in Setup's Mods window. `installer/mods.py` and
   `runtime/mod_library.c` both carry these rules (`normalise`); `tests/mods_manager_test.py` checks they agree.
 - When two game-file mods have the same file, the one higher in `mods/romfs-enabled.txt` wins; a mod turned on goes
-  to the top, and the F1 Mods tab's **Load order** moves mods up and down. Data tables (`bdat/*.bdat`) that several
+  to the top, and the F1 Mods tab's **Mod priority** list moves mods up and down. Data tables (`bdat/*.bdat`) that several
   of them have are merged instead (`runtime/bdat_merge.c`), table by table against the game's own copy: a table one
   mod changes is that mod's, the cell edits of several mods are combined (the higher mod keeps a value both set),
   and a table several change where one change isn't cell edits is the higher mod's whole table. The merged file and

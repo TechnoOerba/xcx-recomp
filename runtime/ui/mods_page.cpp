@@ -6,6 +6,8 @@ extern "C" {
 #include "mods.h"
 #include "mod_settings.h"
 #include "mod_library.h"
+#include "romfs_mods.h"
+#include "bdat_merge.h"
 #include "ui_text.h"
 }
 #ifdef XCX_MOD_UI_TESTING
@@ -22,6 +24,39 @@ static const char *status_name(int status) {
 }
 static char requested_owner[65],requested_page[65];
 void mods_page_select(const char *owner,const char *page){snprintf(requested_owner,sizeof requested_owner,"%s",owner);snprintf(requested_page,sizeof requested_page,"%s",page);}
+
+// The game-file mods that are on, in romfs-enabled.txt order (runtime/romfs_mods.c, romfs_mods_order), with Up and
+// Down to change which one wins, and what the data table merges did this run (runtime/bdat_merge_serve.c). Shown
+// when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
+static void load_order(const ModLibView &v,bool idle) {
+    static char ids[32][65];static int n;static uint64_t seen=~0ull;static double next;
+    double now=ImGui::GetTime();
+    if(v.generation!=seen||now>=next){n=romfs_mods_order(ids,32);seen=v.generation;next=now+1.0;}
+    char line[256];bool merges=bdat_merge_status(0,line,sizeof line)!=0;
+    if(n<2&&!merges)return;
+    ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_ORDER));
+    if(n>=2){
+        ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_ORDER_DESC));ImGui::PopTextWrapPos();
+        int move=-1;bool up=false;
+        for(int i=0;i<n;++i){
+            const char *name=ids[i];
+            for(int k=0;k<v.count;++k)if(!strcmp(v.rows[k].id,ids[i])&&v.rows[k].name[0])name=v.rows[k].name;
+            ImGui::PushID(ids[i]);
+            ImGui::BeginDisabled(!idle||i==0);if(ImGui::Button(menu_text(UI_MODS_UP))){move=i;up=true;}ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!idle||i==n-1);if(ImGui::Button(menu_text(UI_MODS_DOWN))){move=i;up=false;}ImGui::EndDisabled();
+            ImGui::SameLine();ImGui::Text("%d. %s",i+1,name);
+            ImGui::PopID();
+        }
+        if(move>=0){romfs_mods_move(ids[move],up);next=0;}
+    }
+    if(merges){
+        ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));
+        ImGui::PushTextWrapPos(0);
+        for(int i=0;bdat_merge_status(i,line,sizeof line);++i)ImGui::TextUnformatted(line);
+        ImGui::PopTextWrapPos();
+    }
+}
 
 // The mod library (runtime/mod_library.c): its mods and the installed ones on the left, the picked one's text and
 // buttons on the right. Jobs run on the library's thread; this only reads its view and asks. Returns whether a row
@@ -93,6 +128,7 @@ static bool library(float scale,bool focus_first) {
         if(strcmp(confirm_remove,r.id))confirm_remove[0]=0;   // another mod picked: the second press starts over
         ImGui::PopID();ImGui::EndTable();
     }
+    load_order(v,idle);
     return focused;
 }
 

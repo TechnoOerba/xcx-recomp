@@ -80,6 +80,14 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_CHEATS_UNSUPPORTED] = "Changes the game's code in a way the setup cannot build into the recompiled game yet.",
     [UI_CHEATS_NOTE_SETUP] = "needs the setup again",
     [UI_CHEATS_BUTTONS] = "\n\nActs only while its buttons are held (button mask %X).",
+    [UI_MODS_ORDER] = "Load order",
+    [UI_MODS_ORDER_DESC] = "Game-file mods that are on, the top one first. Where two have the same file, the higher "
+                           "one's copy is used. Data tables (bdat) that several of them change are merged, and where "
+                           "two set the same value the higher one's is kept. The game reads its data tables at start-up, "
+                           "so a new order for them applies at the next start.",
+    [UI_MODS_UP] = "Up",
+    [UI_MODS_DOWN] = "Down",
+    [UI_MODS_MERGES] = "Data tables this run",
     [UI_SWKBD_GRID_HINT] = "Controller: %s selects a key, %s confirms, %s cancels. D-pad or left stick moves. %s: Backspace. %s: Delete. Hold %s: Shift. %s: Caps Lock. %s / %s: text cursor.",
     [UI_SWKBD_SHIFT] = "Caps Lock", [UI_SWKBD_MOMENTARY_SHIFT] = "Shift",
     [UI_SWKBD_PALETTE] = "Controller keyboard: Latin letters, digits and space. You can also type with your keyboard.",
@@ -408,6 +416,14 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_CHEATS_UNSUPPORTED] = "Меняет код игры так, что установщик пока не может встроить это в рекомпилированную игру.",
     [UI_CHEATS_NOTE_SETUP] = "нужен повторный запуск установщика",
     [UI_CHEATS_BUTTONS] = "\n\nДействует, только пока зажаты его кнопки (маска кнопок %X).",
+    [UI_MODS_ORDER] = "Порядок загрузки",
+    [UI_MODS_ORDER_DESC] = "Включённые моды файлов игры, верхний первым. Если у двух модов есть один и тот же файл, "
+                           "используется копия верхнего. Таблицы данных (bdat), которые меняют несколько модов, "
+                           "объединяются, а если два мода задают одно значение, остаётся значение верхнего. Игра читает "
+                           "таблицы данных при запуске, поэтому новый порядок для них действует после следующего запуска.",
+    [UI_MODS_UP] = "Выше",
+    [UI_MODS_DOWN] = "Ниже",
+    [UI_MODS_MERGES] = "Таблицы данных в этом запуске",
     [UI_SWKBD_GRID_HINT] = "Контроллер: %s — выбрать клавишу, %s — подтвердить, %s — отменить. Крестовина или левый стик — перемещение. %s — назад удалить. %s — удалить вперёд. Удерживать %s — Shift. %s — Caps Lock. %s / %s — курсор.",
     [UI_SWKBD_SHIFT] = "Caps Lock", [UI_SWKBD_MOMENTARY_SHIFT] = "Shift",
     [UI_SWKBD_PALETTE] = "Клавиатура контроллера: латинские буквы, цифры и пробел. Можно вводить текст и с обычной клавиатуры.",

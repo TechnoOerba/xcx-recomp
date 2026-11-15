@@ -12,11 +12,17 @@
 // The list file is read again at most twice a second, and the file map is rebuilt when its bytes change, so a mod
 // manager switches mods by rewriting romfs-enabled.txt. A changed mod applies to files the game opens after that;
 // what it has already loaded stays until it loads the file again.
+//
+// Data tables (bdat/*.bdat) that two or more enabled mods have are merged instead (runtime/bdat_merge.c): the map
+// keeps every enabled mod's copy of such a file in priority order, and the first open after a rebuild asks
+// bdat_merge_serve for the merged file, which then stands in for the top mod's copy. When the files can't be merged,
+// the top mod's copy is served as before.
 #include "romfs_mods.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "bdat_merge.h"
 #include "host.h"
 #include "platform/platform.h"
 
@@ -24,11 +30,19 @@
 #define MOD_CAP 32             // enabled mods
 #define CHECK_MS 500           // how often the list file is read again
 
-typedef struct { char *key; char *host; } ModFile;   // key: lowercase game path without a leading '/'
+// key: lowercase game path without a leading '/'. host: the top mod's copy. For a data table that several mods
+// have: every copy and its mod's id (alts[0] == host), and the merged copy once asked for (merge 1; -1 not mergeable).
+typedef struct {
+    char *key, *host;
+    char **alts, **ids;
+    int nalts, merge;
+    char *merged;
+} ModFile;
 
 static PlatMutex lock = PLAT_MUTEX_INIT;   // guards files / nfiles (shared for lookups)
 static ModFile *files;
 static size_t nfiles;
+static uint64_t files_gen;                 // counts rebuilds, so a merge made for an older map is not kept
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -55,11 +69,64 @@ static int mods_root(void) {
     return 1;
 }
 
-typedef struct { ModFile *v; size_t n, cap; char host[4096]; size_t hlen; char key[1024]; size_t klen; } Walk;
+typedef struct {
+    ModFile *v;
+    size_t n, cap;
+    char host[4096];
+    size_t hlen;
+    char key[1024];
+    size_t klen;
+    const char *id;                        // the mod being walked
+} Walk;
+
+static int mergeable(const char *key) {
+    size_t n = strlen(key);
+    return !strncmp(key, "bdat/", 5) && n > 10 && !strcmp(key + n - 5, ".bdat");
+}
+
+// The mod id of a host path <root>/<id>/romfs/..., into id.
+static void id_of(const char *host, char *id, size_t cap) {
+    size_t r = strlen(root);
+    const char *p = strlen(host) > r ? host + r + 1 : host, *e = strchr(p, '/');
+    size_t n = e ? (size_t)(e - p) : strlen(p);
+    if (n >= cap) n = cap - 1;
+    memcpy(id, p, n);
+    id[n] = 0;
+}
+
+// Another mod's copy of a data table the map already has, after the earlier mods' copies.
+static int add_alt(ModFile *f, const char *host, const char *id) {
+    char **a = realloc(f->alts, (size_t)(f->nalts + 2) * sizeof *a), **d;
+    if (!a) return 0;
+    f->alts = a;
+    if (!(d = realloc(f->ids, (size_t)(f->nalts + 2) * sizeof *d))) return 0;
+    f->ids = d;
+    if (!f->nalts) {
+        char first[80];
+        id_of(f->host, first, sizeof first);
+        a[0] = f->host;
+        d[0] = strdup(first);
+        f->nalts = 1;
+    }
+    a[f->nalts] = strdup(host);
+    d[f->nalts] = strdup(id);
+    f->nalts++;
+    return 1;
+}
+
+static void free_file(ModFile *f) {
+    for (int i = 1; i < f->nalts; i++) free(f->alts[i]);
+    for (int i = 0; i < f->nalts; i++) free(f->ids[i]);
+    free(f->alts);
+    free(f->ids);
+    free(f->merged);
+    free(f->key);
+    free(f->host);
+}
 
 static int add_file(Walk *w) {
     for (size_t i = 0; i < w->n; i++)   // an earlier mod's file wins; lists are small enough for a scan at rebuild
-        if (!strcmp(w->v[i].key, w->key)) return 1;
+        if (!strcmp(w->v[i].key, w->key)) return mergeable(w->key) ? add_alt(&w->v[i], w->host, w->id) : 1;
     if (w->n == w->cap) {
         size_t cap = w->cap ? w->cap * 2 : 256;
         ModFile *v = realloc(w->v, cap * sizeof *v);
@@ -67,6 +134,7 @@ static int add_file(Walk *w) {
         w->v = v;
         w->cap = cap;
     }
+    memset(&w->v[w->n], 0, sizeof w->v[w->n]);
     w->v[w->n].key = strdup(w->key);
     w->v[w->n].host = strdup(w->host);
     if (!w->v[w->n].key || !w->v[w->n].host) return 0;
@@ -125,6 +193,7 @@ static void rebuild(const char *list) {
                     w.hlen = (size_t)len;
                     w.klen = 0;
                     w.key[0] = 0;
+                    w.id = line;
                     plat_fs_list(w.host, walk_entry, &w);
                     mods++;
                 } else {
@@ -143,11 +212,9 @@ static void rebuild(const char *list) {
     size_t nold = nfiles;
     files = w.v;
     nfiles = w.n;
+    files_gen++;
     plat_mutex_unlock(&lock);
-    for (size_t i = 0; i < nold; i++) {
-        free(old[i].key);
-        free(old[i].host);
-    }
+    for (size_t i = 0; i < nold; i++) free_file(&old[i]);
     free(old);
     rt_log("romfs mods: %d mod%s, %zu file%s", mods, mods == 1 ? "" : "s", w.n, w.n == 1 ? "" : "s");
 }
@@ -178,24 +245,62 @@ static void maybe_reload(void) {
     plat_mutex_unlock(&check_lock);
 }
 
-// The host path of the mod file for key (lowercase, no leading '/'), copied to out; 0 when no enabled mod has it.
-static int lookup(const char *key, char *out, size_t cap) {
-    int found = 0;
-    plat_mutex_lock_shared(&lock);
+// The entry for key, or NULL; under lock.
+static ModFile *find(const char *key) {
     size_t lo = 0, hi = nfiles;
     while (lo < hi) {
         size_t mid = (lo + hi) / 2;
         int d = strcmp(files[mid].key, key);
-        if (!d) {
-            if (out && strlen(files[mid].host) < cap) strcpy(out, files[mid].host);
-            found = 1;
-            break;
-        }
+        if (!d) return &files[mid];
         if (d < 0) lo = mid + 1;
         else hi = mid;
     }
+    return NULL;
+}
+
+// The host path of the mod file for key (lowercase, no leading '/'), copied to out; 0 when no enabled mod has it.
+// mount (the RomFS mount name; NULL when only asking whether a mod has the file) lets a data table that several
+// mods have be merged.
+static int lookup(const char *key, char *out, size_t cap, const char *mount) {
+    plat_mutex_lock_shared(&lock);
+    ModFile *f = find(key);
+    if (!f) {
+        plat_mutex_unlock_shared(&lock);
+        return 0;
+    }
+    int n = f->nalts;
+    if (!mount || !out || n < 2 || f->merge) {
+        const char *p = f->merge > 0 ? f->merged : f->host;
+        if (out && strlen(p) < cap) strcpy(out, p);
+        plat_mutex_unlock_shared(&lock);
+        return 1;
+    }
+    // the first open of a data table several mods have: merged outside the map's lock, from copies of the paths
+    uint64_t gen = files_gen;
+    char *alts[MOD_CAP], *ids[MOD_CAP];
+    if (n > MOD_CAP) n = MOD_CAP;
+    for (int i = 0; i < n; i++) {
+        alts[i] = strdup(f->alts[i]);
+        ids[i] = f->ids[i] ? strdup(f->ids[i]) : NULL;
+    }
     plat_mutex_unlock_shared(&lock);
-    return found;
+    char merged[4096];
+    int ok = 1;
+    for (int i = 0; i < n; i++) ok &= alts[i] && ids[i];
+    ok = ok && bdat_merge_serve(mount, key, alts, ids, n, merged, sizeof merged);
+    const char *p = ok ? merged : alts[0];
+    if (p && strlen(p) < cap) strcpy(out, p);
+    plat_mutex_lock(&lock);
+    if (files_gen == gen && (f = find(key)) && !f->merge) {
+        f->merged = ok ? strdup(merged) : NULL;
+        f->merge = f->merged ? 1 : -1;
+    }
+    plat_mutex_unlock(&lock);
+    for (int i = 0; i < n; i++) {
+        free(alts[i]);
+        free(ids[i]);
+    }
+    return 1;
 }
 
 // key from a game path: drops a "<mount>:" prefix and leading slashes, lowercases.
@@ -231,7 +336,7 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     static __thread char one[1026];
     char raw[1024];
     if (!guest_string(path, raw, sizeof raw)) return list;
-    if (!make_key(raw, one, sizeof one - 1) || !lookup(one, NULL, 0)) return list;
+    if (!make_key(raw, one, sizeof one - 1) || !lookup(one, NULL, 0, NULL)) return list;
     one[strlen(one) + 1] = 0;
     if (__atomic_fetch_add(&claim_logs, 1, __ATOMIC_RELAXED) < 64) rt_log("romfs mods: %s from a mod", one);
     return (uint64_t)(uintptr_t)one;
@@ -240,8 +345,13 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
 int romfs_mod_file(const char *path, char *out, size_t cap) {
     maybe_reload();
     if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED) || !path) return 0;
-    char key[1024];
-    return make_key(path, key, sizeof key) && lookup(key, out, cap);
+    char key[1024], mount[64] = "";
+    const char *colon = strchr(path, ':');
+    if (colon && (size_t)(colon - path) < sizeof mount) {
+        memcpy(mount, path, (size_t)(colon - path));
+        mount[colon - path] = 0;
+    }
+    return make_key(path, key, sizeof key) && lookup(key, out, cap, *mount ? mount : NULL);
 }
 
 // ---- switching, for the F1 menu (runtime/mod_library.c) ------------------------------------------------------------------------------------------
@@ -296,5 +406,31 @@ int romfs_mods_set(const char *id, int on) {
     int ok = plat_file_write_atomic(path, text, len);
     rt_log("romfs mods: %s turned %s from the menu%s", id, on ? "on" : "off", ok ? "" : " (the list could not be written)");
     __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);   // the next file lookup reads the new list
+    return ok;
+}
+
+int romfs_mods_order(char (*ids)[65], int cap) {
+    if (!mods_root() || cap <= 0) return 0;
+    return read_enabled(ids, cap < MOD_CAP ? cap : MOD_CAP);
+}
+
+int romfs_mods_move(const char *id, int up) {
+    if (!mods_root() || !id) return 0;
+    char ids[MOD_CAP][65], tmp[65];
+    int n = read_enabled(ids, MOD_CAP), i = 0;
+    while (i < n && strcmp(ids[i], id)) i++;
+    int j = up ? i - 1 : i + 1;
+    if (i == n || j < 0 || j >= n) return 0;
+    memcpy(tmp, ids[i], sizeof tmp);
+    memcpy(ids[i], ids[j], sizeof tmp);
+    memcpy(ids[j], tmp, sizeof tmp);
+    char text[LIST_CAP], path[4200];
+    size_t len = 0;
+    for (int k = 0; k < n && len + 66 < sizeof text; k++) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", ids[k]);
+    snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
+    int ok = plat_file_write_atomic(path, text, len);
+    rt_log("romfs mods: %s moved %s in the load order from the menu%s", id, up ? "up" : "down",
+           ok ? "" : " (the list could not be written)");
+    __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);
     return ok;
 }

@@ -58,6 +58,12 @@ what is in `mods/`:
   manager can use (no `romfs` folder, two of them, another game's title ID, a Lua mod with a folder name that is not an
   id, a zip) gets a line saying why, in the F1 Mods tab and in Setup's Mods window. `installer/mods.py` and
   `runtime/mod_library.c` both carry these rules (`normalise`); `tests/mods_manager_test.py` checks they agree.
+- When two game-file mods have the same file, the one higher in `mods/romfs-enabled.txt` wins; a mod turned on goes
+  to the top, and the F1 Mods tab's **Load order** moves mods up and down. Data tables (`bdat/*.bdat`) that several
+  of them have are merged instead (`runtime/bdat_merge.c`), table by table against the game's own copy: a table one
+  mod changes is that mod's, the cell edits of several mods are combined (the higher mod keeps a value both set),
+  and a table several change where one change isn't cell edits is the higher mod's whole table. The merged file and
+  a report of every clash go to `<profile>/bdat-merge/`; `tests/bdat_merge_test.py` covers the rules.
 
 Saves are never touched. The game uses a game-file mod's copy the next time it loads the file, so data read at
 start-up (the bdat tables) needs a restart.

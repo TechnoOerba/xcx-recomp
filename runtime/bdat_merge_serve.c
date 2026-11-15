@@ -1,0 +1,311 @@
+// The game side of the BDAT merge (bdat_merge.h, bdat_merge_serve): the game's own copy of a file read from its
+// archive, the merged file kept in <profile>/bdat-merge/, and status lines for the F1 Mods tab.
+//
+// The archive: sts.arh holds 'arh2', the entry count, the alignment and a 0, then per entry the XXH64 (seed 0) of
+// its path ("/bdat/common.bdat"), its stored size and its unpacked size; the entries' data follows each other in
+// sts.ard, each starting at a multiple of the alignment. A stored entry that starts with 'xbc1' is packed: type (3 =
+// zstd), unpacked size, packed size, 32 more bytes, then the data.
+//
+// The merged file is named after a SHA-256 of the game's copy and the mods' copies in order, so a set of inputs is
+// merged once and a change to any of them (a mod update, another order) makes a new file. Older merges of the same
+// game file are deleted. Next to the file, <file>.txt lists the mods and every clash.
+#include "bdat_merge.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <zstd.h>
+
+#include "fs.h"
+#include "host.h"
+#include "sha256.h"
+#include "platform/platform.h"
+
+#define VERSION "bdat-merge 1"   // part of the cache name: a change to the merge rules makes new files
+#define LOG_NOTES 20             // clash lines in the log per merge; the report file has all of them
+#define STATUS_CAP 16
+
+static PlatMutex lock = PLAT_MUTEX_INIT;     // one merge at a time; guards the archive index and the status lines
+static uint8_t *arh;
+static uint64_t arh_size;
+static int arh_state;                        // 0 not read, 1 read, -1 missing
+static char status[STATUS_CAP][256];
+static int nstatus;
+
+// ---- XXH64, seed 0 (the archive's path hash), after the xxHash specification
+#define P1 0x9E3779B185EBCA87ull
+#define P2 0xC2B2AE3D27D4EB4Full
+#define P3 0x165667B19E3779F9ull
+#define P4 0x85EBCA77C2B2AE63ull
+#define P5 0x27D4EB2F165667C5ull
+static uint64_t rotl(uint64_t x, int r) { return (x << r) | (x >> (64 - r)); }
+static uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static uint64_t round64(uint64_t acc, uint64_t in) { return rotl(acc + in * P2, 31) * P1; }
+static uint64_t merge64(uint64_t h, uint64_t v) { return (h ^ round64(0, v)) * P1 + P4; }
+
+static uint64_t xxh64(const uint8_t *d, size_t n) {
+    size_t i = 0;
+    uint64_t h;
+    if (n >= 32) {
+        uint64_t v[4] = {P1 + P2, P2, 0, (uint64_t)0 - P1};
+        for (; i + 32 <= n; i += 32)
+            for (int k = 0; k < 4; k++) v[k] = round64(v[k], rd64(d + i + 8 * k));
+        h = rotl(v[0], 1) + rotl(v[1], 7) + rotl(v[2], 12) + rotl(v[3], 18);
+        for (int k = 0; k < 4; k++) h = merge64(h, v[k]);
+    } else {
+        h = P5;
+    }
+    h += n;
+    for (; i + 8 <= n; i += 8) h = rotl(h ^ round64(0, rd64(d + i)), 27) * P1 + P4;
+    if (i + 4 <= n) {
+        h = rotl(h ^ (uint64_t)rd32(d + i) * P1, 23) * P2 + P3;
+        i += 4;
+    }
+    for (; i < n; i++) h = rotl(h ^ d[i] * P5, 11) * P1;
+    h ^= h >> 33;
+    h *= P2;
+    h ^= h >> 29;
+    h *= P3;
+    return h ^ (h >> 32);
+}
+
+// ---- the game's copy
+
+// n bytes at off of RomFS file name (all of it for n == UINT64_MAX) into a new buffer; NULL on failure.
+static uint8_t *rom_read(const char *mount, const char *name, uint64_t off, uint64_t n, uint64_t *got) {
+    char path[512];
+    uint64_t h;
+    snprintf(path, sizeof path, "%s:/%s", mount, name);
+    if (romfs_open(&h, path, FS_OPEN_READ)) return NULL;
+    int64_t size = 0;
+    uint8_t *p = NULL;
+    if (!romfs_size(&size, h) && size >= 0 && off <= (uint64_t)size) {
+        if (n == UINT64_MAX || n > (uint64_t)size - off) n = (uint64_t)size - off;
+        uint64_t done = 0;
+        if (n < (1ull << 31) && (p = malloc(n ? n : 1)) && romfs_read(&done, h, (int64_t)off, p, n) == 0 && done == n) {
+            *got = n;
+        } else {
+            free(p);
+            p = NULL;
+        }
+    }
+    romfs_close(h);
+    return p;
+}
+
+static uint8_t *game_copy(const char *mount, const char *key, size_t *n, char *why, size_t cap) {
+    if (!arh_state) {
+        arh = rom_read(mount, "sts.arh", 0, UINT64_MAX, &arh_size);
+        arh_state = arh && arh_size >= 16 && !memcmp(arh, "arh2", 4) && 16 + 16ull * rd32(arh + 4) <= arh_size &&
+                    rd32(arh + 8) && !(rd32(arh + 8) & (rd32(arh + 8) - 1)) ? 1 : -1;
+    }
+    if (arh_state < 0) {
+        snprintf(why, cap, "the game's archive index sts.arh can't be read");
+        return NULL;
+    }
+    char path[1100];
+    int len = snprintf(path, sizeof path, "/%s", key);
+    uint64_t want = xxh64((const uint8_t *)path, (size_t)len), off = 0, align = rd32(arh + 8);
+    uint32_t count = rd32(arh + 4);
+    for (uint32_t k = 0; k < count; k++) {
+        const uint8_t *e = arh + 16 + 16ull * k;
+        uint32_t stored = rd32(e + 8);
+        if (rd64(e) != want) {
+            off += (stored + align - 1) & ~(align - 1);
+            continue;
+        }
+        uint64_t got = 0;
+        uint8_t *p = rom_read(mount, "sts.ard", off, stored, &got);
+        if (!p || got != stored) {
+            free(p);
+            snprintf(why, cap, "the game's %s can't be read from sts.ard", key);
+            return NULL;
+        }
+        if (got < 48 || memcmp(p, "xbc1", 4)) {
+            *n = got;
+            return p;
+        }
+        uint32_t type = rd32(p + 4), un = rd32(p + 8), packed = rd32(p + 12);
+        uint8_t *out = type == 3 && packed <= got - 48 && un < (1u << 30) ? malloc(un ? un : 1) : NULL;
+        size_t r = out ? ZSTD_decompress(out, un, p + 48, packed) : 0;
+        free(p);
+        if (!out || ZSTD_isError(r) || r != un) {
+            free(out);
+            snprintf(why, cap, "the game's %s can't be unpacked (type %u)", key, type);
+            return NULL;
+        }
+        *n = un;
+        return out;
+    }
+    snprintf(why, cap, "the game has no %s", key);
+    return NULL;
+}
+
+// ---- status lines and notes
+
+static void add_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void add_status(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (nstatus == STATUS_CAP) {
+        memmove(status, status + 1, sizeof status[0] * (STATUS_CAP - 1));
+        nstatus--;
+    }
+    vsnprintf(status[nstatus++], sizeof status[0], fmt, ap);
+    va_end(ap);
+}
+
+int bdat_merge_status(int i, char *out, size_t cap) {
+    plat_mutex_lock_shared(&lock);
+    int ok = i >= 0 && i < nstatus;
+    if (ok) snprintf(out, cap, "%s", status[i]);
+    plat_mutex_unlock_shared(&lock);
+    return ok;
+}
+
+typedef struct { char *text; size_t n, cap; int lines; const char *key; } Notes;
+
+static void add_line(Notes *s, const char *line) {
+    size_t len = strlen(line);
+    if (s->n + len + 2 > s->cap) {
+        size_t cap = s->cap ? s->cap * 2 : 4096;
+        while (cap < s->n + len + 2) cap *= 2;
+        char *t = realloc(s->text, cap);
+        if (!t) return;
+        s->text = t;
+        s->cap = cap;
+    }
+    memcpy(s->text + s->n, line, len);
+    s->n += len;
+    s->text[s->n++] = '\n';
+    s->text[s->n] = 0;
+}
+
+static void on_note(void *ctx, const char *line) {
+    Notes *s = ctx;
+    if (s->lines++ < LOG_NOTES) rt_log("bdat merge: %s: %s", s->key, line);
+    else if (s->lines == LOG_NOTES + 1) rt_log("bdat merge: %s: more in the report file", s->key);
+    add_line(s, line);
+}
+
+// ---- the cache
+
+typedef struct { const char *suffix; const char *keep; char dir[2100]; } Prune;
+
+static int prune_entry(const char *name, int kind, uint64_t size, void *ctx) {
+    (void)size;
+    Prune *p = ctx;
+    size_t n = strlen(name), s = strlen(p->suffix);
+    const char *tail = n > s ? name + n - s : NULL;
+    int ours = kind == PLAT_FS_FILE && tail && (!strcmp(tail, p->suffix) ||
+               (n > s + 4 && !strcmp(name + n - 4, ".txt") && !strncmp(name + n - 4 - s, p->suffix, s)));
+    if (ours && strncmp(name, p->keep, strlen(p->keep))) {
+        char path[2400];
+        snprintf(path, sizeof path, "%s/%s", p->dir, name);
+        plat_file_delete(path);   // may fail while the game still has it open; then the next merge deletes it
+    }
+    return 1;
+}
+
+static void hex(const uint8_t *d, int n, char *out) {
+    for (int i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", d[i]);
+}
+
+int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, char *const *ids, int n, char *out,
+                     size_t cap) {
+    if (n < 2 || n > 64 || !mount || !key) return 0;
+    const RtConfig *cfg = rt_config();
+    if (!cfg || !cfg->profile) return 0;
+    plat_mutex_lock(&lock);
+    int ok = 0;
+    char why[400] = "";
+    uint8_t *game = NULL, *merged = NULL;
+    uint8_t *data[64] = {0};
+    uint64_t size[64] = {0};
+    size_t game_n = 0, merged_n = 0;
+    Notes notes = {.key = key};
+    uint64_t t0 = plat_now_ms();
+    for (int k = 0; k < n; k++)
+        if (!(data[k] = plat_file_read(hosts[k], &size[k]))) {
+            snprintf(why, sizeof why, "%s's copy can't be read", ids[k]);
+            goto done;
+        }
+    if (!(game = game_copy(mount, key, &game_n, why, sizeof why))) goto done;
+
+    // the file name: <first 16 bytes of SHA-256(version, game copy, each mod's id and copy)>-<key with / as _>
+    Sha256 s;
+    uint8_t d[32];
+    sha256_init(&s);
+    sha256_update(&s, VERSION, sizeof VERSION);
+    sha256(game, game_n, d);
+    sha256_update(&s, d, 32);
+    for (int k = 0; k < n; k++) {
+        sha256_update(&s, ids[k], strlen(ids[k]) + 1);
+        sha256(data[k], size[k], d);
+        sha256_update(&s, d, 32);
+    }
+    sha256_final(&s, d);
+    Prune pr;
+    char name[300], flat[256], file[2400];
+    snprintf(flat, sizeof flat, "%s", key);
+    for (char *c = flat; *c; c++)
+        if (*c == '/' || *c == '\\') *c = '_';
+    hex(d, 16, name);
+    name[32] = '-';
+    snprintf(name + 33, sizeof name - 33, "%s", flat);
+    snprintf(pr.dir, sizeof pr.dir, "%s/bdat-merge", cfg->profile);
+    snprintf(file, sizeof file, "%s/%s", pr.dir, name);
+    if (strlen(file) >= cap) goto done;
+    if (plat_file_size(file) > 0) {
+        snprintf(out, cap, "%s", file);
+        ok = 1;
+        rt_log("bdat merge: %s: the merge of %d mods made before (%s)", key, n, file);
+        add_status("%s: %d mods merged (as before)", key, n);
+        goto done;
+    }
+
+    BdatInput base = {game, game_n, "game"}, mods[64];
+    for (int k = 0; k < n; k++) mods[k] = (BdatInput){data[k], (size_t)size[k], ids[k]};
+    BdatSummary sum;
+    char head[600];
+    size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
+    for (int k = 0; k < n && hn < sizeof head - 70; k++)
+        hn += (size_t)snprintf(head + hn, sizeof head - hn, " %s", ids[k]);
+    add_line(&notes, head);
+    if (!(merged = bdat_merge(&base, mods, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
+    plat_file_mkdir_p(pr.dir);
+    if (!plat_file_write_atomic(file, merged, merged_n)) {
+        snprintf(why, sizeof why, "%s can't be written", file);
+        goto done;
+    }
+    char counts[300], report[2500];
+    snprintf(counts, sizeof counts, "%d tables changed, %d merged from several mods, %d taken whole from the top mod, "
+             "%d values overridden", sum.tables_changed, sum.tables_merged, sum.tables_whole, sum.cells_overridden);
+    add_line(&notes, counts);
+    snprintf(report, sizeof report, "%s.txt", file);
+    plat_file_write_atomic(report, notes.text, notes.n);
+    pr.suffix = flat;
+    pr.keep = name;
+    plat_fs_list(pr.dir, prune_entry, &pr);
+    snprintf(out, cap, "%s", file);
+    ok = 1;
+    rt_log("bdat merge: %s: %d mods merged in %llu ms: %s (report %s)", key, n,
+           (unsigned long long)(plat_now_ms() - t0), counts, report);
+    add_status("%s: %d mods merged, %d values overridden, %d tables taken whole from the top mod", key, n,
+               sum.cells_overridden, sum.tables_whole);
+done:
+    if (!ok) {
+        rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",
+               ids[0]);
+        add_status("%s: not merged (%s); %s's whole file is used", key, why, ids[0]);
+    }
+    plat_mutex_unlock(&lock);
+    for (int k = 0; k < n; k++) free(data[k]);
+    free(game);
+    free(merged);
+    free(notes.text);
+    return ok;
+}

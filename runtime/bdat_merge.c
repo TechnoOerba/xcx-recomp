@@ -138,6 +138,16 @@ static int same_cell(const Tab *a, uint32_t ra, const Tab *b, uint32_t rb, uint3
 }
 
 static int same_row(const Tab *a, uint32_t ra, const Tab *b, uint32_t rb) {
+    // Rows of the same bytes: every cell but the strings is alike, since a string cell holds only where its text is.
+    // Mod tools keep the game's string order, so most rows of a mod's copy are the game's bytes (98.7% for two real
+    // whole-file mods); then only the text cells are compared. Where a column's type differs, the cells are compared
+    // as below.
+    if (a->rl == b->rl && !memcmp(a->p + a->ro + (size_t)ra * a->rl, b->p + b->ro + (size_t)rb * b->rl, a->rl)) {
+        uint32_t c = 0;
+        for (; c < a->cc && ctype(a, c) == ctype(b, c); c++)
+            if (ctype(a, c) == 7 && !same_cell(a, ra, b, rb, c)) return 0;
+        if (c == a->cc) return 1;
+    }
     for (uint32_t c = 0; c < a->cc; c++)
         if (!same_cell(a, ra, b, rb, c)) return 0;
     return 1;
@@ -323,6 +333,8 @@ static int same_table(const Tab *a, const Tab *b) {
 
 static int classify(const Tab *b, const Pair *bk, int bunique, const Tab *m, Change *ch) {
     memset(ch, 0, sizeof *ch);
+    // the same bytes: the same table (a mod's file made from its JSON tables keeps the game's other tables as they are)
+    if (b->len == m->len && !memcmp(b->p, m->p, b->len)) return 1;
     if (!same_cols(b, m)) {
         ch->kind = OPAQUE;
         ch->reason = "other columns";

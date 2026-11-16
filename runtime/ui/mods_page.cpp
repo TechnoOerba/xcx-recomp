@@ -1,5 +1,6 @@
 #include "mods_page.h"
 #include "imgui.h"
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 extern "C" {
@@ -78,6 +79,11 @@ static bool library(float scale,bool focus_first) {
         ImGui::TableSetupColumn("##library_list",ImGuiTableColumnFlags_WidthFixed,300*scale);
         ImGui::TableSetupColumn("##library_detail",ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableNextColumn();
+        // The rows scroll in a box of their own, at most about half the page high, so the picked mod's text, its On box
+        // and its buttons in the next column stay in view beside a long list.
+        float rows_max=ImGui::GetWindowHeight()*0.55f;if(rows_max<160*scale)rows_max=160*scale;
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0,0),ImVec2(FLT_MAX,rows_max));
+        ImGui::BeginChild("##library_rows",ImVec2(0,0),ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_NavFlattened);
         // An entry's parts (library.ini group) are one row that opens on them, shut at first, so an entry with many
         // optional pieces takes one row; it opens by itself when the picked mod is one of them.
         for(int i=0;i<v.count;++i){
@@ -105,6 +111,7 @@ static bool library(float scale,bool focus_first) {
                 ImGui::Unindent();
             }
         }
+        ImGui::EndChild();
         ImGui::BeginDisabled(!idle);if(ImGui::Button(menu_text(UI_MODS_REFRESH)))modlib_refresh();ImGui::EndDisabled();
         ImGui::TableNextColumn();
         const ModLibRow &r=v.rows[index];ImGui::PushID(r.id);

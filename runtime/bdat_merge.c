@@ -880,6 +880,22 @@ static int put_utf8(Buf *b, uint32_t c) {
 
 // A JSON string at j->p (on the opening quote) into *s (malloc'd, NUL-terminated) and *len.
 static int jstring(JParse *j, char **s, size_t *len) {
+    // A string without escapes (nearly every string in a bdat-toolset table) is its bytes as they are: one
+    // allocation of its size. The Buf below starts at 4 KiB, which for a table's hundreds of thousands of names and
+    // values made the parse most of a merge's time.
+    const char *q = j->p + 1;
+    while (q < j->end && *q != '"' && *q != '\\' && (unsigned char)*q >= 0x20) q++;
+    if (q < j->end && *q == '"') {
+        size_t n = (size_t)(q - j->p - 1);
+        char *o = malloc(n + 1);
+        if (!o) return 0;
+        memcpy(o, j->p + 1, n);
+        o[n] = 0;
+        *s = o;
+        *len = n;
+        j->p = q + 1;
+        return 1;
+    }
     Buf b = {0};
     j->p++;
     while (j->p < j->end && *j->p != '"') {

@@ -96,7 +96,9 @@ class ModsTest(unittest.TestCase):
         lst = self.dest / 'mods' / 'romfs-enabled.txt'
         mods.set_enabled(self.dest, 'one', True)
         mods.set_enabled(self.dest, 'two', True)
-        self.assertEqual(lst.read_text(), 'two\none\n')   # the one turned on last wins
+        self.assertEqual(lst.read_text(), 'one\ntwo\n')   # the one turned on later goes last, at the lowest priority
+        mods.set_enabled(self.dest, 'one', True)
+        self.assertEqual(lst.read_text(), 'one\ntwo\n')   # turning on a mod that is on keeps its place
         mods.set_enabled(self.dest, 'two', False)
         self.assertEqual(lst.read_text(), 'one\n')
         mods.remove(self.dest, 'one')

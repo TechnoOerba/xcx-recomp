@@ -11,7 +11,8 @@ Two kinds of mod, as the library's index.json lists them:
          ones are also listed in mods/catalog.txt so the game's Mods page shows them while off. Read at start-up.
   romfs  mods/<id>/romfs/<game path>, files in place of the game's own (runtime/romfs_mods.c). On when listed in
          mods/romfs-enabled.txt, which the game reads again twice a second, so they switch while it runs. Earlier
-         lines win when two mods have the same file; a mod turned on goes first.
+         lines win when two mods have the same file; a mod turned on goes last, at the lowest priority (as in the
+         game's Mods tab), and is moved up there if it should win.
 A game-file mod comes from its author's page as a zip or RAR (installer/archive.py), ideally in the Switch layout:
 romfs/<path>, or romfs/mod/<path> for mods made for the XCXDE mod loader, possibly inside top folders
 (atmosphere/contents/<title id>/romfs). exefs/ (Switch code) is not used. An archive without a romfs folder is read
@@ -621,7 +622,10 @@ def set_enabled(dest, mid, on):
         raise ModError('mods.not_installed', id=mid)
     path = root / LISTS[kind]
     ids = [i for i in read_list(path) if i != mid]
-    write_list(path, ([mid] + ids) if on else ids)
+    if not on:
+        write_list(path, ids)
+    elif mid not in read_list(path):   # a game-file mod goes last; one already on keeps its place
+        write_list(path, ids + [mid] if kind == 'romfs' else [mid] + ids)
 
 
 def remove(dest, mid):

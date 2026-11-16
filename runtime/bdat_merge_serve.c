@@ -9,7 +9,8 @@
 // The merged file is named after a SHA-256 of the game's copy and the mods' copies in order, so a set of inputs is
 // merged once and a change to any of them (a mod update, another order) makes a new file. Older merges of the same
 // game file are deleted. Next to the file, <file>.txt lists the mods, one line per event (bdat_merge.h) and, last,
-// the summary, which a later start shows again when it reuses the file.
+// the summary, which a later start shows again when it reuses the file. <key with / as _>.quick lets a start whose
+// inputs have the same sizes and times find that file without reading them ("the quick check", below).
 #include "bdat_merge.h"
 
 #include <stdarg.h>
@@ -100,7 +101,8 @@ static uint8_t *rom_read(const char *mount, const char *name, uint64_t off, uint
     return p;
 }
 
-static uint8_t *game_copy(const char *mount, const char *key, size_t *n, char *why, size_t cap) {
+// The game's copy as it is stored in sts.ard (packed or not) into a new buffer; NULL with the reason in why.
+static uint8_t *game_stored(const char *mount, const char *key, size_t *n, char *why, size_t cap) {
     if (!arh_state) {
         arh = rom_read(mount, "sts.arh", 0, UINT64_MAX, &arh_size);
         arh_state = arh && arh_size >= 16 && !memcmp(arh, "arh2", 4) && 16 + 16ull * rd32(arh + 4) <= arh_size &&
@@ -128,24 +130,30 @@ static uint8_t *game_copy(const char *mount, const char *key, size_t *n, char *w
             snprintf(why, cap, "the game's %s can't be read from sts.ard", key);
             return NULL;
         }
-        if (got < 48 || memcmp(p, "xbc1", 4)) {
-            *n = got;
-            return p;
-        }
-        uint32_t type = rd32(p + 4), un = rd32(p + 8), packed = rd32(p + 12);
-        uint8_t *out = type == 3 && packed <= got - 48 && un < (1u << 30) ? malloc(un ? un : 1) : NULL;
-        size_t r = out ? ZSTD_decompress(out, un, p + 48, packed) : 0;
-        free(p);
-        if (!out || ZSTD_isError(r) || r != un) {
-            free(out);
-            snprintf(why, cap, "the game's %s can't be unpacked (type %u)", key, type);
-            return NULL;
-        }
-        *n = un;
-        return out;
+        *n = got;
+        return p;
     }
     snprintf(why, cap, "the game has no %s", key);
     return NULL;
+}
+
+// The game's stored copy p (game_stored, freed here) unpacked into a new buffer; NULL with the reason in why.
+static uint8_t *game_unpack(uint8_t *p, size_t got, const char *key, size_t *n, char *why, size_t cap) {
+    if (got < 48 || memcmp(p, "xbc1", 4)) {
+        *n = got;
+        return p;
+    }
+    uint32_t type = rd32(p + 4), un = rd32(p + 8), packed = rd32(p + 12);
+    uint8_t *out = type == 3 && packed <= got - 48 && un < (1u << 30) ? malloc(un ? un : 1) : NULL;
+    size_t r = out ? ZSTD_decompress(out, un, p + 48, packed) : 0;
+    free(p);
+    if (!out || ZSTD_isError(r) || r != un) {
+        free(out);
+        snprintf(why, cap, "the game's %s can't be unpacked (type %u)", key, type);
+        return NULL;
+    }
+    *n = un;
+    return out;
 }
 
 // ---- status lines and events
@@ -417,6 +425,73 @@ static int serve_game_copy(const char *profile, const char *key, const uint8_t *
     return 1;
 }
 
+// A merge made before (file, its report next to it) served again: its report's last line is the summary, the lines
+// before it the events, which go to the status lines and the per-mod tags as when it was made.
+static void reuse(const char *key, const char *file, const char *how, const BdatModFiles *mods, char (*label)[160],
+                  int n) {
+    char report[2500];
+    snprintf(report, sizeof report, "%s.txt", file);
+    uint64_t rn = 0;
+    char *text = (char *)plat_file_read(report, &rn);
+    char *last = NULL;
+    if (text) {
+        char *t = realloc(text, rn + 1);
+        if (t) {
+            text = t;
+            text[rn] = 0;
+            while (rn && (text[rn - 1] == '\n' || text[rn - 1] == '\r')) text[--rn] = 0;
+            last = strrchr(text, '\n');
+        }
+    }
+    rt_log("bdat merge: %s: the merge made before, %s (%s)", key, how, file);
+    add_status(0, "%s: %s (as before)", key, last ? last + 1 : "merged");
+    if (last) {
+        *last = 0;
+        status_events(key, text);
+        tag_events(key, text, mods, label, n);
+    }
+    free(text);
+}
+
+// ---- the quick check
+//
+// Finding the merge made before by its name means reading and hashing every mod's copy: at 50 whole-file mods most
+// of a start's 270 ms. So <profile>/bdat-merge/<key with / as _>.quick holds a key made only of what can be seen
+// without reading them (each mod's id, and each of its files' path, size and last-write time; the game's stored copy,
+// hashed with XXH64 instead of unpacked) and the name of the merged file that key gave. The same key and that file
+// still there: it is served without reading the mods. Anything else (a file replaced, one added, another order, a
+// game update): the inputs are read and hashed as before, and the quick file is written again.
+
+static int quick_file(Sha256 *s, const char *path) {
+    int64_t v[2];
+    if (!plat_file_stat(path, &v[0], &v[1])) return 0;
+    sha256_update(s, path, strlen(path) + 1);
+    sha256_update(s, v, sizeof v);
+    return 1;
+}
+
+// The quick key as 32 hex digits in out; 0 when a file can't be seen (then there's no quick check).
+static int quick_key(const char *key, const uint8_t *stored, size_t stored_n, const BdatModFiles *mods, int n,
+                     char out[33]) {
+    Sha256 s;
+    uint8_t d[32];
+    uint64_t g[2] = {xxh64(stored, stored_n), stored_n};
+    sha256_init(&s);
+    sha256_update(&s, VERSION, sizeof VERSION);
+    sha256_update(&s, key, strlen(key) + 1);
+    sha256_update(&s, g, sizeof g);
+    for (int k = 0; k < n; k++) {
+        sha256_update(&s, mods[k].id, strlen(mods[k].id) + 1);
+        if (!mods[k].full) sha256_update(&s, "-", 1);
+        else if (!quick_file(&s, mods[k].full)) return 0;
+        for (int x = 0; x < mods[k].njson; x++)
+            if (!quick_file(&s, mods[k].json[x])) return 0;
+    }
+    sha256_final(&s, d);
+    hex(d, 16, out);
+    return 1;
+}
+
 int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap) {
     if (n < 1 || n > 64 || !mount || !key) return 0;
     const RtConfig *cfg = rt_config();
@@ -424,16 +499,40 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     plat_mutex_lock(&lock);
     int ok = 0, full = -1;
     char why[400] = "";
-    uint8_t *game = NULL, *merged = NULL;
+    uint8_t *game = NULL, *merged = NULL, *stored = NULL;
     uint8_t *data[64] = {0};
     uint64_t size[64] = {0};
     BdatJson *json[64] = {0};
     int njson[64] = {0};
     char stems[64][64][128], label[64][160];
     for (int k = 0; k < n; k++) label_of(mods[k].id, label[k], sizeof label[k]);
-    size_t game_n = 0, merged_n = 0;
+    size_t game_n = 0, merged_n = 0, stored_n = 0;
     Notes notes = {.key = key};
     uint64_t t0 = plat_now_ms();
+    Prune pr;
+    char name[300], flat[256], file[2400], report[2500], quick[2400], qkey[33] = "";
+    snprintf(flat, sizeof flat, "%s", key);
+    for (char *c = flat; *c; c++)
+        if (*c == '/' || *c == '\\') *c = '_';
+    snprintf(pr.dir, sizeof pr.dir, "%s/bdat-merge", cfg->profile);
+    snprintf(quick, sizeof quick, "%s/%s.quick", pr.dir, flat);
+    for (int k = 0; full < 0 && k < n; k++)
+        if (mods[k].full) full = k;   // not merged: the caller serves this mod's whole copy
+    if (!(stored = game_stored(mount, key, &stored_n, why, sizeof why))) goto done;
+    if (quick_key(key, stored, stored_n, mods, n, qkey)) {
+        // "<quick key> <merged file name>": the same inputs as then, and its file still there
+        uint64_t qn = 0;
+        char *q = (char *)plat_file_read(quick, &qn), *nl = q ? strchr(q, '\n') : NULL;
+        if (nl) *nl = 0;
+        if (q && qn > 34 && !memcmp(q, qkey, 32) && q[32] == ' ' && !strchr(q + 33, '/') && !strchr(q + 33, '\\') &&
+            snprintf(file, sizeof file, "%s/%s", pr.dir, q + 33) < (int)cap && plat_file_size(file) > 0) {
+            snprintf(out, cap, "%s", file);
+            ok = 1;
+            reuse(key, file, "inputs unchanged", mods, label, n);
+        }
+        free(q);
+        if (ok) goto done;
+    }
     char head[600];
     size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
     for (int k = 0; k < n && hn < sizeof head - 70; k++)
@@ -441,7 +540,6 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     add_line(&notes, head);
     for (int k = 0; k < n; k++) {
         if (mods[k].full) {
-            if (full < 0) full = k;
             if (!(data[k] = plat_file_read(mods[k].full, &size[k]))) {
                 snprintf(why, sizeof why, "%s's copy can't be read", label[k]);
                 goto done;
@@ -461,7 +559,9 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
             json[k][njson[k]++] = (BdatJson){stems[k][x], p, (size_t)sz};
         }
     }
-    if (!(game = game_copy(mount, key, &game_n, why, sizeof why))) goto done;
+    game = game_unpack(stored, stored_n, key, &game_n, why, sizeof why);   // takes stored
+    stored = NULL;
+    if (!game) goto done;
 
     // the file name: <first 16 bytes of SHA-256(version, game copy, per mod its id, full copy and JSON tables)>-<key
     // with / as _>
@@ -483,43 +583,17 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
         }
     }
     sha256_final(&s, d);
-    Prune pr;
-    char name[300], flat[256], file[2400], report[2500];
-    snprintf(flat, sizeof flat, "%s", key);
-    for (char *c = flat; *c; c++)
-        if (*c == '/' || *c == '\\') *c = '_';
     hex(d, 16, name);
     name[32] = '-';
     snprintf(name + 33, sizeof name - 33, "%s", flat);
-    snprintf(pr.dir, sizeof pr.dir, "%s/bdat-merge", cfg->profile);
     snprintf(file, sizeof file, "%s/%s", pr.dir, name);
     snprintf(report, sizeof report, "%s.txt", file);
     if (strlen(file) >= cap) goto done;
     if (plat_file_size(file) > 0) {
-        // made before: its report's last line is the summary, the lines before it the events
-        uint64_t rn = 0;
-        char *text = (char *)plat_file_read(report, &rn);
-        char *last = NULL;
-        if (text) {
-            char *t = realloc(text, rn + 1);
-            if (t) {
-                text = t;
-                text[rn] = 0;
-                while (rn && (text[rn - 1] == '\n' || text[rn - 1] == '\r')) text[--rn] = 0;
-                last = strrchr(text, '\n');
-            }
-        }
         snprintf(out, cap, "%s", file);
         ok = 1;
-        rt_log("bdat merge: %s: the merge made before (%s)", key, file);
-        add_status(0, "%s: %s (as before)", key, last ? last + 1 : "merged");
-        if (last) {
-            *last = 0;
-            status_events(key, text);
-            tag_events(key, text, mods, label, n);
-        }
-        free(text);
-        goto done;
+        reuse(key, file, "found by its inputs' contents", mods, label, n);
+        goto quick_note;
     }
 
     BdatInput base = {game, game_n, "game", NULL, 0}, in[64];
@@ -544,6 +618,12 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     add_status(0, "%s: %s", key, line);
     status_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "");
     tag_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "", mods, label, n);
+quick_note:
+    if (qkey[0]) {   // the next start with these inputs finds this file without reading them
+        char line[400];
+        int w = snprintf(line, sizeof line, "%s %s\n", qkey, name);
+        if (w > 0 && (size_t)w < sizeof line) plat_file_write_atomic(quick, line, (size_t)w);
+    }
 done:
     if (!ok && full >= 0) {
         rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",
@@ -562,6 +642,7 @@ done:
         for (int x = 0; x < njson[k]; x++) free((void *)json[k][x].data);
         free(json[k]);
     }
+    free(stored);
     free(game);
     free(merged);
     free(notes.text);

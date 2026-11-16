@@ -568,6 +568,15 @@ int64_t plat_file_size(const char *path) {
     return (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow);
 }
 
+int plat_file_stat(const char *path, int64_t *size, int64_t *mtime_ns) {
+    wchar_t w[WPATH];
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!widen(path, w, WPATH) || !GetFileAttributesExW(w, GetFileExInfoStandard, &d)) return 0;
+    *size = (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow);
+    *mtime_ns = (int64_t)(((uint64_t)d.ftLastWriteTime.dwHighDateTime << 32) | d.ftLastWriteTime.dwLowDateTime) * 100;
+    return 1;
+}
+
 int plat_file_set_readonly(const char *path, int on) {
     wchar_t w[WPATH];
     if (!widen(path, w, WPATH)) return 0;

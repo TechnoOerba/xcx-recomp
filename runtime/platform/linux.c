@@ -772,6 +772,14 @@ int64_t plat_file_size(const char *path) {
     return stat(path, &st) ? -1 : (int64_t)st.st_size;
 }
 
+int plat_file_stat(const char *path, int64_t *size, int64_t *mtime_ns) {
+    struct stat st;
+    if (stat(path, &st)) return 0;
+    *size = (int64_t)st.st_size;
+    *mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000 + st.st_mtim.tv_nsec;
+    return 1;
+}
+
 // The owner's write permission stands for Windows' read-only attribute.
 int plat_file_set_readonly(const char *path, int on) {
     struct stat st;

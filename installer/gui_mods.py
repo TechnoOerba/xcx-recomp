@@ -329,12 +329,16 @@ class ModsWindow:
             return
         on = not target['enabled']
         mid = part['mid'] if part else e['id']
-        if on and part:
-            both = mods.overlaps(e, mid)
-            if both and not messagebox.askyesno(self.cat('mods.title'), self.cat(
-                    'mods.confirm_overlap', name=part['name'], others=', '.join(both)), parent=self.win):
-                return
-        self.run('', lambda: (mods.set_enabled(self.dest, mid, on), self.reload_now())[1])
+        # one part containing another that is on is fine (the bdat merge takes a value two mods set alike once);
+        # the line only says so
+        both = mods.overlaps(e, mid) if on and part else []
+        note = self.cat('mods.overlap_note', name=part['name'], others=', '.join(both)) if both else ''
+
+        def done(listing):
+            self.results.put(('ok', listing))
+            if note:
+                self.results.put(('ok', note))
+        self.run('', lambda: (mods.set_enabled(self.dest, mid, on), self.reload_now())[1], done)
 
     def on_remove(self):
         e, part = self.selected()

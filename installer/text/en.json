@@ -265,7 +265,7 @@
  "layout.several": "The archive holds more than one version of the mod: {choices}. Install it with --top and one of them.",
  "layout.romfs": "{total} game files from the archive's romfs folder:",
  "layout.loader": "{total} game files from the archive's romfs/mod folder (the layout of the XCXDE mod loader):",
- "layout.matched": "The archive has no romfs folder. In \"{top}\", {matched} of its {total} files are files of the game, so XCX Setup reads that folder as the game's folders and installs:",
+ "layout.matched": "The archive has no romfs folder. In \"{top}\", {matched} of its {total} files match the game's files or bdat tables, so XCX Setup reads that folder as the game's folders and installs:",
  "layout.guessed": "The archive has no romfs folder. XCX Setup reads \"{top}\" as the game's folders and installs {total} files:",
  "layout.archive_top": "the top of the archive",
  "layout.files": "{files}",
@@ -277,13 +277,13 @@
  "mods.state_parts": "{on} of {total} parts on",
  "mods.install_parts": "Install parts...",
  "mods.has_parts": "It comes in {count} parts: select one below to turn it on or off or remove it.",
- "mods.part_includes": "Contains: {parts}. Turn those off while this is on.",
+ "mods.part_includes": "Contains: {parts}.",
  "mods.unknown_files": "These files are no part of {name}: {files}. Add them as mods of their own (Add archive)?",
- "mods.confirm_overlap": "{name} overlaps {others}, which is on: one contains the other, so both on change the same game data twice. Turn {name} on anyway?",
  "mods.manual_intro_parts": "{name} is hosted on {site}, which lets people download it only from its own page, so XCX Setup cannot download it for you. It comes in parts; take the full version, or only the parts you want:\n\n{files}\n\n1. Open the download page and download the files you want. The site may ask you to sign in.\n2. Come back here and choose all of them at once.\n\nXCX Setup works out which part each file is and checks it against the mod library before it installs anything.",
  "mods.manual_part_line": "  {part}: \"{file}\" ({size} MB)",
  "mods.parts_title": "Install parts of {name}",
  "mods.parts_pick": "Pick the parts to download:",
  "mods.manual_pick_many": "Choose the downloaded files...",
- "layout.bdat_json": "{count} of these are bdat tables as JSON (the format of bdat-toolset), not files the game reads by themselves: they take effect when the game merges them into its bdat files."
+ "layout.bdat_json": "{count} of these are bdat tables as JSON (the format of bdat-toolset): the game merges them into its bdat files when it starts, so they apply at the next start.",
+ "mods.overlap_note": "{name} and {others} are both on; one contains the other. That is fine: where both set the same value the game takes it once."
 }

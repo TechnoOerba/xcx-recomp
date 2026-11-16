@@ -121,6 +121,18 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(any('bdat-toolset' in line for line in lines))
         self.assertTrue(mod_layout.needs_confirm(p))
 
+    def test_tables_only(self):
+        # the Tweaks mod's options: whole tables as JSON in bdat/<file>/, no game file at all; placed by the bdat
+        # file each table belongs to, the archive's names kept as they are
+        p = mod_layout.plan(members('probe tweaks/', 'probe tweaks/bdat/common/ITM_BeaconList.json',
+                                    'probe tweaks/bdat/us/common_ms/ITM_BeaconList_ms.json'), self.G)
+        self.assertEqual((p.how, p.top, p.matched, p.added), ('matched', 'probe tweaks', 2, []))
+        self.assertEqual(sorted(p.files.values()), ['bdat/common/ITM_BeaconList.json',
+                                                    'bdat/us/common_ms/ITM_BeaconList_ms.json'])
+        # a table of a bdat file the game does not have is no evidence
+        p = mod_layout.plan(members('x/bdat/nosuch/T.json'), self.G)
+        self.assertEqual(p.how, 'guessed')
+
     def test_several_versions(self):
         names = members('Lite/bdat/common.bdat', 'Full/bdat/common.bdat', 'readme.txt')
         for g in (self.G, None):

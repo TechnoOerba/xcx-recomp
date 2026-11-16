@@ -60,9 +60,12 @@ what is in `mods/`:
   `"parts"`: each part has its own file, SHA-256 and size, and `includes` names the parts it already contains. The
   window shows the entry with a row per part. **Install** lists the files, and the player picks all their downloads at
   once; each is matched to its part by SHA-256 (names and order do not matter) and installed as a mod of its own,
-  `mods/<entry>.<part>/`, whose `library.ini` adds `group`, `part` and `includes`. Parts switch on and off one by one,
-  and turning on a part that contains, or is contained in, one that is on asks first. Picked files that are no part
-  of the entry are offered to **Add archive**. `python -m installer.mods --dest DIR install ID --file A --file B` does
+  `mods/<entry>.<part>/`, whose `library.ini` adds `group`, `part` and `includes`. Parts switch on and off one by one.
+  A part that contains, or is contained in, one that is on gets an informational line only: the bdat merge takes a
+  value that two mods set alike once. Picked files that are no part of the entry are offered to **Add archive**.
+- A bdat table as bdat-toolset JSON, `bdat/<file>/<Table>.json` (how the Tweaks mod's options come), is installed
+  under the archive's own name and merged into `bdat/<file>.bdat` by the game at start-up. The layout check counts
+  such a table as the game's when `bdat/<file>.bdat` is a game file, so a mod of only tables is placed as surely. `python -m installer.mods --dest DIR install ID --file A --file B` does
   the same from a console.
 - Archives: zip through Python's `zipfile`, RAR 4 and 5 through `bin/xcx-unpack` (`installer/unpack.c` over the RAR
   readers of libarchive, pinned in `deps/libarchive/`, built by `tools/build_unpack.py` in both release scripts; a

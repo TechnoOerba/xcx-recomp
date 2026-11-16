@@ -6,7 +6,9 @@ or loose at the top ("bdat/common.bdat"). plan() reads such an archive the way a
 
   1. A romfs folder: its contents are the game files, as before (installer/mods.py, romfs_members). Sure.
   2. No romfs folder, and the install's game files are known (installer/game_paths.py): try every folder of the
-     archive as the top of the game's folders and keep the one under which the most files are files of the game.
+     archive as the top of the game's folders and keep the one under which the most files are files of the game. A
+     bdat table as JSON, bdat/<file>/<Table>.json, counts when bdat/<file>.bdat is a game file: the game merges such
+     tables into that file at start-up (runtime bdat merge), so a mod of only tables is placed as surely.
      Sure when at least one file matched. Two folders side by side that match as well as each other are two
      versions of the mod in one archive: the player picks one (LayoutError 'layout.several' with the choices, then
      plan(..., top=choice)).
@@ -61,7 +63,21 @@ class Plan:
 
 
 def is_table_json(game_path):
-    return game_path.lower().startswith('bdat/') and game_path.lower().endswith('.json')
+    """A bdat table as bdat-toolset JSON: bdat/<file>/<Table>.json, which the game merges into bdat/<file>.bdat."""
+    low = game_path.lower()
+    return low.startswith('bdat/') and low.endswith('.json') and low.count('/') >= 2
+
+
+def table_target(game_path):
+    """The bdat file a JSON table belongs to: 'bdat/us/common_ms/X.json' -> 'bdat/us/common_ms.bdat'."""
+    return game_path.rsplit('/', 1)[0] + '.bdat'
+
+
+def in_game(game_path, game):
+    """Whether a path is a game file, or a JSON table of one."""
+    if not game:
+        return False
+    return game_path in game or is_table_json(game_path) and table_target(game_path) in game
 
 
 def is_title_id(name):
@@ -150,19 +166,19 @@ def plan(members, game=None, top=None):
         picks, left = under(files, top)
         if not picks:
             raise LayoutError('mods.zip_no_romfs')
-        score = sum(1 for g in picks.values() if game and g in game)
-        added = sorted(g for g in picks.values() if game and g not in game)
+        score = sum(1 for g in picks.values() if in_game(g, game))
+        added = sorted(g for g in picks.values() if game and not in_game(g, game))
         return check_duplicates(Plan(picks, 'matched' if score else 'guessed', top, score, added, left))
     p = from_romfs(files)
     if p:
-        p.matched = sum(1 for g in p.files.values() if game and g in game)
-        p.added = sorted(g for g in p.files.values() if game and g not in game)
+        p.matched = sum(1 for g in p.files.values() if in_game(g, game))
+        p.added = sorted(g for g in p.files.values() if game and not in_game(g, game))
         return check_duplicates(p)
     if game:
         scored = []
         for top in folders(files):
             picks, left = under(files, top)
-            score = sum(1 for g in picks.values() if g in game)
+            score = sum(1 for g in picks.values() if in_game(g, game))
             if score:
                 scored.append((score, top, picks, left))
         if scored:
@@ -173,7 +189,7 @@ def plan(members, game=None, top=None):
             if len(rivals) > 1:
                 raise LayoutError('layout.several', tops=rivals, choices=', '.join(rivals))
             score, top, picks, left = best[0]
-            added = sorted(g for g in picks.values() if g not in game)
+            added = sorted(g for g in picks.values() if not in_game(g, game))
             return check_duplicates(Plan(picks, 'matched', top, score, added, left))
     # Unknown game files: the first folder (from the top) that holds a known game folder, else the deepest folder
     # reached through folders that hold nothing but one folder and read-me files

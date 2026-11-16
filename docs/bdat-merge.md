@@ -27,6 +27,12 @@ matched as follows.
 - **By row number**, in tables without unique keys. Then a mod may only edit rows in place and add or remove rows at
   the end; a row given another row's key means rows moved, and the table can't be compared row by row.
 
+**Debug names are not changes.** Cells of the debug string type (11) hold the developers' labels, which the game
+doesn't use, and mod tools write them back empty. They count as alike whatever they hold: a table that differs only
+there is unchanged (the game's own table is used), they don't make rows differ when rows are matched or compared, and
+where several mods change a table its rows keep the game's labels. A table only one mod changes is still that mod's
+table as it is.
+
 So a mod's change to a table is a set of cell edits, removed rows, added rows and, when its rows come in another
 order or rows were removed or added before the end, a new **row layout**. A mod whose table has other columns or
 another first row number, or whose rows can't be matched, has an **opaque** change: the table only as a whole.

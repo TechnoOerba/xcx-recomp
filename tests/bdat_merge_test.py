@@ -449,10 +449,31 @@ class BdatMerge(unittest.TestCase):
         edit(other[3], 0, 1, 9)      # alike in one table, its own change in another
         out, notes, s = self.merge(g, ('whole', whole), ('piece', piece), ('other', other))
         self.has(notes, 'adds nothing: piece:', 'every table it changes is the same in whole')
-        self.has(notes, 'partly alike: other:', '1 of the 2 tables it changes are the same in whole')
+        self.has(notes, 'partly alike: other:', '1 of the 2 tables it changes is the same in whole')
         self.assertFalse([n for n in notes if n.startswith('adds nothing: other')], notes)
         self.assertFalse([n for n in notes if ': whole:' in n], notes)
         self.assertEqual((s['nothing'], s['alike'], s['leftout'], s['priority']), (1, 1, 0, 0))
+
+    def test_debug_names_are_not_changes(self):
+        def with_labels():
+            return game() + [Table(0xA0000007, [(0x11111111, 9), (0x22222222, 1), (0x99999999, 11)],
+                                   [(0x8000 + r, r, b'label%d' % r) for r in range(4)], debug=True)]
+        def blanked(m):
+            m[6].rows = [r[:2] + (b'',) for r in m[6].rows]
+            return m
+        g = with_labels()
+        a, b = blanked(mod_of(g)), mod_of(g)       # a mod tool's empty labels, and nothing else, in a's table 6
+        edit(b[0], 1, 1, 50)
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual([r[2] for r in out[6].rows], [r[2] for r in g[6].rows])
+        self.assertEqual((s['changed'], s['merged']), (1, 0))
+        a, b = blanked(mod_of(g)), blanked(mod_of(g))   # both change table 6 for real: the game's labels stay
+        edit(a[6], 1, 1, 50)
+        edit(b[6], 2, 1, 60)
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual([r[1:] for r in out[6].rows], [(0, b'label0'), (50, b'label1'), (60, b'label2'),
+                                                        (3, b'label3')])
+        self.assertEqual((s['changed'], s['merged'], s['priority']), (1, 1, 0))
 
     def test_keys_stay_unique(self):
         g = game()

@@ -125,7 +125,10 @@ static int read_file(const uint8_t *p, size_t n, File *f, char *why, size_t cap)
     return 1;
 }
 
+// Debug string cells (type 11) are always alike: the developers' labels, which the game doesn't use and mod tools
+// write back empty, are no change (docs/bdat-merge.md, "Debug names are not changes").
 static int same_cell(const Tab *a, uint32_t ra, const Tab *b, uint32_t rb, uint32_t c) {
+    if (ctype(a, c) == 11) return 1;
     if (IS_STR(ctype(a, c))) {
         size_t na, nb;
         const char *x = cstr(a, ra, c, &na), *y = cstr(b, rb, c, &nb);
@@ -1441,7 +1444,8 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
             if (used[y] && w < sizeof who)
                 w += (size_t)snprintf(who + w, sizeof who - w, "%s%s", w ? ", " : "", mods[live[y]].name);
         if (alike == changed) event(&ev, ADDS_NOTHING, k, "every table it changes is the same in %s", who);
-        else event(&ev, PARTLY_ALIKE, k, "%d of the %d tables it changes are the same in %s", alike, changed, who);
+        else event(&ev, PARTLY_ALIKE, k, "%d of the %d tables it changes %s the same in %s", alike, changed,
+                   alike == 1 ? "is" : "are", who);
     }
     s.file_mode = BDAT_FILE_MERGED;
     if (!(offs = malloc(bf.count * sizeof *offs))) goto oom;

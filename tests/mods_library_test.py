@@ -34,9 +34,9 @@ class LibraryListTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             exe = Path(tmp) / ('mods_library_check' + ('.exe' if os.name == 'nt' else ''))
             text = Path(tmp) / 'ui_text.o'
-            subprocess.run([clangxx(), '-x', 'c', '-std=c11', '-O0', '-w', f'-I{rt}', '-c', str(rt / 'ui_text.c'),
+            subprocess.run([clangxx(), '-x', 'c', '-std=gnu11', '-O0', '-w', f'-I{rt}', '-c', str(rt / 'ui_text.c'),
                             '-o', str(text)], check=True)
-            subprocess.run([clangxx(), '-std=c++17', '-O0', '-w', f'-I{rt}', f'-I{im}',
+            subprocess.run([clangxx(), '-std=gnu++17', '-O0', '-w', f'-I{rt}', f'-I{im}',
                             str(ROOT / 'tests/mods_library_check.cpp'), str(im / 'imgui.cpp'),
                             str(im / 'imgui_draw.cpp'), str(im / 'imgui_tables.cpp'), str(im / 'imgui_widgets.cpp'),
                             str(text), '-o', str(exe)] + (['-static'] if os.name == 'nt' else []), check=True)

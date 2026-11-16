@@ -41,6 +41,9 @@ static const char *test_next[4];
 static int test_nnext;
 __attribute__((weak)) int romfs_mods_premerge(void) { premerges++; return 1; }
 __attribute__((weak)) int romfs_mods_premerge_state(void) { return test_ahead; }
+static int test_auto;
+__attribute__((weak)) int romfs_mods_auto_merge(void) { return test_auto; }
+__attribute__((weak)) void romfs_mods_set_auto_merge(int on) { test_auto = on; }
 __attribute__((weak)) int bdat_merge_next_status(int i, char *out, size_t cap, int *kind) {
     if (i < 0 || i >= test_nnext) return 0;
     snprintf(out, cap, "%s", test_next[i]);
@@ -213,6 +216,18 @@ int main() {
     refresh();
     verify(find('Z', nullptr) >= 0, "nothing to merge at the next start says so");
     test_ahead = 0;
+
+    // the merge-automatically box: first in the section, and a click turns the setting on
+    verify(find('A', nullptr) >= 0 && find('A', nullptr) < find('P', nullptr), "the merge-automatically box leads");
+    io.AddMousePosEvent(prio_auto_low.x + 6, (prio_auto_low.y + prio_auto_high.y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    verify(test_auto == 1, "ticking the box turns automatic merging on");
+    refresh();
+    verify(find('M', nullptr) < 0 && find('W', nullptr) >= 0,
+           "merging automatically: no Merge now, the changed list shows as merging");
 
     // nothing merged and one mod left, but the list changed since start-up: the section still says so
     test_n = 1;

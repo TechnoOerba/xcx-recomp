@@ -33,6 +33,12 @@ int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *m
 }
 void bdat_merge_next_clear(void) {}
 
+// no xcx.ini: merging automatically stays off
+#include "../runtime/cfg.h"
+int cfg_bool(const char *name) { (void)name; return 0; }
+void cfg_set(const char *name, const char *value) { (void)name; (void)value; }
+int cfg_save(void) { return 1; }
+
 int main(int argc, char **argv) {
     normalise();
     rescan();

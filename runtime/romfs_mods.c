@@ -26,12 +26,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include "bdat_merge.h"
+#include "cfg.h"
 #include "host.h"
 #include "platform/platform.h"
 
 #define LIST_CAP 4096          // bytes of romfs-enabled.txt
 #define MOD_CAP 32             // enabled mods
 #define CHECK_MS 500           // how often the list file is read again
+#define AUTO_MS 1500           // with bdat_merge_auto, how long a changed list stays put before it is merged ahead
 
 // key: lowercase game path without a leading '/'. host: the top mod's copy. For a data table or a JSON table that
 // several mods have: every copy and its mod's id (alts[0] == host).
@@ -61,6 +63,10 @@ static char start_mount[64];               // the mount the game read them from
 // The merges made ahead (romfs_mods_premerge): each data table of started and its mods then, as in started.
 static Merged ahead[MERGED_CAP];
 static int nahead, ahead_busy;
+static uint64_t changed_at;                // when the list last changed (rebuild); under check_lock
+static int auto_pending;                   // since then, not yet looked at for bdat_merge_auto; under check_lock
+static int stale_now(void);
+static int ahead_state(void);
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -273,7 +279,16 @@ static void maybe_reload(void) {
             memcpy(list_seen, buf, (size_t)(len > 0 ? len : 0) + 1);
             list_len_seen = len;
             if (len >= 0 || nfiles) rebuild(buf);
+            changed_at = now;
+            auto_pending = 1;
         }
+    }
+    // bdat_merge_auto: once a changed list has stayed put a moment (a few Up/Down clicks are one change), it is merged
+    // ahead, if the game has read its tables and they would now be made otherwise. A merge still running is waited for.
+    if (auto_pending && now - changed_at >= AUTO_MS && !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE)) {
+        auto_pending = 0;
+        if (cfg_bool("XCX_BDAT_MERGE_AUTO") && stale_now() && ahead_state() != 2 && romfs_mods_premerge())
+            rt_log("romfs mods: the list changed; merging its data tables ahead for the next start");
     }
     plat_mutex_unlock(&check_lock);
 }
@@ -577,6 +592,10 @@ int romfs_mod_has_other_files(const char *id) {
 
 int romfs_mods_tables_changed(void) {
     maybe_reload();
+    return stale_now();
+}
+
+static int stale_now(void) {
     plat_mutex_lock_shared(&lock);
     int changed = 0;
     for (int i = 0; !changed && i < nstarted; i++) {
@@ -592,6 +611,7 @@ int romfs_mods_tables_changed(void) {
 
 static void premerge_run(void *arg) {
     (void)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);   // the game plays meanwhile; bdat_merge_serve's helpers match it
     maybe_reload();
     char keys[MERGED_CAP][1024], mount[64];
     plat_mutex_lock_shared(&lock);
@@ -652,6 +672,21 @@ int romfs_mods_premerge(void) {
 int romfs_mods_premerge_state(void) {
     if (__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE)) return 1;
     maybe_reload();
+    return ahead_state();
+}
+
+int romfs_mods_auto_merge(void) { return cfg_bool("XCX_BDAT_MERGE_AUTO"); }
+
+void romfs_mods_set_auto_merge(int on) {
+    cfg_set("XCX_BDAT_MERGE_AUTO", on ? "1" : "0");
+    cfg_save();
+    plat_mutex_lock(&check_lock);
+    auto_pending = on;   // turned on with the list already changed: merged ahead at the next check
+    plat_mutex_unlock(&check_lock);
+}
+
+static int ahead_state(void) {
+    if (__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE)) return 1;
     plat_mutex_lock_shared(&lock);
     int same = nahead > 0 && nahead >= nstarted;
     for (int i = 0; same && i < nahead; i++) {

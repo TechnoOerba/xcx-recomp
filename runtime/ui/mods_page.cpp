@@ -20,11 +20,11 @@ static ImVec2 mods_button_low[4],mods_button_high[4];static int mods_button_coun
 static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
 // the Mod priority section as drawn (tests/mods_priority_check.cpp): each line and how it looks (P a priority row,
 // H the merges' heading, R the restart line, O left out, Y caveat, G grey, N a summary; M the Merge now button, W
-// merging, X the next start's heading, then its lines as above, Z none to merge, S the start-up lines' heading), and
-// the rows' Up buttons
+// merging, X the next start's heading, then its lines as above, Z none to merge, S the start-up lines' heading, A the
+// merge-automatically box), and the rows' Up buttons
 static char prio_lines[64][340],prio_tag[64];static int prio_count;static ImVec2 prio_up_low[32],prio_up_high[32];
 static ImVec2 prio_off_low[32],prio_off_high[32];static bool prio_off_shown[32];   // Turn off buttons; T lines: tags
-static ImVec2 prio_merge_low,prio_merge_high;
+static ImVec2 prio_merge_low,prio_merge_high,prio_auto_low,prio_auto_high;
 static void prio_line(char tag,const char *text){if(prio_count<64){prio_tag[prio_count]=tag;snprintf(prio_lines[prio_count++],sizeof prio_lines[0],"%s",text);}}
 #define PRIO_LINE(tag,text) prio_line(tag,text)
 #else
@@ -55,7 +55,8 @@ static int merge_lines(bool ahead) {
 // (runtime/bdat_merge_serve.c): a summary per file, then its changes left out (orange) and caveats (yellow). Shown
 // when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
 // Once the list differs from what the game merged at start-up, Merge now merges it ahead (romfs_mods_premerge): its
-// lines and tags then show what the next start will have, and that start uses the files it made.
+// lines and tags then show what the next start will have, and that start uses the files it made. "Merge
+// automatically" (bdat_merge_auto) has romfs_mods.c do that by itself after each change.
 static void mod_priority(const ModLibView &v,bool idle) {
     static char ids[32][65],tag[32][200];static int n,tag_flags[32];static bool tables_only[32];
     static uint64_t seen=~0ull;static double next;static bool stale;static int ahead;
@@ -63,7 +64,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
     if(v.generation!=seen||now>=next){
         n=romfs_mods_priority(ids,32);stale=romfs_mods_tables_changed()!=0;seen=v.generation;next=now+1.0;
         ahead=stale?romfs_mods_premerge_state():0;
-        if(ahead==1)next=now+0.25;   // merging: look again soon
+        if(ahead==1||(stale&&!ahead&&romfs_mods_auto_merge()))next=now+0.25;   // merging, or about to: look again soon
         for(int i=0;i<n;++i){
             bool got=stale&&ahead==2?bdat_merge_next_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i])
                                     :bdat_merge_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i]);
@@ -75,6 +76,13 @@ static void mod_priority(const ModLibView &v,bool idle) {
     char line[320];int kind=0;bool merges=bdat_merge_status(0,line,sizeof line,&kind)!=0;
     if(n<2&&!merges&&!stale)return;
     ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_PRIORITY));
+    bool autom=romfs_mods_auto_merge()!=0;
+    if(ImGui::Checkbox(menu_text(UI_MODS_MERGE_AUTO),&autom)){romfs_mods_set_auto_merge(autom);next=0;}
+    PRIO_LINE('A',menu_text(UI_MODS_MERGE_AUTO));
+#ifdef XCX_MOD_UI_TESTING
+    prio_auto_low=ImGui::GetItemRectMin();prio_auto_high=ImGui::GetItemRectMax();
+#endif
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",menu_text(UI_MODS_MERGE_AUTO_DESC));
     if(n>=2){
         ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_PRIORITY_DESC));ImGui::PopTextWrapPos();
         int move=-1,off=-1;bool up=false;
@@ -122,7 +130,9 @@ static void mod_priority(const ModLibView &v,bool idle) {
         }
         PRIO_LINE('R',menu_text(UI_MODS_MERGES_STALE));
         ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
-        if(ahead==1){
+        // with merge automatically on there's no button: romfs_mods.c merges a moment after the last change, so the
+        // wait for that already counts as merging
+        if(ahead==1||(ahead==0&&autom)){
             ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGING));PRIO_LINE('W',menu_text(UI_MODS_MERGING));
         }else if(ahead==2){
             ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES_NEXT));PRIO_LINE('X',menu_text(UI_MODS_MERGES_NEXT));

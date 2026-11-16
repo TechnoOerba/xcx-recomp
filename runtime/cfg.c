@@ -31,7 +31,7 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
     "AB", "APP_POOL", "ASSUME_FOCUS", "ASTC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
-    "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
+    "BACKGROUND_WINDOW", "BDAT_MERGE_AUTO", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
@@ -64,7 +64,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"HDR_HUE", "display"},
     {"DEVICE_PROFILE", "display"},
     {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
-    {"VOLUME", "audio"}, {"PAUSE_IN_BACKGROUND", "audio"}, {"CHEATS", "cheats"},
+    {"VOLUME", "audio"}, {"PAUSE_IN_BACKGROUND", "audio"}, {"CHEATS", "cheats"}, {"BDAT_MERGE_AUTO", "files"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
     {"GLYPH_STYLE", "input"}, {"GLYPH_APPEARANCE", "input"}, {"PAD_LAYOUT", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
@@ -117,6 +117,7 @@ static const CfgMeta metas[] = {
     {"GLYPH_STYLE", "auto", "original|auto|playstation|xbox|steam|keyboard", LIVE},
     {"MOUSE_SENS", "1", "0..10", LIVE},
     {"CHEATS", "0", "0|1", LIVE},
+    {"BDAT_MERGE_AUTO", "0", "0|1", LIVE},   // the Mods tab's "merge automatically" (romfs_mods.c)
     {"MENU_LANG", "", "en|ru", LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},

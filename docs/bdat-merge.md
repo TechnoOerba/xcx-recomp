@@ -107,3 +107,10 @@ The log has the same lines (the first few of each merge), and the Mods tab shows
 left-out changes of this run. In its Mod priority list each mod's row also carries what the merges said about it
 ("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several), and a mod that adds
 nothing to any file and has no files but data tables gets a **Turn off** button.
+
+The game reads its data tables only at start-up, so once the list changes while it runs (another order, a mod
+turned on or off) the Mods tab says the change applies after a restart and offers **Merge now**: the new list is
+merged in the background (half the logical processors, at most 4, below normal priority), its lines and tags are
+shown as the next start's, and the files land in the cache with their quick note, so the next start uses them as
+they are. **Merge automatically when the mods change** (xcx.ini `bdat_merge_auto`) does the same by itself 1.5 s after
+the last change.

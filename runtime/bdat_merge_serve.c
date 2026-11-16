@@ -544,8 +544,10 @@ static int quick_key(const char *key, const uint8_t *stored, size_t stored_n, co
 // reading and hashing its copies here, putting in its JSON tables and comparing its tables with the game's in
 // bdat_merge. So that runs on up to 8 threads, the calling one among them: one fewer than the logical processors, or
 // all of them on a CPU with 4 or fewer (the game waits for this file anyway, and one thread fewer of 2 is none to
-// help). Whatever the order the work finishes in, its results and notes are taken in priority order afterwards, so the
-// merged file and the report are the same as one after another.
+// help). A merge made ahead for the next start (bdat_merge_prepare) runs while the game plays, so it takes half the
+// logical processors, at most 4, below normal priority: a little slower, out of the game's way. Whatever the order the
+// work finishes in, its results and notes are taken in priority order afterwards, so the merged file and the report
+// are the same as one after another.
 
 typedef struct {
     void (*fn)(void *ctx, int i);
@@ -563,12 +565,16 @@ static void parallel_for(int n, void (*fn)(void *ctx, int i), void *ctx) {
     uint32_t cpus = plat_cpu_count();
     int want = cpus <= 4 ? (int)cpus : (int)cpus - 1;   // a small CPU: all of it, as the game waits for this file
     if (want > 8) want = 8;
+    if (target) want = cpus / 2 > 4 ? 4 : cpus / 2 < 1 ? 1 : (int)(cpus / 2);   // ahead, while the game plays
     if (want > n) want = n;
     Pool p = {fn, ctx, n, 0};
     PlatThread *t[8];
     int nt = 0;
     for (int i = 1; i < want; i++)
-        if ((t[nt] = plat_thread_new(pool_run, &p, "bdat merge"))) nt++;
+        if ((t[nt] = plat_thread_new(pool_run, &p, "bdat merge"))) {
+            if (target) plat_thread_set_priority(t[nt], PLAT_PRIO_BELOW_NORMAL);
+            nt++;
+        }
     pool_run(&p);   // a thread that didn't start leaves its share to the others
     for (int i = 0; i < nt; i++) plat_thread_join(t[i]);
 }

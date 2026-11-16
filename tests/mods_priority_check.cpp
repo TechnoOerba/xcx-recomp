@@ -4,7 +4,7 @@
 // restart line once the list differs from what the game merged at start-up. Prints "ok <n>" or one "FAIL <check>" per
 // failure; the exit code is the failure count. Also each row's tag of what the merges said about it, Turn off, and
 // Merge now: merging, then the next start's lines and tags in place of this run's. And a row's note opening that mod's
-// lines, Back to the start-up list, Restart now (asking first once a save is loaded), and the priority number in the
+// lines, Revert to the start-up list, Restart now (asking first in the world), and the priority number in the
 // library's picked mod.
 #define XCX_MOD_UI_TESTING
 #include "../runtime/ui/mods_page.cpp"
@@ -297,13 +297,14 @@ int main() {
     click(prio_tag_low[0], prio_tag_high[0]);
     refresh();
 
-    // a changed list: Back to the start-up list, which reads the lists again for the library, and Restart now
+    // a changed list: Revert to the start-up list, which reads the lists again for the library, and Restart now
     test_changed = 1;
     test_listchg = 1;
     refresh();
-    verify(find('U', nullptr) >= 0 && find('Q', nullptr) > find('U', nullptr), "Back to the start-up list, then Restart now");
+    verify(find('U', nullptr) >= 0 && find('Q', nullptr) > find('U', nullptr),
+           "Revert to the start-up list, then Restart now");
     click(prio_undo_low, prio_undo_high);
-    verify(restores == 1 && rereads == 1, "Back to the start-up list writes it back and updates the library");
+    verify(restores == 1 && rereads == 1, "Revert to the start-up list writes it back and updates the library");
     test_listchg = 0;
     refresh();
     verify(find('U', nullptr) < 0 && find('Q', nullptr) >= 0, "an updated mod alone: Restart now, no way back");

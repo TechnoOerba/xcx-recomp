@@ -24,7 +24,7 @@ static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
 // the Mod priority section as drawn (tests/mods_priority_check.cpp): each line and how it looks (P a priority row,
 // H the merges' heading, R the restart line, O left out, Y caveat, G grey, N a summary; M the Merge now button, W
 // merging, X the next start's heading, then its lines as above, Z none to merge, S the start-up lines' heading, A the
-// merge-automatically box, D a mod's own lines under its row, E none for it, U Back to the start-up list, Q Restart
+// merge-automatically box, D a mod's own lines under its row, E none for it, U Revert to the start-up list, Q Restart
 // now), and the rows' Up buttons
 static char prio_lines[64][340],prio_tag[64];static int prio_count;static ImVec2 prio_up_low[32],prio_up_high[32];
 static ImVec2 prio_off_low[32],prio_off_high[32];static bool prio_off_shown[32];   // Turn off buttons; T lines: tags
@@ -67,7 +67,7 @@ static int merge_lines(bool ahead) {
 // Once the list differs from what the game merged at start-up, Merge now merges it ahead (romfs_mods_premerge): its
 // lines and tags then show what the next start will have, and that start uses the files it made. "Merge
 // automatically" (bdat_merge_auto) has romfs_mods.c do that by itself after each change. A row's note opens that
-// mod's own lines from the merge reports under it; Back to the start-up list undoes the changes, and Restart now
+// mod's own lines from the merge reports under it; Revert to the start-up list undoes the changes, and Restart now
 // restarts the game (asking first in the world: anything since the last save would be lost).
 static void mod_priority(const ModLibView &v,bool idle) {
     static char ids[32][65],tag[32][200];static int n,tag_flags[32],changed[32];
@@ -171,7 +171,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
         }
         PRIO_LINE('R',menu_text(UI_MODS_MERGES_STALE));
         ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
-        // the buttons right under it, in a row: Merge now (unless merging by itself), Back to the start-up list (once
+        // the buttons right under it, in a row: Merge now (unless merging by itself), Revert to the start-up list (once
         // the list itself changed: an updated mod alone can't be undone here), Restart now
         bool can_merge=ahead==0&&!autom;
         if(can_merge){

@@ -53,5 +53,5 @@ void modlib_remove(const char *id);
 // romfs mods switch while the game runs; Lua mods apply at the next start.
 void modlib_set_enabled(const char *id, int on);
 // Reads the lists again for which installed mods are on, after another part of the game rewrote one (the Mods tab's
-// Back to the start-up list).
+// Revert to the start-up list).
 void modlib_reread_enabled(void);

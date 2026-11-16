@@ -116,7 +116,7 @@ turned on or off, or a mod's files updated: their sizes and times count) the Mod
 merged in the background (half the logical processors, at most 4, below normal priority), its lines and tags are
 shown as the next start's, and the files land in the cache with their quick note, so the next start uses them as
 they are. **Merge automatically when the mods change** (xcx.ini `bdat_merge_auto`) does the same by itself 1.5 s after
-the last change. **Back to the start-up list** writes the list back as the game started with it, so no restart is
+the last change. **Revert to the start-up list** writes the list back as the game started with it, so no restart is
 needed, and **Restart now** starts a new copy of the game that waits for this one to close, then closes it; in the world
 (a save loaded or a new game started, not at the title screen) it asks first, since anything since the last save would
 be lost.

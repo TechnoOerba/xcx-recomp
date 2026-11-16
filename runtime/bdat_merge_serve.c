@@ -150,7 +150,7 @@ static uint8_t *game_copy(const char *mount, const char *key, size_t *n, char *w
 
 // ---- status lines and events
 
-// kind 0: a summary line; 1: a change left out; 2: a caveat. The oldest lines go first when the list is full.
+// kind 0: a summary line; 1: a change left out; 2: a caveat; 3: a mod that adds nothing. The oldest lines go first when the list is full.
 static void add_status(int kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void add_status(int kind, const char *fmt, ...) {
     va_list ap;
@@ -201,20 +201,27 @@ static void on_note(void *ctx, const char *line) {
     add_line(s, line);
 }
 
-// The left-out and caveat lines of a report (one event per line), up to STATUS_EVENTS, into the status lines.
+// The left-out and caveat lines of a report (one event per line), up to STATUS_EVENTS, into the status lines; then
+// up to STATUS_EVENTS of its mods that add nothing, so those never push a left-out change out of view.
 static void status_events(const char *key, const char *text) {
-    int shown = 0, more = 0;
-    for (const char *p = text; p && *p;) {
-        const char *e = strchr(p, '\n');
-        size_t n = e ? (size_t)(e - p) : strlen(p);
-        int kind = !strncmp(p, "left out: ", 10) ? 1 : !strncmp(p, "caveat: ", 8) ? 2 : 0;
-        if (kind && shown < STATUS_EVENTS) {
-            add_status(kind, "%s: %.*s", key, (int)n, p);
-            shown++;
-        } else if (kind) {
-            more++;
+    int more = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int shown = 0;
+        for (const char *p = text; p && *p;) {
+            const char *e = strchr(p, '\n');
+            size_t n = e ? (size_t)(e - p) : strlen(p);
+            int kind = !strncmp(p, "left out: ", 10) ? 1 : !strncmp(p, "caveat: ", 8) ? 2 :
+                       !strncmp(p, "adds nothing: ", 14) ? 3 : 0;
+            if (kind && (kind == 3) == pass) {
+                if (shown < STATUS_EVENTS) {
+                    add_status(kind, "%s: %.*s", key, (int)n, p);
+                    shown++;
+                } else {
+                    more++;
+                }
+            }
+            p = e ? e + 1 : NULL;
         }
-        p = e ? e + 1 : NULL;
     }
     if (more) add_status(0, "%s: %d more in the report", key, more);
 }
@@ -252,10 +259,14 @@ static void summary_line(char *out, size_t cap, int n, const BdatSummary *s, cha
         snprintf(out, cap, "only %s's copy is used (the other mods' copies can't be)", label[s->file_mod]);
     else if (s->file_mode == BDAT_FILE_WHOLE)
         snprintf(out, cap, "%s's whole copy is used (it has another list of tables)", label[s->file_mod]);
-    else
-        snprintf(out, cap, "%d mods merged: %d table%s from several mods, %d settled by priority, %d change%s left out, "
-                 "%d caveat%s", n, s->tables_merged, s->tables_merged == 1 ? "" : "s", s->priority, s->left_out,
-                 s->left_out == 1 ? "" : "s", s->caveats, s->caveats == 1 ? "" : "s");
+    else {
+        int w = snprintf(out, cap, "%d mods merged: %d table%s from several mods, %d settled by priority, %d change%s "
+                         "left out, %d caveat%s", n, s->tables_merged, s->tables_merged == 1 ? "" : "s", s->priority,
+                         s->left_out, s->left_out == 1 ? "" : "s", s->caveats, s->caveats == 1 ? "" : "s");
+        if (s->adds_nothing && w > 0 && (size_t)w < cap)
+            snprintf(out + w, cap - (size_t)w, ", %d mod%s adding nothing", s->adds_nothing,
+                     s->adds_nothing == 1 ? "" : "s");
+    }
 }
 
 // What a mod is called in events: the name in its library.ini (mods/<id>/library.ini, written by the mod managers;

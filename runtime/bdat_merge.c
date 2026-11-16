@@ -310,6 +310,14 @@ static int align_positional(const Tab *b, const Pair *bk, const Tab *m, Change *
 }
 
 // bk: base's sorted keys (NULL when column 0 isn't a hash), bunique: no key repeats.
+// The same columns, first row number and rows: two copies of a table alike.
+static int same_table(const Tab *a, const Tab *b) {
+    if (!same_cols(a, b) || a->base != b->base || a->rc != b->rc) return 0;
+    for (uint32_t r = 0; r < a->rc; r++)
+        if (!same_row(a, r, b, r)) return 0;
+    return 1;
+}
+
 static int classify(const Tab *b, const Pair *bk, int bunique, const Tab *m, Change *ch) {
     memset(ch, 0, sizeof *ch);
     if (!same_cols(b, m)) {
@@ -468,10 +476,11 @@ typedef struct {
 
 static void event(Events *ev, int kind, int mod, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void event(Events *ev, int kind, int mod, const char *fmt, ...) {
-    static const char *const names[] = {"priority", "left out", "caveat"};
+    static const char *const names[] = {"priority", "left out", "caveat", "adds nothing"};
     if (kind == 0) ev->s->priority++;
     else if (kind == 1) ev->s->left_out++;
-    else ev->s->caveats++;
+    else if (kind == 2) ev->s->caveats++;
+    else ev->s->adds_nothing++;
     if (!ev->note) return;
     char line[700];
     int n = snprintf(line, sizeof line, "%s: ", names[kind]);
@@ -482,7 +491,7 @@ static void event(Events *ev, int kind, int mod, const char *fmt, ...) {
     va_end(ap);
     ev->note(ev->ctx, line);
 }
-enum { PRIORITY, LEFT_OUT, CAVEAT };
+enum { PRIORITY, LEFT_OUT, CAVEAT, ADDS_NOTHING };
 
 static void rowname(const Tab *t, uint32_t r, char *out, size_t cap) {
     if (ctype(t, 0) == 9) snprintf(out, cap, "row %u (key %08X)", t->base + r, key(t, r));
@@ -1408,6 +1417,27 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     }
     for (int x = 0; x < nlive; x++)
         if (!refs_of(&bf, &mf[live[x]], ch[live[x]], &refs[live[x]])) goto oom;
+    // a mod whose every changed table a higher mod has alike adds nothing (docs/bdat-merge.md, "The report")
+    for (int x = 1; x < nlive; x++) {
+        int k = live[x], changed = 0, all = 1, used[MAX_MODS] = {0};
+        for (uint32_t j = 0; all && j < bf.count; j++) {
+            if (ch[k][j].kind == SAME) continue;
+            changed = 1;
+            int h = -1;
+            for (int y = 0; h < 0 && y < x; y++)
+                if (same_table(&mf[live[y]].t[j], &mf[k].t[j])) h = y;
+            if (h < 0) all = 0;
+            else used[h] = 1;
+        }
+        if (!changed || !all) continue;
+        char who[400];
+        size_t w = 0;
+        who[0] = 0;
+        for (int y = 0; y < x; y++)
+            if (used[y] && w < sizeof who)
+                w += (size_t)snprintf(who + w, sizeof who - w, "%s%s", w ? ", " : "", mods[live[y]].name);
+        event(&ev, ADDS_NOTHING, k, "every table it changes is the same in %s", who);
+    }
     s.file_mode = BDAT_FILE_MERGED;
     if (!(offs = malloc(bf.count * sizeof *offs))) goto oom;
     for (uint32_t j = 0; j < bf.count; j++) {

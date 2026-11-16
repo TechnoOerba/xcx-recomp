@@ -30,11 +30,11 @@ void mods_page_select(const char *owner,const char *page){snprintf(requested_own
 // (runtime/bdat_merge_serve.c): a summary per file, then its changes left out (orange) and caveats (yellow). Shown
 // when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
 static void mod_priority(const ModLibView &v,bool idle) {
-    static char ids[32][65];static int n;static uint64_t seen=~0ull;static double next;
+    static char ids[32][65];static int n;static uint64_t seen=~0ull;static double next;static bool stale;
     double now=ImGui::GetTime();
-    if(v.generation!=seen||now>=next){n=romfs_mods_priority(ids,32);seen=v.generation;next=now+1.0;}
+    if(v.generation!=seen||now>=next){n=romfs_mods_priority(ids,32);stale=romfs_mods_tables_changed()!=0;seen=v.generation;next=now+1.0;}
     char line[320];int kind=0;bool merges=bdat_merge_status(0,line,sizeof line,&kind)!=0;
-    if(n<2&&!merges)return;
+    if(n<2&&!merges&&!stale)return;
     ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_PRIORITY));
     if(n>=2){
         ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_PRIORITY_DESC));ImGui::PopTextWrapPos();
@@ -51,10 +51,16 @@ static void mod_priority(const ModLibView &v,bool idle) {
         }
         if(move>=0){romfs_mods_move(ids[move],up);next=0;}
     }
-    if(merges){
-        ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));
+    // The merges were made at start-up and the game doesn't read its tables again, so once the list would make them
+    // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now.
+    if(merges||stale){
         ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));
+        if(stale){
+            ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(0.55f,0.8f,1.0f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
+        }
         for(int i=0;bdat_merge_status(i,line,sizeof line,&kind);++i){
+            if(kind==3){ImGui::TextDisabled("%s",line);continue;}   // a mod that adds nothing: not a conflict
             if(kind)ImGui::PushStyleColor(ImGuiCol_Text,kind==1?ImVec4(1.0f,0.7f,0.4f,1):ImVec4(1.0f,0.9f,0.5f,1));
             ImGui::TextUnformatted(line);
             if(kind)ImGui::PopStyleColor();

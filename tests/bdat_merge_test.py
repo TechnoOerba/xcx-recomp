@@ -439,6 +439,20 @@ class BdatMerge(unittest.TestCase):
         self.assertFalse([n for n in notes if n.startswith('left out')], notes)
         self.assertEqual(s['leftout'], 0)
 
+    def test_a_mod_a_higher_one_already_contains_adds_nothing(self):
+        g = game()
+        whole, piece, other = mod_of(g), mod_of(g), mod_of(g)
+        edit(whole[0], 1, 1, 7)
+        edit(whole[1], 2, 1, 8)
+        edit(piece[1], 2, 1, 8)      # the piece: one of the whole version's tables, alike
+        edit(other[1], 2, 1, 8)
+        edit(other[3], 0, 1, 9)      # alike in one table, its own change in another
+        out, notes, s = self.merge(g, ('whole', whole), ('piece', piece), ('other', other))
+        self.has(notes, 'adds nothing: piece:', 'every table it changes is the same in whole')
+        self.assertFalse([n for n in notes if n.startswith('adds nothing: other')], notes)
+        self.assertFalse([n for n in notes if n.startswith('adds nothing: whole')], notes)
+        self.assertEqual((s['nothing'], s['leftout'], s['priority']), (1, 0, 0))
+
     def test_keys_stay_unique(self):
         g = game()
         a, b = mod_of(g), mod_of(g)

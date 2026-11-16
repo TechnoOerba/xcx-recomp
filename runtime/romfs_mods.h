@@ -20,6 +20,9 @@ void romfs_mods_reload(void);
 // Turns a mod on (first in romfs-enabled.txt, so its files win) or off; 1 when the list was written. The game picks
 // the change up within CHECK_MS of romfs_mods.c.
 int romfs_mods_set(const char *id, int on);
+// 1 when the mods that data tables the game read at start-up would be made from (which mods, in which order) are no
+// longer the ones they were made from: the game reads those tables only at start-up, so it needs a restart.
+int romfs_mods_tables_changed(void);
 // The ids of romfs-enabled.txt in order, the top (winning) mod first, into ids; the count.
 int romfs_mods_priority(char (*ids)[65], int cap);
 // Swaps the mod with the one above it (up) or below it in romfs-enabled.txt; 1 when the list was written. Files follow

@@ -94,8 +94,9 @@ int main(int argc, char **argv) {
         if (s.file_mode != BDAT_FILE_MERGED)
             snprintf(file, sizeof file, "%s:%s", s.file_mode == BDAT_FILE_WHOLE ? "whole" : "copied",
                      mods[s.file_mod].name);
-        printf("summary changed=%d merged=%d whole=%d priority=%d leftout=%d caveat=%d file=%s\n", s.tables_changed,
-               s.tables_merged, s.tables_whole, s.priority, s.left_out, s.caveats, file);
+        printf("summary changed=%d merged=%d whole=%d priority=%d leftout=%d caveat=%d nothing=%d file=%s\n", s.tables_changed,
+               s.tables_merged, s.tables_whole, s.priority, s.left_out, s.caveats,
+               s.adds_nothing, file);
         return 0;
     }
     fprintf(stderr, "usage: bdat_merge_check rewrite FILE... | merge BASE OUT MOD...\n");

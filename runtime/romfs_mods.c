@@ -52,6 +52,10 @@ static char order[MOD_CAP][65];            // the enabled mods with a romfs fold
 static int norder;
 static Merged merged[MERGED_CAP];
 static int nmerged;
+// The data tables the game read at start-up and the mods each was made from, in priority order ("a,b,"), kept across
+// rebuilds: the game doesn't read them again, so a later list that would make them otherwise needs a restart.
+static Merged started[MERGED_CAP];
+static int nstarted;
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -318,10 +322,42 @@ static const char *copy_of(const ModFile *f, const char *id) {
     return NULL;
 }
 
+// The enabled mods that have a copy of data table key or JSON tables of it, highest priority first, as "a,b," into
+// sig. Under the map's lock.
+static void table_inputs(const char *key, char *sig, size_t cap) {
+    size_t lo = 0, hi = 0, pre = strlen(key) - 4, n = 0;
+    ModFile *f = find(key);
+    json_range(key, &lo, &hi);
+    sig[0] = 0;
+    for (int m = 0; m < norder; m++) {
+        int has = f && copy_of(f, order[m]);
+        for (size_t i = lo; !has && i < hi; i++) has = is_json_of(files[i].key, pre) && copy_of(&files[i], order[m]);
+        if (has && n + strlen(order[m]) + 2 <= cap) n += (size_t)snprintf(sig + n, cap - n, "%s,", order[m]);
+    }
+}
+
 // The host path of the mod file for key (lowercase, no leading '/'), copied to out; 0 when no enabled mod has it.
 // mount (the RomFS mount name; NULL when only asking whether a mod has the file) lets a data table be merged.
 static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     plat_mutex_lock_shared(&lock);
+    if (mount && out && !strncmp(key, "bdat/", 5) && ends(key, ".bdat")) {   // the game reading a data table
+        int known = 0;
+        for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
+        if (!known) {
+            char sig[MOD_CAP * 66];
+            table_inputs(key, sig, sizeof sig);
+            plat_mutex_unlock_shared(&lock);
+            plat_mutex_lock(&lock);
+            known = 0;
+            for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
+            if (!known && nstarted < MERGED_CAP && (started[nstarted].key = strdup(key))) {
+                started[nstarted].path = strdup(sig);
+                nstarted++;
+            }
+            plat_mutex_unlock(&lock);
+            plat_mutex_lock_shared(&lock);
+        }
+    }
     ModFile *f = find(key);
     size_t lo = 0, hi = 0, nj = 0;
     int table = !strncmp(key, "bdat/", 5) && ends(key, ".bdat");
@@ -494,6 +530,19 @@ int romfs_mods_set(const char *id, int on) {
     rt_log("romfs mods: %s turned %s from the menu%s", id, on ? "on" : "off", ok ? "" : " (the list could not be written)");
     __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);   // the next file lookup reads the new list
     return ok;
+}
+
+int romfs_mods_tables_changed(void) {
+    maybe_reload();
+    plat_mutex_lock_shared(&lock);
+    int changed = 0;
+    for (int i = 0; !changed && i < nstarted; i++) {
+        char sig[MOD_CAP * 66];
+        table_inputs(started[i].key, sig, sizeof sig);
+        changed = !started[i].path || strcmp(sig, started[i].path) != 0;
+    }
+    plat_mutex_unlock_shared(&lock);
+    return changed;
 }
 
 int romfs_mods_priority(char (*ids)[65], int cap) {

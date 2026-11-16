@@ -90,7 +90,10 @@ and one line per event:
 
 - **priority**: a value or row two mods both changed, and whose was kept;
 - **left out**: a mod's change that wasn't used, and why;
-- **caveat**: something used that may not behave as its mod expects (rows renumbered, a removed row kept).
+- **caveat**: something used that may not behave as its mod expects (rows renumbered, a removed row kept);
+- **adds nothing**: a mod every one of whose changed tables a higher mod has exactly alike (rows, columns and
+  values), so turning it off changes nothing: a mod's single pieces under its own whole version, for one. Listed
+  after the mods are read and before the tables are merged; not a conflict, and not counted as one.
 
 The log has the same lines (the first few of each merge), and the Mods tab shows the counts and the caveats and
 left-out changes of this run.

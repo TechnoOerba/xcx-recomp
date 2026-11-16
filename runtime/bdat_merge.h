@@ -28,12 +28,13 @@ typedef struct {
     int priority;         // events: values or rows two mods changed, settled by priority
     int left_out;         // events: a mod's change not used
     int caveats;          // events: used, but may not behave as its mod expects
+    int adds_nothing;     // events: a mod whose every changed table a higher mod has alike
     int file_mode;        // BDAT_FILE_*: merged; one mod's file as it is (the others can't be used); the top mod's
                           // whole file (it has another list of tables)
     int file_mod;         // the mod of BDAT_FILE_COPIED / BDAT_FILE_WHOLE, else -1
 } BdatSummary;
 
-// One line per event: "priority: ...", "left out: <mod>: ...", "caveat: <mod>: ...".
+// One line per event: "priority: ...", "left out: <mod>: ...", "caveat: <mod>: ...", "adds nothing: <mod>: ...".
 typedef void (*BdatNote)(void *ctx, const char *line);
 
 // base: the game's own file. mods: their copies of it, highest priority first (romfs-enabled.txt order), n >= 1.
@@ -61,5 +62,5 @@ typedef struct {
 int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap);
 
 // Line i (from 0) of what the merges did this run, for the F1 Mods tab; 0 past the last. *kind: 0 a summary line,
-// 1 a change left out, 2 a caveat.
+// 1 a change left out, 2 a caveat, 3 a mod that adds nothing (a higher one has all its changes).
 int bdat_merge_status(int i, char *out, size_t cap, int *kind);

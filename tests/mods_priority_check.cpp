@@ -63,7 +63,7 @@ __attribute__((weak)) int bdat_merge_status(int i, char *out, size_t cap, int *k
     if (kind) *kind = test_kind[i];
     return 1;
 }
-// tags: "whole.piece" adds nothing and has only tables, "other" has a left-out change, "whole" has other files too
+// tags: "whole.piece" and "whole" add nothing, "other" has a left-out change
 __attribute__((weak)) int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags) {
     const char *t = !strcmp(id, "whole.piece") || !strcmp(id, "whole") ? "adds nothing" : !strcmp(id, "other") ?
                     "2 left out" : "";
@@ -71,7 +71,6 @@ __attribute__((weak)) int bdat_merge_mod_tag(const char *id, char *out, size_t c
     if (flags) *flags = !strcmp(t, "adds nothing") ? BDAT_TAG_ADDS_NOTHING : t[0] ? BDAT_TAG_LEFT_OUT : 0;
     return t[0] != 0;
 }
-__attribute__((weak)) int romfs_mod_has_other_files(const char *id) { return !strcmp(id, "whole"); }
 static char turned_off[65];
 __attribute__((weak)) int romfs_mods_set(const char *id, int on) {
     if (!on) snprintf(turned_off, sizeof turned_off, "%s", id);
@@ -162,8 +161,7 @@ int main() {
     verify(find('R', nullptr) < 0, "no restart line while the list is what was merged");
     verify(find('T', "adds nothing") == find('P', "Whole mod: Piece") + 1 && find('T', "2 left out") >= 0,
            "each mod's row carries what the merges said about it");
-    verify(prio_off_shown[0] && !prio_off_shown[1] && !prio_off_shown[2],
-           "Turn off only for a mod that adds nothing and has no other files");
+    verify(prio_off_shown[0] && prio_off_shown[1] && prio_off_shown[2], "every mod has Turn off");
     io.AddMousePosEvent((prio_off_low[0].x + prio_off_high[0].x) / 2, (prio_off_low[0].y + prio_off_high[0].y) / 2);
     io.AddMouseButtonEvent(0, true);
     frame();
@@ -189,7 +187,8 @@ int main() {
            "the restart line comes first, then Merge now, then the start-up lines' heading");
     verify(r >= 0 && strstr(prio_lines[r], "restart"), "the restart line says to restart");
     verify(find('N', nullptr) < 0, "this run's lines are shut away once the list changed");
-    verify(find('T', nullptr) < 0 && !prio_off_shown[0], "a changed list hides the tags, which are of the old one");
+    verify(find('T', nullptr) < 0, "a changed list hides the tags, which are of the old one");
+    verify(prio_off_shown[0], "Turn off stays while the list is changed");
 
     // Merge now asks romfs_mods.c to merge ahead; while it runs, the page says so
     io.AddMousePosEvent((prio_merge_low.x + prio_merge_high.x) / 2, (prio_merge_low.y + prio_merge_high.y) / 2);

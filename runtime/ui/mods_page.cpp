@@ -58,7 +58,7 @@ static int merge_lines(bool ahead) {
 // lines and tags then show what the next start will have, and that start uses the files it made. "Merge
 // automatically" (bdat_merge_auto) has romfs_mods.c do that by itself after each change.
 static void mod_priority(const ModLibView &v,bool idle) {
-    static char ids[32][65],tag[32][200];static int n,tag_flags[32];static bool tables_only[32];
+    static char ids[32][65],tag[32][200];static int n,tag_flags[32];
     static uint64_t seen=~0ull;static double next;static bool stale;static int ahead;
     double now=ImGui::GetTime();
     if(v.generation!=seen||now>=next){
@@ -69,7 +69,6 @@ static void mod_priority(const ModLibView &v,bool idle) {
             bool got=stale&&ahead==2?bdat_merge_next_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i])
                                     :bdat_merge_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i]);
             if(!got)tag[i][0]=0;
-            tables_only[i]=(tag_flags[i]&BDAT_TAG_ADDS_NOTHING)&&!romfs_mod_has_other_files(ids[i]);
         }
     }
     bool tags_now=!stale||ahead==2;   // tags of the list as it is: this run's, or those merged ahead for it
@@ -96,21 +95,18 @@ static void mod_priority(const ModLibView &v,bool idle) {
 #endif
             ImGui::SameLine();
             ImGui::BeginDisabled(!idle||i==n-1);if(ImGui::Button(menu_text(UI_MODS_DOWN))){move=i;up=false;}ImGui::EndDisabled();
+            ImGui::SameLine();   // every mod can be turned off from here, beside its Up and Down
+            ImGui::BeginDisabled(!idle);if(ImGui::Button(menu_text(UI_MODS_TURN_OFF)))off=i;ImGui::EndDisabled();
+#ifdef XCX_MOD_UI_TESTING
+            if(i<32){prio_off_low[i]=ImGui::GetItemRectMin();prio_off_high[i]=ImGui::GetItemRectMax();prio_off_shown[i]=true;}
+#endif
             ImGui::SameLine();ImGui::Text("%d. %s",i+1,name);PRIO_LINE('P',name);
-            // what the merges said about it, after its name; a mod that only has data tables and adds nothing can be
-            // turned off from here (one with other files would lose those too)
+            // what the merges said about it, after its name
             if(tag[i][0]&&tags_now){
                 ImGui::SameLine();
                 int f=tag_flags[i];
                 ImVec4 c=f&BDAT_TAG_LEFT_OUT?ImVec4(1.0f,0.7f,0.4f,1):f&BDAT_TAG_CAVEAT?ImVec4(1.0f,0.9f,0.5f,1):ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
                 ImGui::TextColored(c,"(%s)",tag[i]);PRIO_LINE('T',tag[i]);
-                if(tables_only[i]){
-                    ImGui::SameLine();
-                    ImGui::BeginDisabled(!idle);if(ImGui::SmallButton(menu_text(UI_MODS_TURN_OFF)))off=i;ImGui::EndDisabled();
-#ifdef XCX_MOD_UI_TESTING
-                    if(i<32){prio_off_low[i]=ImGui::GetItemRectMin();prio_off_high[i]=ImGui::GetItemRectMax();prio_off_shown[i]=true;}
-#endif
-                }
             }
             ImGui::PopID();
         }

@@ -34,8 +34,6 @@ int romfs_mods_premerge_state(void);
 // AUTO_MS (romfs_mods.c) is merged ahead as by romfs_mods_premerge, without Merge now. Set saves xcx.ini.
 int romfs_mods_auto_merge(void);
 void romfs_mods_set_auto_merge(int on);
-// 1 when the enabled mod id has files other than data tables (bdat/...): turning it off changes more than tables.
-int romfs_mod_has_other_files(const char *id);
 // The ids of romfs-enabled.txt in order, the top (winning) mod first, into ids; the count.
 int romfs_mods_priority(char (*ids)[65], int cap);
 // Swaps the mod with the one above it (up) or below it in romfs-enabled.txt; 1 when the list was written. Files follow

@@ -105,8 +105,8 @@ and one line per event:
 
 The log has the same lines (the first few of each merge), and the Mods tab shows the counts and the caveats and
 left-out changes of this run. In its Mod priority list each mod's row also carries what the merges said about it
-("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several), and a mod that adds
-nothing to any file and has no files but data tables gets a **Turn off** button.
+("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several), and every row has a
+**Turn off** button beside its Up and Down.
 
 The game reads its data tables only at start-up, so once the list changes while it runs (another order, a mod
 turned on or off) the Mods tab says the change applies after a restart and offers **Merge now**: the new list is

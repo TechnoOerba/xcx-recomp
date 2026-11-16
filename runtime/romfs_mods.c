@@ -580,16 +580,6 @@ int romfs_mods_set(const char *id, int on) {
     return ok;
 }
 
-int romfs_mod_has_other_files(const char *id) {
-    maybe_reload();
-    plat_mutex_lock_shared(&lock);
-    int other = 0;
-    for (size_t i = 0; !other && i < nfiles; i++)
-        other = strncmp(files[i].key, "bdat/", 5) && copy_of(&files[i], id);
-    plat_mutex_unlock_shared(&lock);
-    return other;
-}
-
 int romfs_mods_tables_changed(void) {
     maybe_reload();
     return stale_now();

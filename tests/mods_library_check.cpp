@@ -14,7 +14,8 @@ __attribute__((weak)) void modlib_snapshot(ModLibView *v) { *v = test_view; }
 __attribute__((weak)) void modlib_refresh(void) {}
 __attribute__((weak)) void modlib_install(const char *) {}
 __attribute__((weak)) void modlib_remove(const char *) {}
-__attribute__((weak)) void modlib_set_enabled(const char *, int) {}
+static char switched[65];   // the last modlib_set_enabled, as "<id> <on>"
+__attribute__((weak)) void modlib_set_enabled(const char *id, int on) { snprintf(switched, sizeof switched, "%s %d", id, on); }
 __attribute__((weak)) void mod_ui_snapshot(ModSnapshot *out) { memset(out, 0, sizeof *out); }
 __attribute__((weak)) void mod_ui_interaction(int) {}
 __attribute__((weak)) int rt_mods_ui_submit(const ModAction *) { return 0; }
@@ -42,12 +43,23 @@ static void verify(bool yes, const char *what) {
     if (!yes) { ++failures; printf("FAIL %s\n", what); }
 }
 
-static void frame() {
+// The menu's window as ui/menu.cpp draws it around the page: a tab above, the page, and Continue under it.
+static bool focus_tab, other_tab;   // other_tab: another tab shows, the page isn't drawn
+static void frame(bool focus_first = false) {
     ImGui::NewFrame();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("Mods", nullptr, ImGuiWindowFlags_NoDecoration);
-    mods_page(1.0f, 0, false);
+    ImGui::Button("Mods tab");
+    if (focus_tab) {
+        ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+        ImGui::SetNavCursorVisible(true);
+        focus_tab = false;
+    }
+    float bottom = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y * 2;
+    if (other_tab) ImGui::Button("a row of another tab");
+    else mods_page(1.0f, bottom, focus_first);
+    ImGui::Button("Continue");
     ImGui::End();
     ImGui::Render();
 }
@@ -71,6 +83,14 @@ static void row(const char *id, const char *name, int on, const char *group = ""
     r.enabled = on;
     snprintf(r.group, sizeof r.group, "%s", group);
     snprintf(r.group_name, sizeof r.group_name, "%s", group_name);
+}
+
+static void press(ImGuiKey key) {   // a key down for a frame and up for one, as the menu's controller mapping sends
+    ImGuiIO &io = ImGui::GetIO();
+    io.AddKeyEvent(key, true);
+    frame();
+    io.AddKeyEvent(key, false);
+    frame();
 }
 
 static bool has_row(const char *label) {
@@ -131,6 +151,119 @@ int main() {
     frame();
     verify(lib_box_height <= lib_box_max + 1 && lib_box_height > short_box, "a long list's box stops at its share");
     verify(lib_box_max <= 720 * 0.7f + 1, "the box's share is at most about two thirds of the page");
+
+    // a controller (or the arrow keys) reaches the picked mod's On box from its row, even when the mod's text puts the
+    // box well below the row: Right goes over to it, and pressing it switches the mod
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;   // as ui/menu.cpp says while a controller is connected
+    snprintf(test_view.rows[0].description, sizeof test_view.rows[0].description, "%s",
+             "A long description that wraps over several lines in the right-hand column, so the buttons under it sit "
+             "well below the first rows of the list. It goes on for a while, as real mods' descriptions do, with more "
+             "text about what it changes and how, and a note about what it needs to work, and still more after that.");
+    test_view.generation++;
+    switched[0] = 0;
+    frame(true);   // arriving at the tab, as ui/menu.cpp asks for its first row
+    frame();
+    frame();
+    verify(GImGui->NavWindow && strstr(GImGui->NavWindow->Name, "library_rows") && GImGui->NavCursorVisible &&
+               !switched[0],
+           "arriving at the tab highlights the picked mod's row, as the other tabs' first row, pressing nothing");
+    // with the controller only, as in game
+    auto step = [&](ImGuiKey key) { press(key); frame(); };   // the list is drawn before the pane: a frame to land
+    switched[0] = 0;
+    step(ImGuiKey_GamepadDpadRight);
+    verify(GImGui->NavId == lib_on_id && !switched[0],
+           "Right on the d-pad goes from the picked row to its On box, switching nothing");
+    step(ImGuiKey_GamepadFaceDown);
+    verify(!strcmp(switched, "alpha 0"), "and A presses it");
+    step(ImGuiKey_GamepadDpadLeft);
+    verify(GImGui->NavId != lib_on_id && GImGui->NavWindow && strstr(GImGui->NavWindow->Name, "library_rows"),
+           "Left goes back to the list");
+    step(ImGuiKey_GamepadDpadDown);   // the Tweaks entry's row
+    step(ImGuiKey_GamepadDpadDown);   // Beta
+    switched[0] = 0;
+    step(ImGuiKey_GamepadDpadRight);
+    step(ImGuiKey_GamepadFaceDown);
+    verify(!strcmp(switched, "beta 1"), "Down to another mod, Right picks it and goes to its pane, A turns it on");
+    // the arrow keys work the same way
+    step(ImGuiKey_LeftArrow);
+    switched[0] = 0;
+    step(ImGuiKey_RightArrow);
+    step(ImGuiKey_Space);
+    verify(!strcmp(switched, "beta 1"), "the arrow keys and Space do the same");
+
+    // switching to the tab with R1 from another tab: the picked row has the cursor, and Down goes to the next row, also
+    // when the picked mod is the last row in view in the list box. Pick that one first: down until a row's line sits
+    // at the box's bottom, then A.
+    for (int k = 0; k < 20 && lib_focus_line_bottom < lib_box_bottom - 60; k++) step(ImGuiKey_GamepadDpadDown);
+    step(ImGuiKey_GamepadFaceDown);
+    other_tab = true;
+    frame();
+    frame();
+    other_tab = false;
+    frame(true);
+    frame();
+    ImGuiID arrived = GImGui->NavId;
+    int at = 0;
+    while (at < nlist && list_rows[at] != arrived) at++;
+    verify(at < nlist - 1, "arriving with R1, the picked row has the cursor");
+    step(ImGuiKey_GamepadDpadDown);
+    verify(at < nlist - 1 && GImGui->NavId == list_rows[at + 1], "the first Down goes to the next row in the list");
+    step(ImGuiKey_GamepadDpadUp);
+    verify(GImGui->NavId == arrived, "and Up back to the picked row");
+    // from the list's first row, Up leaves the list as ImGui's own move does (to the tabs)
+    for (int k = 0; k < 60 && GImGui->NavId != list_rows[0]; k++) step(ImGuiKey_GamepadDpadUp);
+    verify(GImGui->NavId == list_rows[0], "Up walks the list to its first row");
+    verify(!strcmp(lib_pane_mod, "alpha"), "the pane shows the row the cursor is on, without A");
+    step(ImGuiKey_GamepadDpadDown);   // the Tweaks entry's row: the pane stays on Alpha
+    step(ImGuiKey_GamepadDpadDown);
+    verify(!strcmp(lib_pane_mod, "beta"), "moving down to Beta shows Beta in the pane");
+    step(ImGuiKey_GamepadDpadUp);
+    step(ImGuiKey_GamepadDpadUp);
+    step(ImGuiKey_GamepadDpadUp);
+    verify(GImGui->NavWindow && !strstr(GImGui->NavWindow->Name, "library_rows"),
+           "Up from the first row leaves the list");
+
+    // arriving on a frame where the list can't take the focus yet (here: the library still loading, no rows), the
+    // request holds and the picked row takes it once it is drawn
+    other_tab = true;
+    frame();
+    frame();
+    other_tab = false;
+    int rows = test_view.count;
+    test_view.count = 0;
+    test_view.generation++;
+    frame(true);
+    test_view.count = rows;
+    test_view.generation++;
+    frame();
+    frame();
+    verify(GImGui->NavWindow && strstr(GImGui->NavWindow->Name, "library_rows") && GImGui->NavCursorVisible,
+           "an arrival the list can't take at once still lands on the picked row");
+
+    // Down from the menu's tab goes to the library's picked row, not to Continue under the page
+    focus_tab = true;
+    frame();
+    frame();
+    step(ImGuiKey_GamepadDpadDown);
+    verify(GImGui->NavWindow && strstr(GImGui->NavWindow->Name, "library_rows"),
+           "Down from the tab goes into the library list");
+
+    // a title too long for the list's width takes two lines; a short one one
+    row("longname", "A mod with a long name that runs on past the width of the list, as some real mods' names do", 0);
+    test_view.generation++;
+    frame();
+    frame();
+    verify(lib_wrapped == 1, "only the long title wraps to a second line");
+
+    // going down the long list with the d-pad, each row's line under its name (On, Off) stays in view
+    step(ImGuiKey_GamepadDpadLeft);   // back in the list
+    bool line_shows = true;
+    for (int k = 0; k < 30; k++) {
+        step(ImGuiKey_GamepadDpadDown);
+        line_shows &= lib_focus_line_bottom > 0 && lib_focus_line_bottom <= lib_box_bottom + 1;
+    }
+    verify(line_shows, "the d-pad down the list keeps each row's On / Off line in view");
 
     ImGui::DestroyContext();
     if (!failures) printf("ok %d\n", checks);

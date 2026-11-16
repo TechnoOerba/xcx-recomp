@@ -56,6 +56,14 @@ what is in `mods/`:
   `"download": "manual"`, the file's page, its name, size and SHA-256. **Install** then explains that, opens the page
   in the browser on request and asks for the downloaded file; the manager checks it against the library like a
   download of its own and installs it. It never looks through the Downloads folder by itself.
+- A mod that comes as several files (a full version and optional pieces, common on Nexus Mods) is one entry with
+  `"parts"`: each part has its own file, SHA-256 and size, and `includes` names the parts it already contains. The
+  window shows the entry with a row per part. **Install** lists the files, and the player picks all their downloads at
+  once; each is matched to its part by SHA-256 (names and order do not matter) and installed as a mod of its own,
+  `mods/<entry>.<part>/`, whose `library.ini` adds `group`, `part` and `includes`. Parts switch on and off one by one,
+  and turning on a part that contains, or is contained in, one that is on asks first. Picked files that are no part
+  of the entry are offered to **Add archive**. `python -m installer.mods --dest DIR install ID --file A --file B` does
+  the same from a console.
 - Archives: zip through Python's `zipfile`, RAR 4 and 5 through `bin/xcx-unpack` (`installer/unpack.c` over the RAR
   readers of libarchive, pinned in `deps/libarchive/`, built by `tools/build_unpack.py` in both release scripts; a
   checkout builds it into `build/unpack/` on first use). 7z is recognised and named, not read. Every entry is checked

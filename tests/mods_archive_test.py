@@ -188,6 +188,81 @@ class ManualTest(unittest.TestCase):
         self.assertEqual(mods.add_archive(self.dest, self.zip), 'all-tweaks-mod')
 
 
+class PartsTest(unittest.TestCase):
+    """An entry in parts: a full version and optional pieces, each its own download, as on Nexus Mods."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name)
+        self.dest = t / 'XCX'
+        self.dest.mkdir()
+        self.files = {}
+        for pid, members in (('all', {'tweaks mod/bdat/common.bdat': b'all'}),
+                             ('probe', {'probe tweak/bdat/common.bdat': b'probe'}),
+                             ('sensor', {'sensor/bdat/common.bdat': b'sensor'})):
+            path = t / f'{pid} part-10-1-0-1745514623.zip'
+            with zipfile.ZipFile(path, 'w') as z:
+                for n, d in members.items():
+                    z.writestr(n, d)
+            self.files[pid] = path
+        self.stranger = t / 'other.zip'
+        with zipfile.ZipFile(self.stranger, 'w') as z:
+            z.writestr('romfs/x.bin', b'x')
+
+        def part(pid, includes=()):
+            data = self.files[pid].read_bytes()
+            return {'id': pid, 'name': pid.title(), 'page': 'https://example.invalid/files', 'file': self.files[pid].name,
+                    'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data), 'includes': list(includes)}
+        self.entry = {'id': 'tweaks', 'kind': 'romfs', 'download': 'manual', 'name': 'Tweaks', 'version': '1',
+                      'author': 'A', 'homepage': 'https://example.invalid',
+                      'parts': [part('all', ['probe', 'sensor']), part('probe'), part('sensor')]}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_picks_are_matched_by_hash(self):
+        # any order, any names: the hash says which part a file is; a stranger is reported, not installed
+        picked = [self.stranger, self.files['sensor'], self.files['all']]
+        matched, unknown = mods.match_files(self.entry, picked)
+        self.assertEqual(sorted(matched), ['tweaks.all', 'tweaks.sensor'])
+        self.assertEqual(unknown, [self.stranger])
+        result = mods.install(self.dest, self.entry, files=picked)
+        self.assertEqual((sorted(result['installed']), result['unknown']),
+                         (['tweaks.all', 'tweaks.sensor'], [self.stranger]))
+        info = mods.read_info(self.dest / 'mods' / 'tweaks.all')
+        self.assertEqual((info['name'], info['group'], info['part'], info['includes']),
+                         ('Tweaks: All', 'tweaks', 'all', 'probe,sensor'))
+        self.assertTrue((self.dest / 'mods' / 'tweaks.sensor' / 'romfs' / 'bdat' / 'common.bdat').is_file())
+        with self.assertRaises(mods.ModError) as e:
+            mods.install(self.dest, self.entry, files=[self.stranger])
+        self.assertEqual(e.exception.id, 'mods.file_mismatch')
+
+    def test_status_and_overlaps(self):
+        mods.install(self.dest, self.entry, files=[self.files['all'], self.files['probe']])
+        mods.set_enabled(self.dest, 'tweaks.all', True)
+        row = next(r for r in mods.status(self.dest, [self.entry]) if r['id'] == 'tweaks')
+        self.assertEqual([(p['mid'], p['installed'], p['enabled']) for p in row['parts']],
+                         [('tweaks.all', True, True), ('tweaks.probe', True, False), ('tweaks.sensor', False, False)])
+        self.assertTrue(row['installed'] and row['enabled'])
+        # the parts are not listed again as mods outside the library
+        self.assertEqual([r['id'] for r in mods.status(self.dest, [self.entry])], ['tweaks'])
+        self.assertEqual(mods.overlaps(row, 'tweaks.probe'), ['All'])     # all contains probe, and all is on
+        self.assertEqual(mods.overlaps(row, 'tweaks.sensor'), ['All'])
+        mods.set_enabled(self.dest, 'tweaks.probe', True)
+        row = next(r for r in mods.status(self.dest, [self.entry]) if r['id'] == 'tweaks')
+        self.assertEqual(mods.overlaps(row, 'tweaks.all'), ['Probe'])     # the other way round
+
+    def test_index_checks_parts(self):
+        index = Path(self.tmp.name) / 'index.json'
+        bad = json.loads(json.dumps(self.entry))
+        bad['id'] = 'bad'
+        bad['parts'][1]['page'] = 'http://example.invalid'
+        long = json.loads(json.dumps(self.entry))
+        long['id'] = 'x' * 62
+        index.write_text(json.dumps({'format': 2, 'mods': [self.entry, bad, long]}))
+        self.assertEqual([e['id'] for e in mods.fetch_index(str(index))], ['tweaks'])
+
+
 @unittest.skipUnless(clang(), 'needs clang (XCX_CLANG, PATH or MSYS2 UCRT64)')
 class RarTest(unittest.TestCase):
     @classmethod

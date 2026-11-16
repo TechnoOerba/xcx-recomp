@@ -245,7 +245,7 @@
  "mods.manual_pick": "Choose the downloaded file...",
  "mods.cancel": "Cancel",
  "mods.manual_needs_file": "{name} is downloaded from its page: choose the downloaded file to install it.",
- "mods.file_mismatch": "\"{picked}\" is not the file the mod library lists for this mod (\"{file}\", {size} MB): its size or SHA-256 differ. Pick that file from the mod's page. If the author has uploaded a new version, the library lists it once it is updated; Add archive installs any file without this check.",
+ "mods.file_mismatch": "\"{picked}\" is not a file the mod library lists for this mod ({file}): its size or SHA-256 differ. Pick one of those from the mod's page. If the author has uploaded a new version, the library lists it once it is updated; Add archive installs any file without this check.",
  "mods.checking": "Reading {name}...",
  "mods.confirm_layout_title": "Check the mod's files",
  "mods.confirm_layout": "{lines}\n\nInstall it like this?",
@@ -273,5 +273,16 @@
  "layout.left_exefs": "Left out, Switch code that XCX Recomp does not run (exefs): {files}",
  "layout.left_doc": "Left out, not game files (read-me files, pictures, archives): {files}",
  "layout.left_outside": "Left out, outside the folder above: {files}",
- "layout.more": " and {count} more"
+ "layout.more": " and {count} more",
+ "mods.state_parts": "{on} of {total} parts on",
+ "mods.install_parts": "Install parts...",
+ "mods.has_parts": "It comes in {count} parts: select one below to turn it on or off or remove it.",
+ "mods.part_includes": "Contains: {parts}. Turn those off while this is on.",
+ "mods.unknown_files": "These files are no part of {name}: {files}. Add them as mods of their own (Add archive)?",
+ "mods.confirm_overlap": "{name} overlaps {others}, which is on: one contains the other, so both on change the same game data twice. Turn {name} on anyway?",
+ "mods.manual_intro_parts": "{name} is hosted on {site}, which lets people download it only from its own page, so XCX Setup cannot download it for you. It comes in parts; take the full version, or only the parts you want:\n\n{files}\n\n1. Open the download page and download the files you want. The site may ask you to sign in.\n2. Come back here and choose all of them at once.\n\nXCX Setup works out which part each file is and checks it against the mod library before it installs anything.",
+ "mods.manual_part_line": "  {part}: \"{file}\" ({size} MB)",
+ "mods.parts_title": "Install parts of {name}",
+ "mods.parts_pick": "Pick the parts to download:",
+ "mods.manual_pick_many": "Choose the downloaded files..."
 }

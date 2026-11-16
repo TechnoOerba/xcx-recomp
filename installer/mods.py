@@ -22,6 +22,12 @@ the index): the player downloads the file there and picks it, and the same size 
 unpacked into mods/ by hand in any of those layouts is moved to mods/<id>/romfs the next time the mods are listed
 (normalise).
 
+A library entry may come in parts ("parts" in the index): a full version and optional pieces, each its own file, as
+mods on Nexus Mods often do. Each part the player installs is a mod of its own, <entry id>.<part id>, so it switches
+on and off by itself and the game's mods combine like any others; its library.ini names the entry (group) and the
+part, and a part that already contains others lists them (includes), so the window can warn when both are on. Files
+the player picks are matched to parts by SHA-256, whatever their names or order.
+
 mods/library.json records what this manager installed (kind, version, name) so updates and removals know the kind.
 """
 import argparse
@@ -308,8 +314,31 @@ def fetch_index(source=None):
     if not isinstance(data, dict) or data.get('format') != INDEX_FORMAT or not isinstance(data.get('mods'), list):
         raise ModError('mods.index_format')
     return [m for m in data['mods'] if isinstance(m, dict) and valid_id(m.get('id')) and m.get('kind') in LISTS
-            and (not is_manual(m) or str(m.get('page', '')).startswith('https://') and m.get('sha256')
-                 and m.get('size'))]
+            and usable_parts(m)]
+
+
+def usable_parts(entry):
+    """Whether every part of an entry names a file the manager can get: a manual part its page, a downloaded one its
+    url, each with SHA-256 and size; part ids make valid mod ids. Lua entries and plain ones pass as before."""
+    if entry.get('kind') != 'romfs':
+        return True
+    if not entry.get('parts') and not is_manual(entry):
+        return True
+    parts = parts_of(entry)
+    ok = lambda p: (str(p.get('page' if is_manual(entry) else 'url') or '').startswith('https://')
+                    and p.get('sha256') and p.get('size') and valid_id(p['mid']))
+    return bool(parts) and all(ok(p) for p in parts) and len({p['mid'] for p in parts}) == len(parts)
+
+
+def parts_of(entry):
+    """The parts of a library entry as dicts with 'mid', the mod id each installs as. An entry without "parts" is one
+    part whose mod id is the entry's own."""
+    if entry.get('parts'):
+        return [dict(p, mid=f"{entry['id']}.{p.get('id', '')}", includes=list(p.get('includes') or []))
+                for p in entry['parts'] if isinstance(p, dict)]
+    return [{'id': '', 'mid': entry['id'], 'name': entry.get('name', entry['id']), 'description': '',
+             'file': entry.get('file'), 'page': entry.get('page'), 'url': entry.get('url'),
+             'sha256': entry.get('sha256'), 'size': entry.get('size'), 'includes': []}]
 
 
 def is_manual(entry):
@@ -318,21 +347,48 @@ def is_manual(entry):
     return entry.get('download') == 'manual'
 
 
-def check_file(path, entry):
-    """Raises ModError('mods.file_mismatch') unless the file at path is the one a manual entry lists."""
+def file_hash(path, sizes=None):
+    """(size, SHA-256) of the file at path; the hash is only read when the size is one of sizes (None: always)."""
     path = Path(path)
     try:
         size = path.stat().st_size
+        if sizes is not None and size not in sizes:
+            return size, None
         h = hashlib.sha256()
-        if size == int(entry['size']):
-            with open(path, 'rb') as f:
-                for block in iter(lambda: f.read(CHUNK), b''):
-                    h.update(block)
+        with open(path, 'rb') as f:
+            for block in iter(lambda: f.read(CHUNK), b''):
+                h.update(block)
     except OSError as e:
         raise ModError('mods.failed', detail=str(e)) from e
-    if size != int(entry['size']) or h.hexdigest() != entry['sha256']:
-        raise ModError('mods.file_mismatch', picked=path.name, file=entry.get('file') or entry['name'],
-                       size=max(1, int(entry['size']) >> 20))
+    return size, h.hexdigest()
+
+
+def match_files(entry, paths):
+    """Which part of a manual entry each picked file is, by size and SHA-256: ({mod id: (part, path)}, [paths that
+    are no part of it]). Two picks of one part keep the first."""
+    parts = parts_of(entry)
+    sizes = {int(p['size']) for p in parts}
+    matched, unknown = {}, []
+    for path in paths:
+        size, digest = file_hash(path, sizes)
+        part = next((p for p in parts if int(p['size']) == size and p['sha256'] == digest), None)
+        if part is None:
+            unknown.append(Path(path))
+        else:
+            matched.setdefault(part['mid'], (part, Path(path)))
+    return matched, unknown
+
+
+def check_file(path, entry):
+    """Raises ModError('mods.file_mismatch') unless the file at path is one of the files a manual entry lists;
+    returns the part it is."""
+    matched, _ = match_files(entry, [path])
+    if not matched:
+        first = parts_of(entry)[0]
+        raise ModError('mods.file_mismatch', picked=Path(path).name,
+                       file=' / '.join(p.get('file') or p['name'] for p in parts_of(entry)),
+                       size=max(1, int(first['size']) >> 20))
+    return next(iter(matched.values()))[0]
 
 
 def download(url, size, sha256, out, progress=None):
@@ -391,12 +447,15 @@ def unpack_romfs(path, folder, dest=None, plan=None, layout=None):
 
 # ---- operations ----------------------------------------------------------------------------------------------------
 
-def write_info(staged, kind, name, author='', version='', source=''):
+def write_info(staged, kind, name, author='', version='', source='', group='', part='', includes=()):
     """<id>/library.ini: name, author, version and kind of an installed mod. The game's F1 menu writes the same file
-    when it installs a mod (runtime/mod_library.c, write_library_ini), so each manager sees the other's installs."""
+    when it installs a mod (runtime/mod_library.c, write_library_ini), so each manager sees the other's installs.
+    A part of a library entry also names the entry (group), the part and the parts it contains (includes)."""
     clean = lambda v: ' '.join(str(v).split())[:90]
-    text = ''.join(f'{k} = {clean(v)}\n' for k, v in (('name', name), ('author', author), ('version', version),
-                                                       ('kind', kind), ('source', source)))
+    rows = [('name', name), ('author', author), ('version', version), ('kind', kind), ('source', source)]
+    if group:
+        rows += [('group', group), ('part', part), ('includes', ','.join(includes))]
+    text = ''.join(f'{k} = {clean(v)}\n' for k, v in rows)
     (staged / 'library.ini').write_text(text, encoding='utf-8', newline='\n')
 
 
@@ -427,34 +486,80 @@ def place(root, mid, staged):
         shutil.rmtree(old, ignore_errors=True)
 
 
-def install(dest, entry, progress=None, file=None, layout=None):
-    """Installs or updates a library entry. A mod that was on stays on; a new one starts off. A manual entry
-    (is_manual) installs from file, the player's download of it, which must be the file the entry lists."""
+def part_name(entry, part):
+    """What the player sees for an installed part: 'Tweaks mod: Probe tweak'; the entry's name for a whole entry."""
+    name = entry.get('name', entry['id'])
+    return f"{name}: {part['name']}" if part.get('id') else name
+
+
+def install(dest, entry, progress=None, file=None, layout=None, files=None, parts=None, plans=None):
+    """Installs or updates a library entry. A mod that was on stays on; a new one starts off.
+    A manual entry (is_manual) installs from the player's downloads: file, or files, each matched to a part by
+    SHA-256 (ModError 'mods.file_mismatch' when none is a part). Other entries download: every part, or the part
+    ids in parts. plans: {mod id: mod_layout.Plan} read before (the window shows them first).
+    Returns {'installed': [mod ids], 'unknown': [picked paths that are no part of the entry]}."""
     mid, kind = entry['id'], entry['kind']
     root = mods_dir(dest)
     root.mkdir(parents=True, exist_ok=True)
+    if kind != 'romfs':
+        install_lua(dest, entry, progress)
+        return {'installed': [mid], 'unknown': []}
+    unknown = []
     if is_manual(entry):
-        if not file:
+        picked = list(files or ([file] if file else []))
+        if not picked:
             raise ModError('mods.manual_needs_file', name=entry.get('name', mid))
-        check_file(file, entry)
+        matched, unknown = match_files(entry, picked)
+        if not matched:
+            check_file(picked[0], entry)   # raises with the names of the files the entry lists
+        todo = [(part, path) for part, path in matched.values()]
+    else:
+        todo = [(p, None) for p in parts_of(entry) if parts is None or p['id'] in parts]
+    done = []
+    for part, path in todo:
+        install_part(dest, entry, part, path, progress, layout, (plans or {}).get(part['mid']))
+        done.append(part['mid'])
+    return {'installed': done, 'unknown': unknown}
+
+
+def install_part(dest, entry, part, path=None, progress=None, layout=None, plan=None):
+    """Installs one part of a romfs entry as mods/<part mod id>: from path (the player's download), else downloaded
+    from the part's url."""
+    root = mods_dir(dest)
+    mid = part['mid']
     with tempfile.TemporaryDirectory(dir=root, prefix='.install-') as tmp:
         staged = Path(tmp) / mid
         staged.mkdir()
-        if kind == 'romfs':
-            if is_manual(entry):
-                apath = Path(file)
-            else:
-                apath = Path(tmp) / 'mod.download'
-                download(entry['url'], int(entry['size']), entry['sha256'], apath, progress)
-            unpack_romfs(apath, staged, dest, layout=layout)
-        else:
-            files = entry.get('files') or []
-            if not files or any(f.get('name') not in LUA_FILES for f in files):
-                raise ModError('mods.index_format')
-            for i, f in enumerate(files):
-                download(LIBRARY + entry['path'] + '/' + f['name'], int(f['size']), f['sha256'], staged / f['name'])
-                if progress:
-                    progress(i + 1, len(files))
+        if path is None:
+            path = Path(tmp) / 'mod.download'
+            download(part['url'], int(part['size']), part['sha256'], path, progress)
+        unpack_romfs(path, staged, dest, plan, layout)
+        name = part_name(entry, part)
+        source = entry.get('homepage') or 'library'
+        write_info(staged, 'romfs', name, entry.get('author', ''), entry.get('version', ''), source,
+                   entry['id'] if part.get('id') else '', part.get('id', ''), part.get('includes', ()))
+        place(root, mid, staged)
+    record = load_record(root)
+    record[mid] = {'kind': 'romfs', 'version': entry.get('version', ''), 'name': name, 'source': source}
+    if part.get('id'):
+        record[mid].update(group=entry['id'], part=part['id'])
+    save_record(root, record)
+
+
+def install_lua(dest, entry, progress=None):
+    """Installs or updates a Lua library entry: its files, each checked against the index."""
+    mid, kind = entry['id'], entry['kind']
+    root = mods_dir(dest)
+    with tempfile.TemporaryDirectory(dir=root, prefix='.install-') as tmp:
+        staged = Path(tmp) / mid
+        staged.mkdir()
+        files = entry.get('files') or []
+        if not files or any(f.get('name') not in LUA_FILES for f in files):
+            raise ModError('mods.index_format')
+        for i, f in enumerate(files):
+            download(LIBRARY + entry['path'] + '/' + f['name'], int(f['size']), f['sha256'], staged / f['name'])
+            if progress:
+                progress(i + 1, len(files))
         write_info(staged, kind, entry.get('name', mid), entry.get('author', ''), entry.get('version', ''),
                    entry.get('homepage') or 'library')
         place(root, mid, staged)
@@ -462,10 +567,9 @@ def install(dest, entry, progress=None, file=None, layout=None):
     record[mid] = {'kind': kind, 'version': entry.get('version', ''), 'name': entry.get('name', mid),
                    'source': entry.get('homepage') or 'library'}
     save_record(root, record)
-    if kind == 'lua':
-        catalog = read_list(root / 'catalog.txt')
-        if mid not in catalog:
-            write_list(root / 'catalog.txt', catalog + [mid])
+    catalog = read_list(root / 'catalog.txt')
+    if mid not in catalog:
+        write_list(root / 'catalog.txt', catalog + [mid])
 
 
 def archive_name(path):
@@ -540,11 +644,33 @@ def status(dest, index, notes=None):
     have = {m['id']: m for m in installed(dest, notes)}
     out = []
     for e in index:
-        m = have.pop(e['id'], None)
-        out.append(dict(e, installed=bool(m), enabled=bool(m and m['enabled']),
-                        update=bool(m and m['version'] != e.get('version', ''))))
+        rows = []
+        for p in parts_of(e):
+            m = have.pop(p['mid'], None)
+            rows.append(dict(p, installed=bool(m), enabled=bool(m and m['enabled']),
+                             update=bool(m and m['version'] != e.get('version', ''))))
+        row = dict(e, installed=any(r['installed'] for r in rows), enabled=any(r['enabled'] for r in rows),
+                   update=any(r['update'] for r in rows))
+        if e.get('parts'):
+            row['parts'] = rows
+        out.append(row)
     for m in have.values():
         out.append(dict(m, installed=True, update=False, description='', author='', homepage='', notes=''))
+    return out
+
+
+def overlaps(entry, mid):
+    """The names of the entry's parts that are on and overlap the part mid: one contains the other (includes). Both
+    on change the same game data twice; the window asks first."""
+    parts = {p['mid']: p for p in entry.get('parts') or []}
+    me = parts.get(mid)
+    if not me:
+        return []
+    out = []
+    for p in parts.values():
+        if p['mid'] != mid and p.get('enabled') and (p['id'] in me.get('includes', ())
+                                                     or me['id'] in p.get('includes', ())):
+            out.append(p['name'])
     return out
 
 
@@ -560,7 +686,9 @@ def main(argv=None):
     sub.add_parser('list')
     for c in ('install', 'remove', 'enable', 'disable'):
         sub.add_parser(c).add_argument('id')
-    sub.choices['install'].add_argument('--file', type=Path, help='the download of a manual library entry')
+    sub.choices['install'].add_argument('--file', type=Path, action='append',
+                                        help='a download of a manual library entry (once per file)')
+    sub.choices['install'].add_argument('--part', action='append', help='a part to download (default: all)')
     for c in ('add', 'add-zip'):
         z = sub.add_parser(c)
         z.add_argument('zip', type=Path)
@@ -578,8 +706,10 @@ def main(argv=None):
             entry = next((e for e in fetch_index(args.index) if e['id'] == args.id), None)
             if not entry:
                 raise ModError('mods.not_in_library', id=args.id)
-            install(args.dest, entry, file=args.file)
-            print(f'installed {args.id}')
+            result = install(args.dest, entry, files=args.file, parts=args.part)
+            print('installed ' + ', '.join(result['installed']))
+            for path in result['unknown']:
+                print(f'not a file of {args.id}: {path}', file=sys.stderr)
         elif args.cmd in ('add', 'add-zip'):
             p = preview(args.dest, args.zip, args.top)
             english = english_catalog()

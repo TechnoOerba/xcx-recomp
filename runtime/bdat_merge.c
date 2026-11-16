@@ -858,20 +858,42 @@ struct JNode {
     size_t *klen;
 };
 
-typedef struct { const char *p, *end; int depth, bad; } JParse;
+// The parsed JSON's memory: taken from big blocks and given back all at once when the table is made. A large table's
+// hundreds of thousands of nodes, keys and strings were as many mallocs and frees, most of the time of reading it.
+typedef struct Block Block;
+struct Block {
+    Block *next;
+    size_t used, cap;
+};
+#define BLOCK_HEAD ((sizeof(Block) + 15) & ~(size_t)15)
+typedef struct { Block *head; int nblocks; } Arena;
 
-static void jfree(JNode *n) {
-    if (!n) return;
-    for (size_t i = 0; (n->type == J_ARR || n->type == J_OBJ) && i < n->len; i++) {
-        jfree(n->items[i]);
-        if (n->keys) free(n->keys[i]);
+// n bytes (16-aligned, not zeroed) from a; NULL when out of memory. Blocks grow from 1 MiB to 32 MiB.
+static void *aget(Arena *a, size_t n) {
+    n = (n + 15) & ~(size_t)15;
+    Block *b = a->head;
+    if (!b || b->cap - b->used < n) {
+        size_t cap = (size_t)1 << (20 + (a->nblocks < 5 ? a->nblocks : 5));
+        if (cap < n) cap = n;
+        if (!(b = malloc(BLOCK_HEAD + cap))) return NULL;
+        *b = (Block){a->head, 0, cap};
+        a->head = b;
+        a->nblocks++;
     }
-    free(n->items);
-    free(n->keys);
-    free(n->klen);
-    free(n->s);
-    free(n);
+    void *p = (uint8_t *)b + BLOCK_HEAD + b->used;
+    b->used += n;
+    return p;
 }
+
+static void afree(Arena *a) {
+    for (Block *b = a->head, *next; b; b = next) {
+        next = b->next;
+        free(b);
+    }
+    *a = (Arena){0};
+}
+
+typedef struct { const char *p, *end; int depth, bad; Arena *a; } JParse;
 
 static void jws(JParse *j) {
     while (j->p < j->end && (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r')) j->p++;
@@ -890,16 +912,16 @@ static int put_utf8(Buf *b, uint32_t c) {
     return put(b, u, n);
 }
 
-// A JSON string at j->p (on the opening quote) into *s (malloc'd, NUL-terminated) and *len.
+// A JSON string at j->p (on the opening quote) into *s (in j->a, NUL-terminated) and *len.
 static int jstring(JParse *j, char **s, size_t *len) {
-    // A string without escapes (nearly every string in a bdat-toolset table) is its bytes as they are: one
-    // allocation of its size. The Buf below starts at 4 KiB, which for a table's hundreds of thousands of names and
-    // values made the parse most of a merge's time.
+    // A string without escapes (nearly every string in a bdat-toolset table) is its bytes as they are. The Buf below
+    // starts at 4 KiB, which for a table's hundreds of thousands of names and values made the parse most of a merge's
+    // time.
     const char *q = j->p + 1;
     while (q < j->end && *q != '"' && *q != '\\' && (unsigned char)*q >= 0x20) q++;
     if (q < j->end && *q == '"') {
         size_t n = (size_t)(q - j->p - 1);
-        char *o = malloc(n + 1);
+        char *o = aget(j->a, n + 1);
         if (!o) return 0;
         memcpy(o, j->p + 1, n);
         o[n] = 0;
@@ -948,10 +970,11 @@ static int jstring(JParse *j, char **s, size_t *len) {
         }
         if (!put_utf8(&b, u)) goto bad;
     }
-    if (j->p >= j->end || !put(&b, "", 1)) goto bad;
+    if (j->p >= j->end || !put(&b, "", 1) || !(*s = aget(j->a, b.n))) goto bad;
     j->p++;
+    memcpy(*s, b.p, b.n);
     *len = b.n - 1;
-    *s = (char *)b.p;
+    free(b.p);
     return 1;
 bad:
     free(b.p);
@@ -960,18 +983,23 @@ bad:
 
 static JNode *jvalue(JParse *j);
 
-static int jadd(JNode *n, JNode *v, char *key, size_t klen) {
+// n's lists in a, grown by doubling; the lists they replace stay in a until it is given back.
+static int jadd(Arena *a, JNode *n, JNode *v, char *key, size_t klen) {
     if ((n->len & (n->len - 1)) == 0) {   // grow at 0, 1, 2, 4, 8 ...
         size_t cap = n->len ? n->len * 2 : 1;
-        JNode **it = realloc(n->items, cap * sizeof *it);
+        JNode **it = aget(a, cap * sizeof *it);
         if (!it) return 0;
+        if (n->len) memcpy(it, n->items, n->len * sizeof *it);
         n->items = it;
         if (n->type == J_OBJ) {
-            char **k = realloc(n->keys, cap * sizeof *k);
-            if (!k) return 0;
+            char **k = aget(a, cap * sizeof *k);
+            size_t *kl = aget(a, cap * sizeof *kl);
+            if (!k || !kl) return 0;
+            if (n->len) {
+                memcpy(k, n->keys, n->len * sizeof *k);
+                memcpy(kl, n->klen, n->len * sizeof *kl);
+            }
             n->keys = k;
-            size_t *kl = realloc(n->klen, cap * sizeof *kl);
-            if (!kl) return 0;
             n->klen = kl;
         }
     }
@@ -987,8 +1015,9 @@ static int jadd(JNode *n, JNode *v, char *key, size_t klen) {
 static JNode *jvalue(JParse *j) {
     jws(j);
     if (j->p >= j->end || ++j->depth > 500) return NULL;
-    JNode *n = calloc(1, sizeof *n);
+    JNode *n = aget(j->a, sizeof *n);
     if (!n) return NULL;
+    memset(n, 0, sizeof *n);
     char c = *j->p;
     if (c == '{' || c == '[') {
         n->type = c == '{' ? J_OBJ : J_ARR;
@@ -1006,18 +1035,11 @@ static JNode *jvalue(JParse *j) {
                 jws(j);
                 if (j->p >= j->end || *j->p != '"' || !jstring(j, &key, &klen)) goto bad;
                 jws(j);
-                if (j->p >= j->end || *j->p != ':') {
-                    free(key);
-                    goto bad;
-                }
+                if (j->p >= j->end || *j->p != ':') goto bad;
                 j->p++;
             }
             JNode *v = jvalue(j);
-            if (!v || !jadd(n, v, key, klen)) {
-                jfree(v);
-                free(key);
-                goto bad;
-            }
+            if (!v || !jadd(j->a, n, v, key, klen)) goto bad;   // what was taken stays in j->a until it is given back
             jws(j);
             if (j->p < j->end && *j->p == ',') {
                 j->p++;
@@ -1084,8 +1106,7 @@ static JNode *jvalue(JParse *j) {
     }
     j->depth--;
     return n;
-bad:
-    jfree(n);
+bad:   // n and what it holds stay in j->a until it is given back
     return NULL;
 }
 
@@ -1119,13 +1140,14 @@ static const JNode *jget(const JNode *o, const char *key, size_t klen) {
 // A JSON table as BDAT table bytes in out (the writer's layout), or 0 with the reason in why.
 static int json_table(const uint8_t *data, size_t size, const char *stem, Buf *out, char *why, size_t cap) {
     JNode *root = NULL;
+    Arena arena = {0};   // the parsed JSON, given back at the end
     Buf raw = {0};
     Src *from = NULL;
     Tab t = {0};
     int ok = 0;
     uint32_t cc = 0, rc = 0;
     if (!utf8_ok(data, size)) goto notjson;
-    JParse jp = {(const char *)data, (const char *)data + size, 0, 0};
+    JParse jp = {(const char *)data, (const char *)data + size, 0, 0, &arena};
     root = jvalue(&jp);
     jws(&jp);
     if (!root || jp.p != jp.end) goto notjson;
@@ -1259,7 +1281,7 @@ oom:
 notjson:
     snprintf(why, cap, "not valid JSON");
 done:
-    jfree(root);
+    afree(&arena);
     free(raw.p);
     free(from);
     free(t.off);
@@ -1270,9 +1292,11 @@ static int by_stem(const void *a, const void *b) {
     return strcmp(((const BdatJson *)a)->stem, ((const BdatJson *)b)->stem);
 }
 
-// file (the mod's full copy, or the game's) with the mod's JSON tables in place of those tables: a new file in *out.
-static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int k, Events *ev, Buf *out, char *why,
-                      size_t cap) {
+// file (the mod's full copy, or the game's) read into *out with the mod's JSON tables in place of those tables. No new
+// file is written: *tabs_out (one Buf per table, empty but for the JSON ones) holds those tables' bytes for as long as
+// *out is used, and file_bytes makes the file when one is needed whole.
+static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int k, Events *ev, File *out,
+                      Buf **tabs_out, char *why, size_t cap) {
     File f;
     char r[300];
     if (!read_file(file, size, &f, r, sizeof r)) {
@@ -1317,25 +1341,52 @@ static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int
         free(tabs[j].p);
         tabs[j] = t;
     }
-    size_t head = 16 + 4 * (size_t)f.count;
-    if (!put(out, NULL, head)) goto done;
-    memcpy(out->p, "BDAT", 4);
-    wr32(out->p + 4, 0x01001004);
-    wr32(out->p + 8, f.count);
+    uint64_t total = 16 + 4 * (uint64_t)f.count;   // the file it would be must still fit a BDAT file's 32-bit sizes
+    for (uint32_t j = 0; j < f.count; j++) total += tabs[j].p ? tabs[j].n : f.t[j].len;
+    if (total > 0xffffffffu) goto done;
     for (uint32_t j = 0; j < f.count; j++) {
-        wr32(out->p + 16 + 4 * j, (uint32_t)out->n);
-        if (tabs[j].p ? !put(out, tabs[j].p, tabs[j].n) : !put(out, f.t[j].p, f.t[j].len)) goto done;
+        Tab t;
+        if (!tabs[j].p) continue;
+        if (!read_table(tabs[j].p, (uint32_t)tabs[j].n, &t)) {
+            snprintf(why, cap, "table %u is damaged", j);
+            goto done;
+        }
+        free(f.t[j].off);
+        f.t[j] = t;
     }
-    if (out->n > 0xffffffffu) goto done;
-    wr32(out->p + 12, (uint32_t)out->n);
     ok = 1;
 done:
     if (!ok && !why[0]) snprintf(why, cap, "out of memory");
-    for (uint32_t j = 0; tabs && j < f.count; j++) free(tabs[j].p);
-    free(tabs);
+    if (ok) {
+        *out = f;
+        *tabs_out = tabs;
+    } else {
+        for (uint32_t j = 0; tabs && j < f.count; j++) free(tabs[j].p);
+        free(tabs);
+        file_free(&f);
+    }
     free(js);
-    file_free(&f);
     return ok;
+}
+
+// The file of f's tables as they are (a mod's copy with its JSON tables put in, when it is used whole).
+static uint8_t *file_bytes(const File *f, size_t *out_n) {
+    Buf out = {0};
+    size_t head = 16 + 4 * (size_t)f->count;
+    if (!put(&out, NULL, head)) return NULL;
+    memcpy(out.p, "BDAT", 4);
+    wr32(out.p + 4, 0x01001004);
+    wr32(out.p + 8, f->count);
+    for (uint32_t j = 0; j < f->count; j++) {
+        wr32(out.p + 16 + 4 * j, (uint32_t)out.n);
+        if (!put(&out, f->t[j].p, f->t[j].len)) {
+            free(out.p);
+            return NULL;
+        }
+    }
+    wr32(out.p + 12, (uint32_t)out.n);
+    *out_n = out.n;
+    return out.p;
 }
 
 // The hash values a mod's changes put in cells other than keys: what its added and edited rows refer to.
@@ -1402,9 +1453,9 @@ enum { PREP_SAME_TABLES, PREP_UNREADABLE, PREP_OTHER_TABLES };
 typedef struct {
     const BdatInput *base, *mods;
     const File *bf;
-    BdatInput *in;
-    Buf *made;
     File *mf;
+    Buf *tabs[MAX_MODS];     // apply_json: a JSON mod's tables' bytes, which mf[k] points into
+    uint32_t ntabs[MAX_MODS];
     int state[MAX_MODS];
     char why[MAX_MODS][300];
     Kept kept[MAX_MODS];
@@ -1415,25 +1466,28 @@ static void prepare(void *ctx, int k) {
     char *r = p->why[k];
     Events ev = {keep_line, &p->kept[k], &p->kept[k].s, p->mods};
     const BdatInput *m = &p->mods[k];
-    p->in[k] = *m;
     p->state[k] = PREP_UNREADABLE;
     if (m->njson) {
         // the mod's JSON tables in its full copy, or in the game's when it has none
         r[0] = 0;
-        if (!apply_json(m->data ? m->data : p->base->data, m->data ? m->size : p->base->size, m, k, &ev, &p->made[k],
-                        r, sizeof p->why[k]))
+        if (!apply_json(m->data ? m->data : p->base->data, m->data ? m->size : p->base->size, m, k, &ev, &p->mf[k],
+                        &p->tabs[k], r, sizeof p->why[k]))
             return;
-        p->in[k].data = p->made[k].p;
-        p->in[k].size = p->made[k].n;
-    }
-    if (!p->in[k].data) {
+        p->ntabs[k] = p->mf[k].count;
+    } else if (!m->data) {
         snprintf(r, sizeof p->why[k], "none given");
         return;
+    } else if (!read_file(m->data, m->size, &p->mf[k], r, sizeof p->why[k])) {
+        return;
     }
-    if (!read_file(p->in[k].data, p->in[k].size, &p->mf[k], r, sizeof p->why[k])) return;
     int same = p->mf[k].count == p->bf->count;
     for (uint32_t j = 0; same && j < p->bf->count; j++) same = p->mf[k].t[j].name == p->bf->t[j].name;
     p->state[k] = same ? PREP_SAME_TABLES : PREP_OTHER_TABLES;
+}
+
+// Mod k's copy as the result, when it is used whole: its own file, or for a mod with JSON tables the file of them put in.
+static uint8_t *whole_copy(const Prep *p, int k, size_t *out_n) {
+    return p->tabs[k] ? file_bytes(&p->mf[k], out_n) : copy_of(&p->mods[k], out_n);
 }
 
 // A live mod's change to every table, and what its changes refer to.
@@ -1471,8 +1525,6 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     int live[MAX_MODS], nlive = 0;
     Change *ch[MAX_MODS] = {0};
     Set refs[MAX_MODS] = {{0}};
-    BdatInput in[MAX_MODS];          // the mods as merged: with their JSON tables put in
-    Buf made[MAX_MODS] = {{0}};      // the files made for that
     Buf body = {0};
     uint32_t *offs = NULL;
     uint8_t *result = NULL;
@@ -1491,7 +1543,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     // every mod's file made and read (at the same time when there are threads), then taken in priority order as if
     // one after another: a mod whose copy is used whole ends it, and the mods after it say nothing more
     if (!(prep = calloc(1, sizeof *prep))) goto oom;
-    *prep = (Prep){.base = base, .mods = mods, .bf = &bf, .in = in, .made = made, .mf = mf};
+    *prep = (Prep){.base = base, .mods = mods, .bf = &bf, .mf = mf};
     each(n, prepare, prep);
     for (int k = 0; k < n; k++) {
         pass_on(&ev, &prep->kept[k]);
@@ -1504,7 +1556,6 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
             live[nlive++] = k;
             continue;
         }
-        file_free(&mf[k]);
         if (!nlive) {
             // the top mod that can be read has another list of tables: its whole file, the others left out
             for (int x = k + 1; x < n; x++)
@@ -1512,9 +1563,10 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
                       "and is used whole", mods[k].name);
             s.file_mode = BDAT_FILE_WHOLE;
             s.file_mod = k;
-            if (!(result = copy_of(&in[k], out_n))) snprintf(why, why_cap, "out of memory");
+            if (!(result = whole_copy(prep, k, out_n))) snprintf(why, why_cap, "out of memory");
             goto done;
         }
+        file_free(&mf[k]);
         event(&ev, LEFT_OUT, k, "its changes to this file are not used: its copy has another list of tables");
     }
     if (!nlive) {
@@ -1524,7 +1576,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     if (nlive == 1) {
         s.file_mode = BDAT_FILE_COPIED;
         s.file_mod = live[0];
-        if (!(result = copy_of(&in[live[0]], out_n))) snprintf(why, why_cap, "out of memory");
+        if (!(result = whole_copy(prep, live[0], out_n))) snprintf(why, why_cap, "out of memory");
         goto done;
     }
     // every mod's change to every table, and what its changes refer to
@@ -1633,8 +1685,11 @@ done:
         free(ch[k]);
         free(refs[k].v);
         file_free(&mf[k]);
-        free(made[k].p);
-        if (prep) free(prep->kept[k].lines.p);
+        if (prep) {
+            free(prep->kept[k].lines.p);
+            for (uint32_t j = 0; prep->tabs[k] && j < prep->ntabs[k]; j++) free(prep->tabs[k][j].p);
+            free(prep->tabs[k]);
+        }
     }
     free(prep);
     file_free(&bf);

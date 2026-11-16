@@ -57,7 +57,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
         ImGui::PushTextWrapPos(0);
         ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));
         if(stale){
-            ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(0.55f,0.8f,1.0f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
         }
         for(int i=0;bdat_merge_status(i,line,sizeof line,&kind);++i){
             if(kind==3){ImGui::TextDisabled("%s",line);continue;}   // a mod that adds nothing: not a conflict

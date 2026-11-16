@@ -150,7 +150,7 @@ static uint8_t *game_copy(const char *mount, const char *key, size_t *n, char *w
 
 // ---- status lines and events
 
-// kind 0: a summary line; 1: a change left out; 2: a caveat; 3: a mod that adds nothing. The oldest lines go first when the list is full.
+// kind 0: a summary line; 1: a change left out; 2: a caveat; 3: a mod that adds nothing; 4: one partly alike. The oldest lines go first when the list is full.
 static void add_status(int kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void add_status(int kind, const char *fmt, ...) {
     va_list ap;
@@ -202,7 +202,8 @@ static void on_note(void *ctx, const char *line) {
 }
 
 // The left-out and caveat lines of a report (one event per line), up to STATUS_EVENTS, into the status lines; then
-// up to STATUS_EVENTS of its mods that add nothing, so those never push a left-out change out of view.
+// up to STATUS_EVENTS of its mods that add nothing or are partly alike, so those never push a left-out change out of
+// view.
 static void status_events(const char *key, const char *text) {
     int more = 0;
     for (int pass = 0; pass < 2; pass++) {
@@ -211,8 +212,8 @@ static void status_events(const char *key, const char *text) {
             const char *e = strchr(p, '\n');
             size_t n = e ? (size_t)(e - p) : strlen(p);
             int kind = !strncmp(p, "left out: ", 10) ? 1 : !strncmp(p, "caveat: ", 8) ? 2 :
-                       !strncmp(p, "adds nothing: ", 14) ? 3 : 0;
-            if (kind && (kind == 3) == pass) {
+                       !strncmp(p, "adds nothing: ", 14) ? 3 : !strncmp(p, "partly alike: ", 14) ? 4 : 0;
+            if (kind && (kind >= 3) == pass) {
                 if (shown < STATUS_EVENTS) {
                     add_status(kind, "%s: %.*s", key, (int)n, p);
                     shown++;

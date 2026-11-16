@@ -449,9 +449,10 @@ class BdatMerge(unittest.TestCase):
         edit(other[3], 0, 1, 9)      # alike in one table, its own change in another
         out, notes, s = self.merge(g, ('whole', whole), ('piece', piece), ('other', other))
         self.has(notes, 'adds nothing: piece:', 'every table it changes is the same in whole')
+        self.has(notes, 'partly alike: other:', '1 of the 2 tables it changes are the same in whole')
         self.assertFalse([n for n in notes if n.startswith('adds nothing: other')], notes)
-        self.assertFalse([n for n in notes if n.startswith('adds nothing: whole')], notes)
-        self.assertEqual((s['nothing'], s['leftout'], s['priority']), (1, 0, 0))
+        self.assertFalse([n for n in notes if ': whole:' in n], notes)
+        self.assertEqual((s['nothing'], s['alike'], s['leftout'], s['priority']), (1, 1, 0, 0))
 
     def test_keys_stay_unique(self):
         g = game()

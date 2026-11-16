@@ -93,7 +93,9 @@ and one line per event:
 - **caveat**: something used that may not behave as its mod expects (rows renumbered, a removed row kept);
 - **adds nothing**: a mod every one of whose changed tables a higher mod has exactly alike (rows, columns and
   values), so turning it off changes nothing: a mod's single pieces under its own whole version, for one. Listed
-  after the mods are read and before the tables are merged; not a conflict, and not counted as one.
+  after the mods are read and before the tables are merged; not a conflict, and not counted as one;
+- **partly alike**: a mod some (not all) of whose changed tables a higher mod has exactly alike: how many of them,
+  and which mods. Listed with the adds-nothing lines; not a conflict either.
 
 The log has the same lines (the first few of each merge), and the Mods tab shows the counts and the caveats and
 left-out changes of this run.

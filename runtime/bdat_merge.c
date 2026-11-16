@@ -476,11 +476,12 @@ typedef struct {
 
 static void event(Events *ev, int kind, int mod, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void event(Events *ev, int kind, int mod, const char *fmt, ...) {
-    static const char *const names[] = {"priority", "left out", "caveat", "adds nothing"};
+    static const char *const names[] = {"priority", "left out", "caveat", "adds nothing", "partly alike"};
     if (kind == 0) ev->s->priority++;
     else if (kind == 1) ev->s->left_out++;
     else if (kind == 2) ev->s->caveats++;
-    else ev->s->adds_nothing++;
+    else if (kind == 3) ev->s->adds_nothing++;
+    else ev->s->partly_alike++;
     if (!ev->note) return;
     char line[700];
     int n = snprintf(line, sizeof line, "%s: ", names[kind]);
@@ -491,7 +492,7 @@ static void event(Events *ev, int kind, int mod, const char *fmt, ...) {
     va_end(ap);
     ev->note(ev->ctx, line);
 }
-enum { PRIORITY, LEFT_OUT, CAVEAT, ADDS_NOTHING };
+enum { PRIORITY, LEFT_OUT, CAVEAT, ADDS_NOTHING, PARTLY_ALIKE };
 
 static void rowname(const Tab *t, uint32_t r, char *out, size_t cap) {
     if (ctype(t, 0) == 9) snprintf(out, cap, "row %u (key %08X)", t->base + r, key(t, r));
@@ -1417,26 +1418,30 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     }
     for (int x = 0; x < nlive; x++)
         if (!refs_of(&bf, &mf[live[x]], ch[live[x]], &refs[live[x]])) goto oom;
-    // a mod whose every changed table a higher mod has alike adds nothing (docs/bdat-merge.md, "The report")
+    // changed tables a higher mod has alike: all of them, the mod adds nothing; some, partly alike
+    // (docs/bdat-merge.md, "The report")
     for (int x = 1; x < nlive; x++) {
-        int k = live[x], changed = 0, all = 1, used[MAX_MODS] = {0};
-        for (uint32_t j = 0; all && j < bf.count; j++) {
+        int k = live[x], changed = 0, alike = 0, used[MAX_MODS] = {0};
+        for (uint32_t j = 0; j < bf.count; j++) {
             if (ch[k][j].kind == SAME) continue;
-            changed = 1;
+            changed++;
             int h = -1;
             for (int y = 0; h < 0 && y < x; y++)
                 if (same_table(&mf[live[y]].t[j], &mf[k].t[j])) h = y;
-            if (h < 0) all = 0;
-            else used[h] = 1;
+            if (h >= 0) {
+                alike++;
+                used[h] = 1;
+            }
         }
-        if (!changed || !all) continue;
+        if (!alike) continue;
         char who[400];
         size_t w = 0;
         who[0] = 0;
         for (int y = 0; y < x; y++)
             if (used[y] && w < sizeof who)
                 w += (size_t)snprintf(who + w, sizeof who - w, "%s%s", w ? ", " : "", mods[live[y]].name);
-        event(&ev, ADDS_NOTHING, k, "every table it changes is the same in %s", who);
+        if (alike == changed) event(&ev, ADDS_NOTHING, k, "every table it changes is the same in %s", who);
+        else event(&ev, PARTLY_ALIKE, k, "%d of the %d tables it changes are the same in %s", alike, changed, who);
     }
     s.file_mode = BDAT_FILE_MERGED;
     if (!(offs = malloc(bf.count * sizeof *offs))) goto oom;

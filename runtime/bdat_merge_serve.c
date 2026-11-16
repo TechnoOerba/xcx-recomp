@@ -497,9 +497,10 @@ static int quick_key(const char *key, const uint8_t *stored, size_t stored_n, co
 //
 // An uncached merge's time is mostly per mod and each mod's work needs only its own files and the game's copy:
 // reading and hashing its copies here, putting in its JSON tables and comparing its tables with the game's in
-// bdat_merge. So that runs on up to 8 threads, the calling one among them, one fewer than the logical processors (the
-// game waits for this file anyway). Whatever the order the work finishes in, its results and notes are taken in
-// priority order afterwards, so the merged file and the report are the same as one after another.
+// bdat_merge. So that runs on up to 8 threads, the calling one among them: one fewer than the logical processors, or
+// all of them on a CPU with 4 or fewer (the game waits for this file anyway, and one thread fewer of 2 is none to
+// help). Whatever the order the work finishes in, its results and notes are taken in priority order afterwards, so the
+// merged file and the report are the same as one after another.
 
 typedef struct {
     void (*fn)(void *ctx, int i);
@@ -515,7 +516,7 @@ static void pool_run(void *arg) {
 
 static void parallel_for(int n, void (*fn)(void *ctx, int i), void *ctx) {
     uint32_t cpus = plat_cpu_count();
-    int want = cpus > 1 ? (int)cpus - 1 : 1;
+    int want = cpus <= 4 ? (int)cpus : (int)cpus - 1;   // a small CPU: all of it, as the game waits for this file
     if (want > 8) want = 8;
     if (want > n) want = n;
     Pool p = {fn, ctx, n, 0};

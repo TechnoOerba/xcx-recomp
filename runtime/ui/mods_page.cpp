@@ -76,12 +76,12 @@ static bool library(float scale,bool focus_first) {
     snprintf(picked,sizeof picked,"%s",v.rows[index].id);
     bool focused=false;
     if(ImGui::BeginTable("##library",2,ImGuiTableFlags_SizingStretchProp)){
-        ImGui::TableSetupColumn("##library_list",ImGuiTableColumnFlags_WidthFixed,300*scale);
+        ImGui::TableSetupColumn("##library_list",ImGuiTableColumnFlags_WidthFixed,360*scale);
         ImGui::TableSetupColumn("##library_detail",ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableNextColumn();
-        // The rows scroll in a box of their own, at most about half the page high, so the picked mod's text, its On box
+        // The rows scroll in a box of their own, at most about two thirds of the page high, so the picked mod's text, its On box
         // and its buttons in the next column stay in view beside a long list.
-        float rows_max=ImGui::GetWindowHeight()*0.55f;if(rows_max<160*scale)rows_max=160*scale;
+        float rows_max=ImGui::GetWindowHeight()*0.7f;if(rows_max<160*scale)rows_max=160*scale;
         ImGui::SetNextWindowSizeConstraints(ImVec2(0,0),ImVec2(FLT_MAX,rows_max));
         ImGui::BeginChild("##library_rows",ImVec2(0,0),ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_NavFlattened);
         // An entry's parts (library.ini group) are one row that opens on them, shut at first, so an entry with many

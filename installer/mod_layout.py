@@ -48,6 +48,21 @@ class Plan:
     def sure(self):
         return self.how in ('romfs', 'loader', 'matched')
 
+    @property
+    def tables(self):
+        """bdat tables as JSON (bdat-toolset's format, as some mods ship their changes): installed as they come, used
+        once the game's bdat merge reads them, never game files of their own."""
+        return sorted(g for g in self.files.values() if is_table_json(g))
+
+    @property
+    def new_files(self):
+        """The added files that are not JSON tables."""
+        return [g for g in self.added if not is_table_json(g)]
+
+
+def is_table_json(game_path):
+    return game_path.lower().startswith('bdat/') and game_path.lower().endswith('.json')
+
 
 def is_title_id(name):
     return len(name) == 16 and all(ch in '0123456789abcdefABCDEF' for ch in name)
@@ -212,8 +227,10 @@ def describe(p, cat):
     else:
         lines.append(cat('layout.romfs', total=n))
     lines.append(cat('layout.files', files=names(sorted(p.files.values()))))
-    if p.added and p.how != 'guessed':
-        lines.append(cat('layout.added', files=names(p.added)))
+    if p.new_files and p.how != 'guessed':
+        lines.append(cat('layout.added', files=names(p.new_files)))
+    if p.tables:
+        lines.append(cat('layout.bdat_json', count=len(p.tables)))
     for reason in ('exefs', 'doc', 'outside'):
         left = [name for name, why in p.left_out if why == reason]
         if left:
@@ -224,4 +241,4 @@ def describe(p, cat):
 def needs_confirm(p):
     """Whether the player should see the plan before anything is written: anything but a plain romfs archive whose
     files are all the game's."""
-    return p.how not in ('romfs', 'loader') or bool(p.added) or any(why == 'outside' for _, why in p.left_out)
+    return p.how not in ('romfs', 'loader') or bool(p.new_files) or bool(p.tables) or any(why == 'outside' for _, why in p.left_out)

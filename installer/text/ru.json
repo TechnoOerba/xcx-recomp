@@ -284,5 +284,6 @@
  "mods.manual_part_line": "  {part}: «{file}» ({size} МБ)",
  "mods.parts_title": "Установка частей {name}",
  "mods.parts_pick": "Выберите части для загрузки:",
- "mods.manual_pick_many": "Выбрать скачанные файлы..."
+ "mods.manual_pick_many": "Выбрать скачанные файлы...",
+ "layout.bdat_json": "{count} из них — таблицы bdat в JSON (формат bdat-toolset), а не файлы, которые игра читает сама: они действуют, когда игра объединяет их со своими файлами bdat."
 }

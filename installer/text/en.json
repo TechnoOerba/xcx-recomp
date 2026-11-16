@@ -284,5 +284,6 @@
  "mods.manual_part_line": "  {part}: \"{file}\" ({size} MB)",
  "mods.parts_title": "Install parts of {name}",
  "mods.parts_pick": "Pick the parts to download:",
- "mods.manual_pick_many": "Choose the downloaded files..."
+ "mods.manual_pick_many": "Choose the downloaded files...",
+ "layout.bdat_json": "{count} of these are bdat tables as JSON (the format of bdat-toolset), not files the game reads by themselves: they take effect when the game merges them into its bdat files."
 }

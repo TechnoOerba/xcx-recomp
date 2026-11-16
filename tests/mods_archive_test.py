@@ -108,6 +108,19 @@ class PlanTest(unittest.TestCase):
         p = mod_layout.plan(members('m/chr/np/a.wimdo', 'm/chr/np/new.wimdo', 'm/preview.png'), self.G)
         self.assertEqual((p.top, p.added, p.left_out), ('m', ['chr/np/new.wimdo'], [('m/preview.png', 'doc')]))
 
+    def test_json_tables(self):
+        # an option that ships changed tables as bdat-toolset JSON: kept with its own names under the archive's
+        # layout, named as tables rather than as files the game lacks
+        p = mod_layout.plan(members('probe tweak/bdat/common/SYS_Probe.json', 'probe tweak/bdat/common.bdat'),
+                            self.G)
+        self.assertEqual(p.files, {'probe tweak/bdat/common/SYS_Probe.json': 'bdat/common/SYS_Probe.json',
+                                   'probe tweak/bdat/common.bdat': 'bdat/common.bdat'})
+        self.assertEqual((p.tables, p.new_files), (['bdat/common/SYS_Probe.json'], []))
+        en = json.loads((ROOT / 'installer' / 'text' / 'en.json').read_text(encoding='utf-8'))
+        lines = mod_layout.describe(p, lambda i, **k: en[i].format(**k))
+        self.assertTrue(any('bdat-toolset' in line for line in lines))
+        self.assertTrue(mod_layout.needs_confirm(p))
+
     def test_several_versions(self):
         names = members('Lite/bdat/common.bdat', 'Full/bdat/common.bdat', 'readme.txt')
         for g in (self.G, None):

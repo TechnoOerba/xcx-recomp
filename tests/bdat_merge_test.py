@@ -158,7 +158,7 @@ def keys(t):
 
 
 def engine():
-    """('c', clang) or ('py', prototype path), or None."""
+    """('c', clang), ('py', a script with the same command line), or None."""
     py = os.environ.get('XCX_BDAT_MERGE_PY')
     if py:
         return 'py', py

@@ -39,6 +39,13 @@ typedef struct {
 // "partly alike: <mod>: ...".
 typedef void (*BdatNote)(void *ctx, const char *line);
 
+// Runs fn(ctx, i) for every i in [0, n), in any order and possibly at the same time; returns when all have returned.
+// bdat_merge runs each mod's own work (its JSON tables put in, its file read, its tables compared with the game's)
+// through it. This file has no threads of its own, so a caller with threads gives one (runtime/bdat_merge_serve.c);
+// NULL, the default, runs them one after another. The result and the events are the same either way.
+typedef void (*BdatParallelFor)(int n, void (*fn)(void *ctx, int i), void *ctx);
+void bdat_merge_set_parallel(BdatParallelFor f);
+
 // base: the game's own file. mods: their copies of it, highest priority first (romfs-enabled.txt order), n >= 1.
 // Returns the merged file (malloc'd, size in *out_n), or NULL with the reason in why when nothing can be merged (the
 // game's copy can't be read, or no mod's can). A mod whose copy can't be used is left out and reported.

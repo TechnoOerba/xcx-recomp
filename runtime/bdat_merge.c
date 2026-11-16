@@ -1364,6 +1364,104 @@ static uint8_t *copy_of(const BdatInput *in, size_t *out_n) {
     return p;
 }
 
+// ---- each mod's own work, possibly at the same time (bdat_merge_set_parallel)
+
+static BdatParallelFor parallel;
+
+void bdat_merge_set_parallel(BdatParallelFor f) { parallel = f; }
+
+static void each(int n, void (*fn)(void *ctx, int i), void *ctx) {
+    if (parallel && n > 1) {
+        parallel(n, fn, ctx);
+        return;
+    }
+    for (int i = 0; i < n; i++) fn(ctx, i);
+}
+
+// The events of one mod's work, kept with it and passed on in mod order afterwards, so the report reads the same
+// however the work was spread: its lines one after another, each with its NUL, and its counts.
+typedef struct { Buf lines; BdatSummary s; int oom; } Kept;
+
+static void keep_line(void *ctx, const char *line) {
+    Kept *k = ctx;
+    if (!put(&k->lines, line, strlen(line) + 1)) k->oom = 1;
+}
+
+static void pass_on(Events *ev, const Kept *k) {
+    for (size_t o = 0; ev->note && o < k->lines.n; o += strlen((const char *)k->lines.p + o) + 1)
+        ev->note(ev->ctx, (const char *)k->lines.p + o);
+    ev->s->priority += k->s.priority;
+    ev->s->left_out += k->s.left_out;
+    ev->s->caveats += k->s.caveats;
+    ev->s->adds_nothing += k->s.adds_nothing;
+    ev->s->partly_alike += k->s.partly_alike;
+}
+
+// A mod's file as it is merged: its JSON tables put in, then read. state: what came of it.
+enum { PREP_SAME_TABLES, PREP_UNREADABLE, PREP_OTHER_TABLES };
+typedef struct {
+    const BdatInput *base, *mods;
+    const File *bf;
+    BdatInput *in;
+    Buf *made;
+    File *mf;
+    int state[MAX_MODS];
+    char why[MAX_MODS][300];
+    Kept kept[MAX_MODS];
+} Prep;
+
+static void prepare(void *ctx, int k) {
+    Prep *p = ctx;
+    char *r = p->why[k];
+    Events ev = {keep_line, &p->kept[k], &p->kept[k].s, p->mods};
+    const BdatInput *m = &p->mods[k];
+    p->in[k] = *m;
+    p->state[k] = PREP_UNREADABLE;
+    if (m->njson) {
+        // the mod's JSON tables in its full copy, or in the game's when it has none
+        r[0] = 0;
+        if (!apply_json(m->data ? m->data : p->base->data, m->data ? m->size : p->base->size, m, k, &ev, &p->made[k],
+                        r, sizeof p->why[k]))
+            return;
+        p->in[k].data = p->made[k].p;
+        p->in[k].size = p->made[k].n;
+    }
+    if (!p->in[k].data) {
+        snprintf(r, sizeof p->why[k], "none given");
+        return;
+    }
+    if (!read_file(p->in[k].data, p->in[k].size, &p->mf[k], r, sizeof p->why[k])) return;
+    int same = p->mf[k].count == p->bf->count;
+    for (uint32_t j = 0; same && j < p->bf->count; j++) same = p->mf[k].t[j].name == p->bf->t[j].name;
+    p->state[k] = same ? PREP_SAME_TABLES : PREP_OTHER_TABLES;
+}
+
+// A live mod's change to every table, and what its changes refer to.
+typedef struct {
+    const File *bf, *mf;
+    Pair *const *bkeys;
+    const int *bunique, *live;
+    Change **ch;
+    Set *refs;
+    int oom[MAX_MODS];
+} Compare;
+
+static void compare(void *ctx, int x) {
+    Compare *c = ctx;
+    int k = c->live[x];
+    uint32_t count = c->bf->count;
+    if (!(c->ch[k] = calloc(count, sizeof *c->ch[k]))) {
+        c->oom[x] = 1;
+        return;
+    }
+    for (uint32_t j = 0; j < count; j++)
+        if (!classify(&c->bf->t[j], c->bkeys[j], c->bunique[j], &c->mf[k].t[j], &c->ch[k][j])) {
+            c->oom[x] = 1;
+            return;
+        }
+    if (!refs_of(c->bf, &c->mf[k], c->ch[k], &c->refs[k])) c->oom[x] = 1;
+}
+
 uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t *out_n, BdatSummary *sum,
                     BdatNote note, void *ctx, char *why, size_t why_cap) {
     BdatSummary s = {0};
@@ -1380,6 +1478,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     uint8_t *result = NULL;
     Pair **bkeys = NULL;
     int *bunique = NULL;
+    Prep *prep = NULL;
     char r[300];
     if (n < 1 || n > MAX_MODS) {
         snprintf(why, why_cap, "%d mods (1 to %d can be merged)", n, MAX_MODS);
@@ -1389,26 +1488,19 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
         snprintf(why, why_cap, "the game's copy: %s", r);
         return NULL;
     }
+    // every mod's file made and read (at the same time when there are threads), then taken in priority order as if
+    // one after another: a mod whose copy is used whole ends it, and the mods after it say nothing more
+    if (!(prep = calloc(1, sizeof *prep))) goto oom;
+    *prep = (Prep){.base = base, .mods = mods, .bf = &bf, .in = in, .made = made, .mf = mf};
+    each(n, prepare, prep);
     for (int k = 0; k < n; k++) {
-        in[k] = mods[k];
-        if (mods[k].njson) {
-            // the mod's JSON tables in its full copy, or in the game's when it has none
-            r[0] = 0;
-            if (!apply_json(mods[k].data ? mods[k].data : base->data, mods[k].data ? mods[k].size : base->size,
-                            &mods[k], k, &ev, &made[k], r, sizeof r)) {
-                event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", r);
-                continue;
-            }
-            in[k].data = made[k].p;
-            in[k].size = made[k].n;
-        }
-        if (!in[k].data || !read_file(in[k].data, in[k].size, &mf[k], r, sizeof r)) {
-            event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", in[k].data ? r : "none given");
+        pass_on(&ev, &prep->kept[k]);
+        if (prep->kept[k].oom) goto oom;
+        if (prep->state[k] == PREP_UNREADABLE) {
+            event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", prep->why[k]);
             continue;
         }
-        int same = mf[k].count == bf.count;
-        for (uint32_t j = 0; same && j < bf.count; j++) same = mf[k].t[j].name == bf.t[j].name;
-        if (same) {
+        if (prep->state[k] == PREP_SAME_TABLES) {
             live[nlive++] = k;
             continue;
         }
@@ -1441,14 +1533,12 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     if (!bkeys || !bunique) goto oom;
     for (uint32_t j = 0; j < bf.count; j++)
         if (ctype(&bf.t[j], 0) == 9 && !(bkeys[j] = sorted_keys(&bf.t[j], &bunique[j]))) goto oom;
-    for (int x = 0; x < nlive; x++) {
-        int k = live[x];
-        if (!(ch[k] = calloc(bf.count, sizeof *ch[k]))) goto oom;
-        for (uint32_t j = 0; j < bf.count; j++)
-            if (!classify(&bf.t[j], bkeys[j], bunique[j], &mf[k].t[j], &ch[k][j])) goto oom;
+    {
+        Compare c = {.bf = &bf, .mf = mf, .bkeys = bkeys, .bunique = bunique, .live = live, .ch = ch, .refs = refs};
+        each(nlive, compare, &c);
+        for (int x = 0; x < nlive; x++)
+            if (c.oom[x]) goto oom;
     }
-    for (int x = 0; x < nlive; x++)
-        if (!refs_of(&bf, &mf[live[x]], ch[live[x]], &refs[live[x]])) goto oom;
     // changed tables a higher mod has alike: all of them, the mod adds nothing; some, partly alike
     // (docs/bdat-merge.md, "The report")
     for (int x = 1; x < nlive; x++) {
@@ -1544,7 +1634,9 @@ done:
         free(refs[k].v);
         file_free(&mf[k]);
         free(made[k].p);
+        if (prep) free(prep->kept[k].lines.p);
     }
+    free(prep);
     file_free(&bf);
     free(offs);
     free(body.p);

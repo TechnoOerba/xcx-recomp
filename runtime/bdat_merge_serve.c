@@ -14,6 +14,7 @@
 #include "bdat_merge.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -492,6 +493,78 @@ static int quick_key(const char *key, const uint8_t *stored, size_t stored_n, co
     return 1;
 }
 
+// ---- each mod's work at the same time
+//
+// An uncached merge's time is mostly per mod and each mod's work needs only its own files and the game's copy:
+// reading and hashing its copies here, putting in its JSON tables and comparing its tables with the game's in
+// bdat_merge. So that runs on up to 8 threads, the calling one among them, one fewer than the logical processors (the
+// game waits for this file anyway). Whatever the order the work finishes in, its results and notes are taken in
+// priority order afterwards, so the merged file and the report are the same as one after another.
+
+typedef struct {
+    void (*fn)(void *ctx, int i);
+    void *ctx;
+    int n;
+    atomic_int next;
+} Pool;
+
+static void pool_run(void *arg) {
+    Pool *p = arg;
+    for (int i; (i = atomic_fetch_add(&p->next, 1)) < p->n;) p->fn(p->ctx, i);
+}
+
+static void parallel_for(int n, void (*fn)(void *ctx, int i), void *ctx) {
+    uint32_t cpus = plat_cpu_count();
+    int want = cpus > 1 ? (int)cpus - 1 : 1;
+    if (want > 8) want = 8;
+    if (want > n) want = n;
+    Pool p = {fn, ctx, n, 0};
+    PlatThread *t[8];
+    int nt = 0;
+    for (int i = 1; i < want; i++)
+        if ((t[nt] = plat_thread_new(pool_run, &p, "bdat merge"))) nt++;
+    pool_run(&p);   // a thread that didn't start leaves its share to the others
+    for (int i = 0; i < nt; i++) plat_thread_join(t[i]);
+}
+
+// A mod's copies read and hashed: its full copy into data[k] (SHA-256 in d_full[k], of "" when it has none) and its
+// readable JSON tables into json[k] (SHA-256 of each in d_json[k]); the ones that can't be read marked to be noted.
+typedef struct {
+    const BdatModFiles *mods;
+    uint8_t **data;
+    uint64_t *size;
+    BdatJson **json;
+    int *njson;
+    char (*stems)[64][128];
+    uint8_t d_full[64][32], d_json[64][64][32];
+    uint8_t full_bad[64], oom[64], json_bad[64][64];
+} Reads;
+
+static void read_mod(void *ctx, int k) {
+    Reads *r = ctx;
+    const BdatModFiles *m = &r->mods[k];
+    if (m->full && !(r->data[k] = plat_file_read(m->full, &r->size[k]))) {
+        r->full_bad[k] = 1;
+        return;
+    }
+    sha256(r->data[k] ? r->data[k] : (const uint8_t *)"", r->data[k] ? r->size[k] : 0, r->d_full[k]);
+    if (m->njson && !(r->json[k] = calloc((size_t)m->njson, sizeof *r->json[k]))) {
+        r->oom[k] = 1;
+        return;
+    }
+    for (int x = 0; x < m->njson && x < 64; x++) {
+        uint64_t sz = 0;
+        uint8_t *p = plat_file_read(m->json[x], &sz);
+        stem_of(m->json[x], r->stems[k][x], sizeof r->stems[k][x]);
+        if (!p) {
+            r->json_bad[k][x] = 1;
+            continue;
+        }
+        sha256(p, (size_t)sz, r->d_json[k][r->njson[k]]);
+        r->json[k][r->njson[k]++] = (BdatJson){r->stems[k][x], p, (size_t)sz};
+    }
+}
+
 int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap) {
     if (n < 1 || n > 64 || !mount || !key) return 0;
     const RtConfig *cfg = rt_config();
@@ -500,6 +573,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     int ok = 0, full = -1;
     char why[400] = "";
     uint8_t *game = NULL, *merged = NULL, *stored = NULL;
+    Reads *reads = NULL;
     uint8_t *data[64] = {0};
     uint64_t size[64] = {0};
     BdatJson *json[64] = {0};
@@ -538,26 +612,23 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     for (int k = 0; k < n && hn < sizeof head - 70; k++)
         hn += (size_t)snprintf(head + hn, sizeof head - hn, "%s %s", k ? ";" : "", label[k]);
     add_line(&notes, head);
+    // every mod's copies read and hashed (at the same time when there are threads), then taken in priority order as
+    // if one after another: a copy that can't be read ends it, and its notes come in order
+    if (!(reads = calloc(1, sizeof *reads))) goto done;
+    *reads = (Reads){.mods = mods, .data = data, .size = size, .json = json, .njson = njson, .stems = stems};
+    parallel_for(n, read_mod, reads);
     for (int k = 0; k < n; k++) {
-        if (mods[k].full) {
-            if (!(data[k] = plat_file_read(mods[k].full, &size[k]))) {
-                snprintf(why, sizeof why, "%s's copy can't be read", label[k]);
-                goto done;
-            }
+        if (reads->full_bad[k]) {
+            snprintf(why, sizeof why, "%s's copy can't be read", label[k]);
+            goto done;
         }
-        if (mods[k].njson && !(json[k] = calloc((size_t)mods[k].njson, sizeof *json[k]))) goto done;
-        for (int x = 0; x < mods[k].njson && x < 64; x++) {
-            uint64_t sz = 0;
-            uint8_t *p = plat_file_read(mods[k].json[x], &sz);
-            stem_of(mods[k].json[x], stems[k][x], sizeof stems[k][x]);
-            if (!p) {
+        if (reads->oom[k]) goto done;
+        for (int x = 0; x < mods[k].njson && x < 64; x++)
+            if (reads->json_bad[k][x]) {
                 char line[400];
                 snprintf(line, sizeof line, "left out: %s: its table %s.json can't be read", label[k], stems[k][x]);
                 on_note(&notes, line);
-                continue;
             }
-            json[k][njson[k]++] = (BdatJson){stems[k][x], p, (size_t)sz};
-        }
     }
     game = game_unpack(stored, stored_n, key, &game_n, why, sizeof why);   // takes stored
     stored = NULL;
@@ -573,13 +644,11 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     sha256_update(&s, d, 32);
     for (int k = 0; k < n; k++) {
         sha256_update(&s, mods[k].id, strlen(mods[k].id) + 1);
-        sha256(data[k] ? data[k] : (const uint8_t *)"", data[k] ? size[k] : 0, d);
         sha256_update(&s, data[k] ? "f" : "-", 1);
-        sha256_update(&s, d, 32);
+        sha256_update(&s, reads->d_full[k], 32);   // read_mod: SHA-256 of the full copy ("" when none)
         for (int x = 0; x < njson[k]; x++) {
             sha256_update(&s, json[k][x].stem, strlen(json[k][x].stem) + 1);
-            sha256(json[k][x].data, json[k][x].size, d);
-            sha256_update(&s, d, 32);
+            sha256_update(&s, reads->d_json[k][x], 32);
         }
     }
     sha256_final(&s, d);
@@ -599,6 +668,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     BdatInput base = {game, game_n, "game", NULL, 0}, in[64];
     for (int k = 0; k < n; k++) in[k] = (BdatInput){data[k], (size_t)size[k], label[k], json[k], njson[k]};
     BdatSummary sum;
+    bdat_merge_set_parallel(parallel_for);
     if (!(merged = bdat_merge(&base, in, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
     plat_file_mkdir_p(pr.dir);
     if (!plat_file_write_atomic(file, merged, merged_n)) {
@@ -642,6 +712,7 @@ done:
         for (int x = 0; x < njson[k]; x++) free((void *)json[k][x].data);
         free(json[k]);
     }
+    free(reads);
     free(stored);
     free(game);
     free(merged);

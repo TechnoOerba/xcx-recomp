@@ -111,7 +111,14 @@ static void mod_priority(const ModLibView &v,bool idle) {
             ImGui::PopID();
         }
         if(move>=0){romfs_mods_move(ids[move],up);next=0;}
-        if(off>=0){romfs_mods_set(ids[off],0);next=0;}
+        // through the library, as its On box does, so its row above shows the change at once; a mod it doesn't list
+        // (a folder it can't read) straight in the list file
+        if(off>=0){
+            bool listed=false;
+            for(int k=0;k<v.count;++k)listed|=!strcmp(v.rows[k].id,ids[off])&&v.rows[k].installed;
+            if(listed)modlib_set_enabled(ids[off],0);else romfs_mods_set(ids[off],0);
+            next=0;
+        }
     }
     // The merges were made at start-up and the game doesn't read its tables again, so once the list would make them
     // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now, and

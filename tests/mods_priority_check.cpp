@@ -21,7 +21,10 @@ __attribute__((weak)) void modlib_snapshot(ModLibView *v) { *v = test_view; }
 __attribute__((weak)) void modlib_refresh(void) {}
 __attribute__((weak)) void modlib_install(const char *) {}
 __attribute__((weak)) void modlib_remove(const char *) {}
-__attribute__((weak)) void modlib_set_enabled(const char *, int) {}
+static char lib_off[65];   // modlib_set_enabled(id, 0): the library's own switch
+__attribute__((weak)) void modlib_set_enabled(const char *id, int on) {
+    if (!on) snprintf(lib_off, sizeof lib_off, "%s", id);
+}
 __attribute__((weak)) void mod_ui_snapshot(ModSnapshot *out) { memset(out, 0, sizeof *out); }
 __attribute__((weak)) void mod_ui_interaction(int) {}
 __attribute__((weak)) int rt_mods_ui_submit(const ModAction *) { return 0; }
@@ -172,7 +175,8 @@ int main() {
     frame();
     io.AddMouseButtonEvent(0, false);
     frame();
-    verify(!strcmp(turned_off, "whole.piece"), "Turn off turns that mod off");
+    verify(!strcmp(lib_off, "whole.piece") && !turned_off[0],
+           "Turn off goes through the library, so its row shows the change");
 
     // Up on the third mod asks romfs_mods.c to move it
     io.AddMousePosEvent((prio_up_low[2].x + prio_up_high[2].x) / 2, (prio_up_low[2].y + prio_up_high[2].y) / 2);

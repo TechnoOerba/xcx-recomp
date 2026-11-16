@@ -2,7 +2,8 @@
 // from a made-up mod list and merge status, for tests/mods_priority_test.py: the mods listed by their names, Up moving
 // one, the merge lines in their looks (left out, caveat, grey for mods that add nothing or are partly alike) and the
 // restart line once the list differs from what the game merged at start-up. Prints "ok <n>" or one "FAIL <check>" per
-// failure; the exit code is the failure count. Also each row's tag of what the merges said about it, and Turn off.
+// failure; the exit code is the failure count. Also each row's tag of what the merges said about it, Turn off, and
+// Merge now: merging, then the next start's lines and tags in place of this run's.
 #define XCX_MOD_UI_TESTING
 #include "../runtime/ui/mods_page.cpp"
 #include <cstdlib>
@@ -35,6 +36,24 @@ __attribute__((weak)) int romfs_mods_move(const char *id, int up) {
     return 1;
 }
 __attribute__((weak)) int romfs_mods_tables_changed(void) { return test_changed; }
+static int test_ahead, premerges;   // romfs_mods_premerge_state; calls of romfs_mods_premerge
+static const char *test_next[4];
+static int test_nnext;
+__attribute__((weak)) int romfs_mods_premerge(void) { premerges++; return 1; }
+__attribute__((weak)) int romfs_mods_premerge_state(void) { return test_ahead; }
+__attribute__((weak)) int bdat_merge_next_status(int i, char *out, size_t cap, int *kind) {
+    if (i < 0 || i >= test_nnext) return 0;
+    snprintf(out, cap, "%s", test_next[i]);
+    if (kind) *kind = 0;
+    return 1;
+}
+// the next start: "other" adds nothing there
+__attribute__((weak)) int bdat_merge_next_mod_tag(const char *id, char *out, size_t cap, int *flags) {
+    int on = !strcmp(id, "other");
+    snprintf(out, cap, "%s", on ? "adds nothing" : "");
+    if (flags) *flags = on ? BDAT_TAG_ADDS_NOTHING : 0;
+    return on;
+}
 __attribute__((weak)) int bdat_merge_status(int i, char *out, size_t cap, int *kind) {
     if (i < 0 || i >= test_nstatus) return 0;
     snprintf(out, cap, "%s", test_status[i]);
@@ -157,13 +176,43 @@ int main() {
     frame();
     verify(!strcmp(moved, "other") && moved_up == 1, "Up moves that mod up");
 
-    // the list differs from what was merged at start-up: the restart line, ahead of the merge lines
+    // the list differs from what was merged at start-up: the restart line, Merge now, and this run's lines out of
+    // the way under their own (shut) heading
     test_changed = 1;
+    memset(prio_off_shown, 0, sizeof prio_off_shown);
     refresh();
     int r = find('R', nullptr);
-    verify(r >= 0 && r == find('H', nullptr) + 1 && r < find('N', nullptr), "the restart line comes first");
+    verify(r >= 0 && r < find('M', nullptr) && find('M', nullptr) < find('S', nullptr),
+           "the restart line comes first, then Merge now, then the start-up lines' heading");
     verify(r >= 0 && strstr(prio_lines[r], "restart"), "the restart line says to restart");
+    verify(find('N', nullptr) < 0, "this run's lines are shut away once the list changed");
     verify(find('T', nullptr) < 0 && !prio_off_shown[0], "a changed list hides the tags, which are of the old one");
+
+    // Merge now asks romfs_mods.c to merge ahead; while it runs, the page says so
+    io.AddMousePosEvent((prio_merge_low.x + prio_merge_high.x) / 2, (prio_merge_low.y + prio_merge_high.y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    verify(premerges == 1, "Merge now starts the merge ahead");
+    test_ahead = 1;
+    refresh();
+    verify(find('W', nullptr) >= 0 && find('M', nullptr) < 0, "merging: no button, a line saying so");
+
+    // merged ahead: the next start's lines and tags
+    static const char *const next_lines[] = {"bdat/common.bdat: 2 mods merged (next)"};
+    test_next[0] = next_lines[0];
+    test_nnext = 1;
+    test_ahead = 2;
+    refresh();
+    int x = find('X', nullptr);
+    verify(x > r && find('N', "(next)") == x + 1, "the next start's heading, then its lines");
+    verify(find('T', "adds nothing") == find('P', "Other mod") + 1 && find('T', "2 left out") < 0,
+           "the rows carry the next start's tags");
+    test_nnext = 0;
+    refresh();
+    verify(find('Z', nullptr) >= 0, "nothing to merge at the next start says so");
+    test_ahead = 0;
 
     // nothing merged and one mod left, but the list changed since start-up: the section still says so
     test_n = 1;

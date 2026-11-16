@@ -26,6 +26,13 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     return 0;
 }
 
+// nor a merge made ahead for the next start
+int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *mods, int n) {
+    (void)mount; (void)key; (void)mods; (void)n;
+    return 0;
+}
+void bdat_merge_next_clear(void) {}
+
 int main(int argc, char **argv) {
     normalise();
     rescan();

@@ -18,7 +18,8 @@
 // bdat/common/ITM_BeaconList.json for bdat/common.bdat). The map keeps every enabled mod's copy of such files in
 // priority order, and the first open of the data table after a rebuild asks bdat_merge_serve for the merged file,
 // which then stands in for the top mod's copy. When it can't be merged, the top mod's copy is served as before (or,
-// with only JSON tables, the game's own copy).
+// with only JSON tables, the game's own copy). The game reads them only at start-up, so a list changed later can be
+// merged ahead for the next start (romfs_mods_premerge).
 #include "romfs_mods.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -56,6 +57,10 @@ static int nmerged;
 // rebuilds: the game doesn't read them again, so a later list that would make them otherwise needs a restart.
 static Merged started[MERGED_CAP];
 static int nstarted;
+static char start_mount[64];               // the mount the game read them from
+// The merges made ahead (romfs_mods_premerge): each data table of started and its mods then, as in started.
+static Merged ahead[MERGED_CAP];
+static int nahead, ahead_busy;
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -336,11 +341,55 @@ static void table_inputs(const char *key, char *sig, size_t cap) {
     }
 }
 
+// Per enabled mod with a copy of data table key or JSON tables of it, in priority order: those files as in[] (the
+// count), with copies of the paths (and each mod's JSON list) for the caller to free with free_gathered. *merge: 1
+// when they are to be merged (JSON tables, or two or more full copies). Under the map's lock.
+static int gather(const char *key, BdatModFiles *in, char **mem, int *nmem, int *ok, int *merge) {
+    ModFile *f = find(key);
+    size_t lo = 0, hi = 0, pre = strlen(key) - 4;
+    int nin = 0, full = 0, json_any = 0;
+    json_range(key, &lo, &hi);
+    *nmem = 0;
+    *ok = 1;
+    for (int m = 0; m < norder; m++) {
+        const char *copy_full = f ? copy_of(f, order[m]) : NULL;
+        const char **json = NULL;
+        int njson = 0;
+        for (size_t i = lo; i < hi && njson < 64; i++) {
+            const char *p = is_json_of(files[i].key, pre) ? copy_of(&files[i], order[m]) : NULL;
+            if (!p) continue;
+            if (!json && !(json = calloc(64, sizeof *json))) *ok = 0;
+            if (json) json[njson++] = mem[(*nmem)++] = strdup(p);
+        }
+        if (!copy_full && !njson) continue;
+        char *id = mem[(*nmem)++] = strdup(order[m]), *copy = NULL;
+        if (copy_full) copy = mem[(*nmem)++] = strdup(copy_full);
+        in[nin++] = (BdatModFiles){id, copy, json, njson};
+        full += copy_full != NULL;
+        json_any |= njson > 0;
+    }
+    for (int i = 0; i < *nmem; i++) *ok &= mem[i] != NULL;
+    *merge = json_any || full >= 2;
+    return nin;
+}
+
+static void free_gathered(BdatModFiles *in, int nin, char **mem, int nmem) {
+    for (int i = 0; i < nin; i++) free((void *)in[i].json);
+    for (int i = 0; i < nmem; i++) free(mem[i]);
+}
+
 // The host path of the mod file for key (lowercase, no leading '/'), copied to out; 0 when no enabled mod has it.
 // mount (the RomFS mount name; NULL when only asking whether a mod has the file) lets a data table be merged.
 static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     plat_mutex_lock_shared(&lock);
     if (mount && out && !strncmp(key, "bdat/", 5) && ends(key, ".bdat")) {   // the game reading a data table
+        if (!start_mount[0] && strlen(mount) < sizeof start_mount) {
+            plat_mutex_unlock_shared(&lock);
+            plat_mutex_lock(&lock);
+            if (!start_mount[0]) snprintf(start_mount, sizeof start_mount, "%s", mount);
+            plat_mutex_unlock(&lock);
+            plat_mutex_lock_shared(&lock);
+        }
         int known = 0;
         for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
         if (!known) {
@@ -387,25 +436,10 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     uint64_t gen = files_gen;
     BdatModFiles in[MOD_CAP];
     char *mem[MOD_CAP * 66];
-    int nin = 0, nmem = 0, ok = 1;
-    size_t pre = strlen(key) - 4;
-    for (int m = 0; m < norder; m++) {
-        const char *full = f ? copy_of(f, order[m]) : NULL;
-        const char **json = NULL;
-        int njson = 0;
-        for (size_t i = lo; i < hi && njson < 64; i++) {
-            const char *p = is_json_of(files[i].key, pre) ? copy_of(&files[i], order[m]) : NULL;
-            if (!p) continue;
-            if (!json && !(json = calloc(64, sizeof *json))) ok = 0;
-            if (json) json[njson++] = mem[nmem++] = strdup(p);
-        }
-        if (!full && !njson) continue;
-        char *id = mem[nmem++] = strdup(order[m]), *copy = NULL;
-        if (full) copy = mem[nmem++] = strdup(full);
-        in[nin++] = (BdatModFiles){id, copy, json, njson};
-    }
+    int nmem = 0, ok = 1, many = 0;
+    int nin = gather(key, in, mem, &nmem, &ok, &many);
+    (void)many;   // decided above, from the map as the game reads it
     plat_mutex_unlock_shared(&lock);
-    for (int i = 0; i < nmem; i++) ok &= mem[i] != NULL;
     char path[4096];
     ok = ok && bdat_merge_serve(mount, key, in, nin, path, sizeof path);
     const char *served = ok ? path : NULL;
@@ -421,8 +455,7 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
         if (merged[nmerged].key) nmerged++;
     }
     plat_mutex_unlock(&lock);
-    for (int i = 0; i < nin; i++) free((void *)in[i].json);
-    for (int i = 0; i < nmem; i++) free(mem[i]);
+    free_gathered(in, nin, mem, nmem);
     return served != NULL;
 }
 
@@ -553,6 +586,81 @@ int romfs_mods_tables_changed(void) {
     }
     plat_mutex_unlock_shared(&lock);
     return changed;
+}
+
+// ---- merging ahead for the next start
+
+static void premerge_run(void *arg) {
+    (void)arg;
+    maybe_reload();
+    char keys[MERGED_CAP][1024], mount[64];
+    plat_mutex_lock_shared(&lock);
+    int nk = 0;
+    for (int i = 0; i < nstarted; i++)
+        if (strlen(started[i].key) < sizeof keys[0]) snprintf(keys[nk++], sizeof keys[0], "%s", started[i].key);
+    snprintf(mount, sizeof mount, "%s", start_mount);
+    plat_mutex_unlock_shared(&lock);
+    bdat_merge_next_clear();
+    Merged done[MERGED_CAP];
+    int nd = 0;
+    uint64_t t0 = plat_now_ms();
+    for (int k = 0; k < nk; k++) {
+        BdatModFiles in[MOD_CAP];
+        char *mem[MOD_CAP * 66], sig[MOD_CAP * 66];
+        int nmem = 0, ok = 1, merge = 0;
+        plat_mutex_lock_shared(&lock);
+        table_inputs(keys[k], sig, sizeof sig);
+        int nin = gather(keys[k], in, mem, &nmem, &ok, &merge);
+        plat_mutex_unlock_shared(&lock);
+        // as the next start would: merged where there is something to merge; else one mod's copy or the game's own
+        if (ok && merge && mount[0]) bdat_merge_prepare(mount, keys[k], in, nin);
+        free_gathered(in, nin, mem, nmem);
+        done[nd].key = strdup(keys[k]);
+        done[nd].path = strdup(sig);
+        nd++;
+    }
+    rt_log("romfs mods: %d data table%s merged ahead for the next start, in %llu ms", nk, nk == 1 ? "" : "s",
+           (unsigned long long)(plat_now_ms() - t0));
+    plat_mutex_lock(&lock);
+    Merged gone[MERGED_CAP];
+    int ngone = nahead;
+    memcpy(gone, ahead, sizeof gone);
+    memcpy(ahead, done, sizeof done);
+    nahead = nd;
+    plat_mutex_unlock(&lock);
+    for (int i = 0; i < ngone; i++) {
+        free(gone[i].key);
+        free(gone[i].path);
+    }
+    __atomic_store_n(&ahead_busy, 0, __ATOMIC_RELEASE);
+}
+
+int romfs_mods_premerge(void) {
+    plat_mutex_lock_shared(&lock);
+    int any = nstarted > 0 && start_mount[0];
+    plat_mutex_unlock_shared(&lock);
+    int idle = 0;
+    if (!any || !__atomic_compare_exchange_n(&ahead_busy, &idle, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return 0;
+    // bdat_merge_serve keeps several hundred KB of paths on its stack
+    if (!plat_thread_spawn(premerge_run, NULL, "bdat premerge", 8u << 20)) {
+        __atomic_store_n(&ahead_busy, 0, __ATOMIC_RELEASE);
+        return 0;
+    }
+    return 1;
+}
+
+int romfs_mods_premerge_state(void) {
+    if (__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE)) return 1;
+    maybe_reload();
+    plat_mutex_lock_shared(&lock);
+    int same = nahead > 0 && nahead >= nstarted;
+    for (int i = 0; same && i < nahead; i++) {
+        char sig[MOD_CAP * 66];
+        table_inputs(ahead[i].key, sig, sizeof sig);
+        same = ahead[i].path && !strcmp(sig, ahead[i].path);
+    }
+    plat_mutex_unlock_shared(&lock);
+    return same ? 2 : 0;
 }
 
 int romfs_mods_priority(char (*ids)[65], int cap) {

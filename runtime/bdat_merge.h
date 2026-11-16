@@ -70,12 +70,21 @@ typedef struct {
 // own copy is written there and served. 0 when nothing is served: the caller serves the top mod's full copy.
 int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap);
 
+// The merge bdat_merge_serve would make from mods, made now for the next start (the list changed while the game runs;
+// runtime/romfs_mods.c, romfs_mods_premerge): kept in the same place, so that start uses it without merging, and the
+// files this run serves are kept. What it said goes to the next-start lines and tags (bdat_merge_next_status,
+// bdat_merge_next_mod_tag), which bdat_merge_next_clear empties. 1 when a file was made or found.
+int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *mods, int n);
+void bdat_merge_next_clear(void);
+
 // What this run's merges said about mod id, for its row in the Mods tab: "adds nothing" when it adds nothing to any
 // file it is in, else its changes left out, caveats and tables alike ("2 left out, 13/22 tables alike"), per file
 // ("common: ...; common_ms: ...") when it has lines in several. 0 when there is nothing to say. *flags: BDAT_TAG_*.
 enum { BDAT_TAG_LEFT_OUT = 1, BDAT_TAG_CAVEAT = 2, BDAT_TAG_ADDS_NOTHING = 4 };
 int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags);
+int bdat_merge_next_mod_tag(const char *id, char *out, size_t cap, int *flags);   // of the merges made for the next start
 
 // Line i (from 0) of what the merges did this run, for the F1 Mods tab; 0 past the last. *kind: 0 a summary line,
 // 1 a change left out, 2 a caveat, 3 a mod that adds nothing (a higher one has all its changes), 4 a mod partly alike.
 int bdat_merge_status(int i, char *out, size_t cap, int *kind);
+int bdat_merge_next_status(int i, char *out, size_t cap, int *kind);   // of the merges made for the next start

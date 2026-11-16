@@ -19,9 +19,12 @@ static ImGuiID mods_button_id[4];static ImGuiWindow *mods_button_window[4];
 static ImVec2 mods_button_low[4],mods_button_high[4];static int mods_button_count;
 static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
 // the Mod priority section as drawn (tests/mods_priority_check.cpp): each line and how it looks (P a priority row,
-// H the merges' heading, R the restart line, O left out, Y caveat, G grey, N a summary), and the rows' Up buttons
+// H the merges' heading, R the restart line, O left out, Y caveat, G grey, N a summary; M the Merge now button, W
+// merging, X the next start's heading, then its lines as above, Z none to merge, S the start-up lines' heading), and
+// the rows' Up buttons
 static char prio_lines[64][340],prio_tag[64];static int prio_count;static ImVec2 prio_up_low[32],prio_up_high[32];
 static ImVec2 prio_off_low[32],prio_off_high[32];static bool prio_off_shown[32];   // Turn off buttons; T lines: tags
+static ImVec2 prio_merge_low,prio_merge_high;
 static void prio_line(char tag,const char *text){if(prio_count<64){prio_tag[prio_count]=tag;snprintf(prio_lines[prio_count++],sizeof prio_lines[0],"%s",text);}}
 #define PRIO_LINE(tag,text) prio_line(tag,text)
 #else
@@ -33,21 +36,42 @@ static const char *status_name(int status) {
 static char requested_owner[65],requested_page[65];
 void mods_page_select(const char *owner,const char *page){snprintf(requested_owner,sizeof requested_owner,"%s",owner);snprintf(requested_page,sizeof requested_page,"%s",page);}
 
+// A merge's lines (this run's, or with ahead those made for the next start): the summaries plain, changes left out
+// orange, caveats yellow, mods that add nothing or are partly alike grey. The count drawn.
+static int merge_lines(bool ahead) {
+    char line[320];int kind=0,i=0;
+    for(;ahead?bdat_merge_next_status(i,line,sizeof line,&kind):bdat_merge_status(i,line,sizeof line,&kind);++i){
+        PRIO_LINE(kind>=3?'G':kind==1?'O':kind==2?'Y':'N',line);
+        if(kind>=3){ImGui::TextDisabled("%s",line);continue;}   // a mod that adds nothing, or partly alike: no conflict
+        if(kind)ImGui::PushStyleColor(ImGuiCol_Text,kind==1?ImVec4(1.0f,0.7f,0.4f,1):ImVec4(1.0f,0.9f,0.5f,1));
+        ImGui::TextUnformatted(line);
+        if(kind)ImGui::PopStyleColor();
+    }
+    return i;
+}
+
 // The game-file mods that are on, highest priority first as romfs-enabled.txt lists them (runtime/romfs_mods.c,
 // romfs_mods_priority), with Up and Down to change which one wins, and what the data table merges did this run
 // (runtime/bdat_merge_serve.c): a summary per file, then its changes left out (orange) and caveats (yellow). Shown
 // when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
+// Once the list differs from what the game merged at start-up, Merge now merges it ahead (romfs_mods_premerge): its
+// lines and tags then show what the next start will have, and that start uses the files it made.
 static void mod_priority(const ModLibView &v,bool idle) {
     static char ids[32][65],tag[32][200];static int n,tag_flags[32];static bool tables_only[32];
-    static uint64_t seen=~0ull;static double next;static bool stale;
+    static uint64_t seen=~0ull;static double next;static bool stale;static int ahead;
     double now=ImGui::GetTime();
     if(v.generation!=seen||now>=next){
         n=romfs_mods_priority(ids,32);stale=romfs_mods_tables_changed()!=0;seen=v.generation;next=now+1.0;
+        ahead=stale?romfs_mods_premerge_state():0;
+        if(ahead==1)next=now+0.25;   // merging: look again soon
         for(int i=0;i<n;++i){
-            if(!bdat_merge_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i]))tag[i][0]=0;
+            bool got=stale&&ahead==2?bdat_merge_next_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i])
+                                    :bdat_merge_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i]);
+            if(!got)tag[i][0]=0;
             tables_only[i]=(tag_flags[i]&BDAT_TAG_ADDS_NOTHING)&&!romfs_mod_has_other_files(ids[i]);
         }
     }
+    bool tags_now=!stale||ahead==2;   // tags of the list as it is: this run's, or those merged ahead for it
     char line[320];int kind=0;bool merges=bdat_merge_status(0,line,sizeof line,&kind)!=0;
     if(n<2&&!merges&&!stale)return;
     ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_PRIORITY));
@@ -67,7 +91,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
             ImGui::SameLine();ImGui::Text("%d. %s",i+1,name);PRIO_LINE('P',name);
             // what the merges said about it, after its name; a mod that only has data tables and adds nothing can be
             // turned off from here (one with other files would lose those too)
-            if(tag[i][0]&&!stale){
+            if(tag[i][0]&&tags_now){
                 ImGui::SameLine();
                 int f=tag_flags[i];
                 ImVec4 c=f&BDAT_TAG_LEFT_OUT?ImVec4(1.0f,0.7f,0.4f,1):f&BDAT_TAG_CAVEAT?ImVec4(1.0f,0.9f,0.5f,1):ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
@@ -86,20 +110,40 @@ static void mod_priority(const ModLibView &v,bool idle) {
         if(off>=0){romfs_mods_set(ids[off],0);next=0;}
     }
     // The merges were made at start-up and the game doesn't read its tables again, so once the list would make them
-    // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now.
+    // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now, and
+    // offer to merge the list as it is now ahead of the restart.
     if(merges||stale){
         ImGui::PushTextWrapPos(0);
-        ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));PRIO_LINE('H',menu_text(UI_MODS_MERGES));
-        if(stale){
-            PRIO_LINE('R',menu_text(UI_MODS_MERGES_STALE));
-            ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
+        if(!stale){
+            ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));PRIO_LINE('H',menu_text(UI_MODS_MERGES));
+            merge_lines(false);
+            ImGui::PopTextWrapPos();
+            return;
         }
-        for(int i=0;bdat_merge_status(i,line,sizeof line,&kind);++i){
-            PRIO_LINE(kind>=3?'G':kind==1?'O':kind==2?'Y':'N',line);
-            if(kind>=3){ImGui::TextDisabled("%s",line);continue;}   // a mod that adds nothing, or partly alike: no conflict
-            if(kind)ImGui::PushStyleColor(ImGuiCol_Text,kind==1?ImVec4(1.0f,0.7f,0.4f,1):ImVec4(1.0f,0.9f,0.5f,1));
-            ImGui::TextUnformatted(line);
-            if(kind)ImGui::PopStyleColor();
+        PRIO_LINE('R',menu_text(UI_MODS_MERGES_STALE));
+        ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
+        if(ahead==1){
+            ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGING));PRIO_LINE('W',menu_text(UI_MODS_MERGING));
+        }else if(ahead==2){
+            ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES_NEXT));PRIO_LINE('X',menu_text(UI_MODS_MERGES_NEXT));
+            if(!merge_lines(true)){ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_NEXT_NONE));PRIO_LINE('Z',menu_text(UI_MODS_MERGES_NEXT_NONE));}
+        }else{
+            if(ImGui::Button(menu_text(UI_MODS_MERGE_NOW))){if(romfs_mods_premerge()){ahead=1;next=now+0.25;}}
+            PRIO_LINE('M',menu_text(UI_MODS_MERGE_NOW));
+#ifdef XCX_MOD_UI_TESTING
+            prio_merge_low=ImGui::GetItemRectMin();prio_merge_high=ImGui::GetItemRectMax();
+#endif
+            ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGE_NOW_DESC));
+        }
+        // what the game is running with, out of the way under a heading of its own
+        if(merges){
+            ImGui::Spacing();
+            PRIO_LINE('S',menu_text(UI_MODS_MERGES_START));
+            if(ImGui::TreeNode("##start","%s",menu_text(UI_MODS_MERGES_START))){
+                ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));PRIO_LINE('H',menu_text(UI_MODS_MERGES));
+                merge_lines(false);
+                ImGui::TreePop();
+            }
         }
         ImGui::PopTextWrapPos();
     }

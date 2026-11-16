@@ -23,6 +23,13 @@ int romfs_mods_set(const char *id, int on);
 // 1 when the mods that data tables the game read at start-up would be made from (which mods, in which order) are no
 // longer the ones they were made from: the game reads those tables only at start-up, so it needs a restart.
 int romfs_mods_tables_changed(void);
+// Merges the data tables the game read at start-up from the mods as they are now, on a thread of its own, so the next
+// start finds them made (bdat_merge_prepare; the F1 Mods tab's Merge now). 1 when it started; 0 when one is running
+// or the game has read no data table yet.
+int romfs_mods_premerge(void);
+// 0: no merge made ahead for the mods as they are now; 1: one running; 2: made for them (what it said:
+// bdat_merge_next_status, bdat_merge_next_mod_tag).
+int romfs_mods_premerge_state(void);
 // 1 when the enabled mod id has files other than data tables (bdat/...): turning it off changes more than tables.
 int romfs_mod_has_other_files(const char *id);
 // The ids of romfs-enabled.txt in order, the top (winning) mod first, into ids; the count.

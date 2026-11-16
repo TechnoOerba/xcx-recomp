@@ -11,6 +11,10 @@
 // game file are deleted. Next to the file, <file>.txt lists the mods, one line per event (bdat_merge.h) and, last,
 // the summary, which a later start shows again when it reuses the file. <key with / as _>.quick lets a start whose
 // inputs have the same sizes and times find that file without reading them ("the quick check", below).
+//
+// bdat_merge_prepare makes the merge of a list changed while the game runs, ahead of the next start (the F1 Mods
+// tab's Merge now): the same file, report and quick note, so that start finds it, but its status lines and tags go
+// to a report of their own, and the files this run serves are kept.
 #include "bdat_merge.h"
 
 #include <stdarg.h>
@@ -32,13 +36,10 @@
 #define STATUS_CAP 48
 #define STATUS_EVENTS 8          // left-out and caveat lines per merge in the Mods tab; the report has all
 
-static PlatMutex lock = PLAT_MUTEX_INIT;     // one merge at a time; guards the archive index and the status lines
+static PlatMutex lock = PLAT_MUTEX_INIT;     // one merge at a time; guards the archive index and target
 static uint8_t *arh;
 static uint64_t arh_size;
 static int arh_state;                        // 0 not read, 1 read, -1 missing
-static char status[STATUS_CAP][320];
-static int status_kind[STATUS_CAP];
-static int nstatus;
 
 // ---- XXH64, seed 0 (the archive's path hash), after the xxHash specification
 #define P1 0x9E3779B185EBCA87ull
@@ -159,44 +160,71 @@ static uint8_t *game_unpack(uint8_t *p, size_t got, const char *key, size_t *n, 
 
 // ---- status lines and events
 
+// What each merge said, for the F1 Mods tab: its status lines and, per mod and file, its changes left out, its
+// caveats, whether it adds nothing and how many of its tables are alike (the tag on the mod's row). Report 0 is of
+// the merges this run serves, report 1 of those made ahead for the next start. Guarded by text_lock, held only to
+// copy lines in or out, so the menu never waits for a merge.
+typedef struct { char id[65], key[64]; int left, caveats, nothing, alike, changed; } ModTag;
+#define TAG_CAP 128
+typedef struct {
+    char status[STATUS_CAP][320];
+    int kind[STATUS_CAP], nstatus;
+    ModTag tags[TAG_CAP];
+    int ntags;
+} Report;
+static Report reports[2];
+static PlatMutex text_lock = PLAT_MUTEX_INIT;
+static int target;   // the report of the merge in progress; under lock
+
 // kind 0: a summary line; 1: a change left out; 2: a caveat; 3: a mod that adds nothing; 4: one partly alike. The oldest lines go first when the list is full.
 static void add_status(int kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void add_status(int kind, const char *fmt, ...) {
+    char line[320];
     va_list ap;
     va_start(ap, fmt);
-    if (nstatus == STATUS_CAP) {
-        memmove(status, status + 1, sizeof status[0] * (STATUS_CAP - 1));
-        memmove(status_kind, status_kind + 1, sizeof status_kind[0] * (STATUS_CAP - 1));
-        nstatus--;
-    }
-    status_kind[nstatus] = kind;
-    vsnprintf(status[nstatus++], sizeof status[0], fmt, ap);
+    vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
+    plat_mutex_lock(&text_lock);
+    Report *r = &reports[target];
+    if (r->nstatus == STATUS_CAP) {
+        memmove(r->status, r->status + 1, sizeof r->status[0] * (STATUS_CAP - 1));
+        memmove(r->kind, r->kind + 1, sizeof r->kind[0] * (STATUS_CAP - 1));
+        r->nstatus--;
+    }
+    r->kind[r->nstatus] = kind;
+    memcpy(r->status[r->nstatus++], line, sizeof line);
+    plat_mutex_unlock(&text_lock);
 }
 
-int bdat_merge_status(int i, char *out, size_t cap, int *kind) {
-    plat_mutex_lock_shared(&lock);
-    int ok = i >= 0 && i < nstatus;
+static int report_status(const Report *r, int i, char *out, size_t cap, int *kind) {
+    plat_mutex_lock_shared(&text_lock);
+    int ok = i >= 0 && i < r->nstatus;
     if (ok) {
-        snprintf(out, cap, "%s", status[i]);
-        if (kind) *kind = status_kind[i];
+        snprintf(out, cap, "%s", r->status[i]);
+        if (kind) *kind = r->kind[i];
     }
-    plat_mutex_unlock_shared(&lock);
+    plat_mutex_unlock_shared(&text_lock);
     return ok;
 }
 
-// What each merge this run said about each mod that took part, for the tag on its row in the Mods tab: per mod and
-// file, its changes left out, its caveats, whether it adds nothing and how many of its tables are alike.
-typedef struct { char id[65], key[64]; int left, caveats, nothing, alike, changed; } ModTag;
-#define TAG_CAP 128
-static ModTag tags[TAG_CAP];
-static int ntags;
+int bdat_merge_status(int i, char *out, size_t cap, int *kind) { return report_status(&reports[0], i, out, cap, kind); }
+int bdat_merge_next_status(int i, char *out, size_t cap, int *kind) {
+    return report_status(&reports[1], i, out, cap, kind);
+}
 
+void bdat_merge_next_clear(void) {
+    plat_mutex_lock(&text_lock);
+    reports[1].nstatus = reports[1].ntags = 0;
+    plat_mutex_unlock(&text_lock);
+}
+
+// Under text_lock (exclusive).
 static ModTag *tag_of(const char *id, const char *key) {
-    for (int i = 0; i < ntags; i++)
-        if (!strcmp(tags[i].id, id) && !strcmp(tags[i].key, key)) return &tags[i];
-    if (ntags == TAG_CAP) return NULL;
-    ModTag *t = &tags[ntags++];
+    Report *r = &reports[target];
+    for (int i = 0; i < r->ntags; i++)
+        if (!strcmp(r->tags[i].id, id) && !strcmp(r->tags[i].key, key)) return &r->tags[i];
+    if (r->ntags == TAG_CAP) return NULL;
+    ModTag *t = &r->tags[r->ntags++];
     memset(t, 0, sizeof *t);
     snprintf(t->id, sizeof t->id, "%s", id);
     snprintf(t->key, sizeof t->key, "%s", key);
@@ -206,6 +234,7 @@ static ModTag *tag_of(const char *id, const char *key) {
 // The events of one merge (its report's lines, "<kind>: <mod>: ...") onto the tags of the mods that took part. Mods are
 // named by label in events, and a label may hold ": " itself, so the longest label the line starts with is its mod.
 static void tag_events(const char *key, const char *text, const BdatModFiles *mods, char (*label)[160], int n) {
+    plat_mutex_lock(&text_lock);
     for (int k = 0; k < n; k++) tag_of(mods[k].id, key);
     static const char *const kinds[] = {"left out: ", "caveat: ", "adds nothing: ", "partly alike: "};
     for (const char *p = text; p && *p;) {
@@ -233,11 +262,13 @@ static void tag_events(const char *key, const char *text, const BdatModFiles *mo
         }
         p = e ? e + 1 : NULL;
     }
+    plat_mutex_unlock(&text_lock);
 }
 
-int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags) {
-    plat_mutex_lock_shared(&lock);
-    int files = 0, nothing = 1, f = 0;
+static int report_tag(const Report *r, const char *id, char *out, size_t cap, int *flags) {
+    const ModTag *tags = r->tags;
+    plat_mutex_lock_shared(&text_lock);
+    int files = 0, nothing = 1, f = 0, ntags = r->ntags;
     size_t w = 0;
     out[0] = 0;
     for (int i = 0; i < ntags; i++)
@@ -272,9 +303,16 @@ int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags) {
             f |= (t->left ? BDAT_TAG_LEFT_OUT : 0) | (t->caveats ? BDAT_TAG_CAVEAT : 0);
         }
     }
-    plat_mutex_unlock_shared(&lock);
+    plat_mutex_unlock_shared(&text_lock);
     if (flags) *flags = f;
     return out[0] != 0;
+}
+
+int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags) {
+    return report_tag(&reports[0], id, out, cap, flags);
+}
+int bdat_merge_next_mod_tag(const char *id, char *out, size_t cap, int *flags) {
+    return report_tag(&reports[1], id, out, cap, flags);
 }
 
 typedef struct { char *text; size_t n, cap; int lines; const char *key; } Notes;
@@ -345,6 +383,13 @@ static int prune_entry(const char *name, int kind, uint64_t size, void *ctx) {
         plat_file_delete(path);   // may fail while the game still has it open; then the next merge deletes it
     }
     return 1;
+}
+
+// Deletes the merges of this game file (flat: its key with / as _) in dir other than keep (a file name).
+static void prune(const char *dir, const char *flat, const char *keep) {
+    Prune p = {flat, keep, ""};
+    snprintf(p.dir, sizeof p.dir, "%s", dir);
+    plat_fs_list(dir, prune_entry, &p);
 }
 
 static void hex(const uint8_t *d, int n, char *out) {
@@ -444,7 +489,7 @@ static void reuse(const char *key, const char *file, const char *how, const Bdat
             last = strrchr(text, '\n');
         }
     }
-    rt_log("bdat merge: %s: the merge made before, %s (%s)", key, how, file);
+    rt_log("bdat merge: %s: the merge made before, %s (%s)%s", key, how, file, target ? ", for the next start" : "");
     add_status(0, "%s: %s (as before)", key, last ? last + 1 : "merged");
     if (last) {
         *last = 0;
@@ -566,11 +611,13 @@ static void read_mod(void *ctx, int k) {
     }
 }
 
-int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap) {
+// bdat_merge_serve, or with next bdat_merge_prepare: into report 1, and the older merges are kept (this run serves one).
+static int serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap, int next) {
     if (n < 1 || n > 64 || !mount || !key) return 0;
     const RtConfig *cfg = rt_config();
     if (!cfg || !cfg->profile) return 0;
     plat_mutex_lock(&lock);
+    target = next;
     int ok = 0, full = -1;
     char why[400] = "";
     uint8_t *game = NULL, *merged = NULL, *stored = NULL;
@@ -584,7 +631,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     size_t game_n = 0, merged_n = 0, stored_n = 0;
     Notes notes = {.key = key};
     uint64_t t0 = plat_now_ms();
-    Prune pr;
+    struct { char dir[2100]; } pr;
     char name[300], flat[256], file[2400], report[2500], quick[2400], qkey[33] = "";
     snprintf(flat, sizeof flat, "%s", key);
     for (char *c = flat; *c; c++)
@@ -604,6 +651,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
             snprintf(out, cap, "%s", file);
             ok = 1;
             reuse(key, file, "inputs unchanged", mods, label, n);
+            if (!next) prune(pr.dir, flat, q + 33);   // a merge made ahead and then not used
         }
         free(q);
         if (ok) goto done;
@@ -663,6 +711,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
         snprintf(out, cap, "%s", file);
         ok = 1;
         reuse(key, file, "found by its inputs' contents", mods, label, n);
+        if (!next) prune(pr.dir, flat, name);
         goto quick_note;
     }
 
@@ -680,12 +729,11 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     summary_line(line, sizeof line, n, &sum, label);
     add_line(&notes, line);
     plat_file_write_atomic(report, notes.text, notes.n);
-    pr.suffix = flat;
-    pr.keep = name;
-    plat_fs_list(pr.dir, prune_entry, &pr);
+    if (!next) prune(pr.dir, flat, name);
     snprintf(out, cap, "%s", file);
     ok = 1;
-    rt_log("bdat merge: %s: %s, in %llu ms (report %s)", key, line, (unsigned long long)(plat_now_ms() - t0), report);
+    rt_log("bdat merge: %s: %s, in %llu ms%s (report %s)", key, line, (unsigned long long)(plat_now_ms() - t0),
+           next ? ", for the next start" : "", report);
     add_status(0, "%s: %s", key, line);
     status_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "");
     tag_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "", mods, label, n);
@@ -719,4 +767,13 @@ done:
     free(merged);
     free(notes.text);
     return ok;
+}
+
+int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap) {
+    return serve(mount, key, mods, n, out, cap, 0);
+}
+
+int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *mods, int n) {
+    char out[4096];
+    return serve(mount, key, mods, n, out, sizeof out, 1);
 }

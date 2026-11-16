@@ -23,6 +23,13 @@ __attribute__((weak)) int romfs_mods_priority(char (*)[65], int) { return 0; }
 __attribute__((weak)) int romfs_mods_move(const char *, int) { return 0; }
 __attribute__((weak)) int romfs_mods_tables_changed(void) { return 0; }
 __attribute__((weak)) int bdat_merge_status(int, char *, size_t, int *) { return 0; }
+__attribute__((weak)) int bdat_merge_mod_tag(const char *, char *out, size_t, int *flags) {
+    out[0] = 0;
+    if (flags) *flags = 0;
+    return 0;
+}
+__attribute__((weak)) int romfs_mod_has_other_files(const char *) { return 0; }
+__attribute__((weak)) int romfs_mods_set(const char *, int) { return 0; }
 const char *cfg_value(const char *) { return "en"; }
 unsigned cfg_version(void) { return 1; }
 const char *ov_language(void) { return "en-US"; }

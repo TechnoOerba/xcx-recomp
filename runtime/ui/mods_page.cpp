@@ -18,6 +18,13 @@ static ImVec2 mods_row_low[MOD_UI_MAX],mods_row_high[MOD_UI_MAX];
 static ImGuiID mods_button_id[4];static ImGuiWindow *mods_button_window[4];
 static ImVec2 mods_button_low[4],mods_button_high[4];static int mods_button_count;
 static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
+// the Mod priority section as drawn (tests/mods_priority_check.cpp): each line and how it looks (P a priority row,
+// H the merges' heading, R the restart line, O left out, Y caveat, G grey, N a summary), and the rows' Up buttons
+static char prio_lines[64][340],prio_tag[64];static int prio_count;static ImVec2 prio_up_low[32],prio_up_high[32];
+static void prio_line(char tag,const char *text){if(prio_count<64){prio_tag[prio_count]=tag;snprintf(prio_lines[prio_count++],sizeof prio_lines[0],"%s",text);}}
+#define PRIO_LINE(tag,text) prio_line(tag,text)
+#else
+#define PRIO_LINE(tag,text) ((void)0)
 #endif
 static const char *status_name(int status) {
     switch(status) {case MOD_LOADED:return "Loaded";case MOD_DISABLED:return "Disabled";case MOD_INCOMPATIBLE:return "Incompatible";case MOD_FAULTED:return "Faulted";default:return "Starting";}
@@ -44,9 +51,12 @@ static void mod_priority(const ModLibView &v,bool idle) {
             for(int k=0;k<v.count;++k)if(!strcmp(v.rows[k].id,ids[i])&&v.rows[k].name[0])name=v.rows[k].name;
             ImGui::PushID(ids[i]);
             ImGui::BeginDisabled(!idle||i==0);if(ImGui::Button(menu_text(UI_MODS_UP))){move=i;up=true;}ImGui::EndDisabled();
+#ifdef XCX_MOD_UI_TESTING
+            if(i<32){prio_up_low[i]=ImGui::GetItemRectMin();prio_up_high[i]=ImGui::GetItemRectMax();}
+#endif
             ImGui::SameLine();
             ImGui::BeginDisabled(!idle||i==n-1);if(ImGui::Button(menu_text(UI_MODS_DOWN))){move=i;up=false;}ImGui::EndDisabled();
-            ImGui::SameLine();ImGui::Text("%d. %s",i+1,name);
+            ImGui::SameLine();ImGui::Text("%d. %s",i+1,name);PRIO_LINE('P',name);
             ImGui::PopID();
         }
         if(move>=0){romfs_mods_move(ids[move],up);next=0;}
@@ -55,11 +65,13 @@ static void mod_priority(const ModLibView &v,bool idle) {
     // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now.
     if(merges||stale){
         ImGui::PushTextWrapPos(0);
-        ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));
+        ImGui::TextDisabled("%s",menu_text(UI_MODS_MERGES));PRIO_LINE('H',menu_text(UI_MODS_MERGES));
         if(stale){
+            PRIO_LINE('R',menu_text(UI_MODS_MERGES_STALE));
             ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MERGES_STALE));ImGui::PopStyleColor();
         }
         for(int i=0;bdat_merge_status(i,line,sizeof line,&kind);++i){
+            PRIO_LINE(kind>=3?'G':kind==1?'O':kind==2?'Y':'N',line);
             if(kind>=3){ImGui::TextDisabled("%s",line);continue;}   // a mod that adds nothing, or partly alike: no conflict
             if(kind)ImGui::PushStyleColor(ImGuiCol_Text,kind==1?ImVec4(1.0f,0.7f,0.4f,1):ImVec4(1.0f,0.9f,0.5f,1));
             ImGui::TextUnformatted(line);
@@ -145,7 +157,7 @@ static bool library(float scale,bool focus_first) {
 
 void mods_page(float scale,float bottom,bool focus_first) {
 #ifdef XCX_MOD_UI_TESTING
-    mods_widget_count=0;mods_retry_visible=false;mods_button_count=0;
+    mods_widget_count=0;mods_retry_visible=false;mods_button_count=0;prio_count=0;
 #endif
     mod_ui_interaction(1);
     static ModSnapshot snapshot;mod_ui_snapshot(&snapshot);

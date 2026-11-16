@@ -1,0 +1,38 @@
+# The data table merge's tests (tests/bdat_merge_test.py) on Linux and Windows: the writer's round trip and the
+# merge rules of docs/bdat-merge.md, through tests/bdat_merge_check.c built from runtime/bdat_merge.c. The tables are
+# made up by the test; no game files. Windows builds with MSYS2 UCRT64 clang, the mingw target the release's
+# llvm-mingw has; Linux with the runner's clang.
+name: Data table merge tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            clang: clang
+          - runner: windows-2025
+            clang: C:\msys64\ucrt64\bin\clang.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: runner.os == 'Windows'
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-clang"
+      - name: Tests
+        shell: bash
+        env:
+          XCX_CLANG: ${{ matrix.clang }}
+        run: |
+          export PATH="/c/msys64/ucrt64/bin:$PATH"
+          python tests/bdat_merge_test.py -v

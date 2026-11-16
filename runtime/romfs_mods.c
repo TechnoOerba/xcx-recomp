@@ -27,6 +27,7 @@
 #include <string.h>
 #include "bdat_merge.h"
 #include "cfg.h"
+#include "fs.h"
 #include "host.h"
 #include "platform/platform.h"
 
@@ -46,6 +47,7 @@ typedef struct {
 // A data table merged since the last rebuild: its key and the file served for it (NULL: none).
 typedef struct { char *key, *path; } Merged;
 #define MERGED_CAP 16
+#define STARTED_CAP 64         // data table files the game reads at start-up, with or without a mod's copy
 
 static PlatMutex lock = PLAT_MUTEX_INIT;   // guards files / nfiles (shared for lookups)
 static ModFile *files;
@@ -57,11 +59,11 @@ static Merged merged[MERGED_CAP];
 static int nmerged;
 // The data tables the game read at start-up and the mods each was made from, in priority order ("a,b,"), kept across
 // rebuilds: the game doesn't read them again, so a later list that would make them otherwise needs a restart.
-static Merged started[MERGED_CAP];
+static Merged started[STARTED_CAP];
 static int nstarted;
 static char start_mount[64];               // the mount the game read them from
 // The merges made ahead (romfs_mods_premerge): each data table of started and its mods then, as in started.
-static Merged ahead[MERGED_CAP];
+static Merged ahead[STARTED_CAP];
 static int nahead, ahead_busy;
 static uint64_t changed_at;                // when the list last changed (rebuild); under check_lock
 static int auto_pending;                   // since then, not yet looked at for bdat_merge_auto; under check_lock
@@ -393,35 +395,38 @@ static void free_gathered(BdatModFiles *in, int nin, char **mem, int nmem) {
     for (int i = 0; i < nmem; i++) free(mem[i]);
 }
 
+// A data table file the game reads (it reads them only at start-up), kept in started with the mods it would be made
+// from now: none when the game reads its own copy from the archive, so a mod for it turned on later still reads as a
+// change. mount: the RomFS mount, for merges made ahead. Without the lock.
+static void note_table(const char *key, const char *mount) {
+    plat_mutex_lock_shared(&lock);
+    int known = 0;
+    for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
+    int need = !known || (!start_mount[0] && mount && *mount);
+    plat_mutex_unlock_shared(&lock);
+    if (!need) return;
+    plat_mutex_lock(&lock);
+    if (!start_mount[0] && mount && strlen(mount) < sizeof start_mount) snprintf(start_mount, sizeof start_mount, "%s", mount);
+    known = 0;
+    for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
+    if (!known && nstarted < STARTED_CAP && (started[nstarted].key = strdup(key))) {
+        char sig[MOD_CAP * 66];
+        table_inputs(key, sig, sizeof sig);
+        started[nstarted].path = strdup(sig);
+        nstarted++;
+    } else if (!known && nstarted == STARTED_CAP) {
+        rt_log("romfs mods: more than %d data table files read; %s isn't followed for the restart line", STARTED_CAP, key);
+    }
+    plat_mutex_unlock(&lock);
+}
+
+static int is_table(const char *key) { return !strncmp(key, "bdat/", 5) && ends(key, ".bdat"); }
+
 // The host path of the mod file for key (lowercase, no leading '/'), copied to out; 0 when no enabled mod has it.
 // mount (the RomFS mount name; NULL when only asking whether a mod has the file) lets a data table be merged.
 static int lookup(const char *key, char *out, size_t cap, const char *mount) {
+    if (mount && out && is_table(key)) note_table(key, mount);   // the game reading a data table
     plat_mutex_lock_shared(&lock);
-    if (mount && out && !strncmp(key, "bdat/", 5) && ends(key, ".bdat")) {   // the game reading a data table
-        if (!start_mount[0] && strlen(mount) < sizeof start_mount) {
-            plat_mutex_unlock_shared(&lock);
-            plat_mutex_lock(&lock);
-            if (!start_mount[0]) snprintf(start_mount, sizeof start_mount, "%s", mount);
-            plat_mutex_unlock(&lock);
-            plat_mutex_lock_shared(&lock);
-        }
-        int known = 0;
-        for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
-        if (!known) {
-            char sig[MOD_CAP * 66];
-            table_inputs(key, sig, sizeof sig);
-            plat_mutex_unlock_shared(&lock);
-            plat_mutex_lock(&lock);
-            known = 0;
-            for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
-            if (!known && nstarted < MERGED_CAP && (started[nstarted].key = strdup(key))) {
-                started[nstarted].path = strdup(sig);
-                nstarted++;
-            }
-            plat_mutex_unlock(&lock);
-            plat_mutex_lock_shared(&lock);
-        }
-    }
     ModFile *f = find(key);
     size_t lo = 0, hi = 0, nj = 0;
     int table = !strncmp(key, "bdat/", 5) && ends(key, ".bdat");
@@ -502,12 +507,14 @@ static int guest_string(uint64_t p, char *out, size_t cap) {
 
 uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     maybe_reload();
-    if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED)) return list;
     // One entry, then the empty string that ends the list. Thread-local: the archive walks it right away on this thread.
     static __thread char one[1026];
     char raw[1024];
-    if (!guest_string(path, raw, sizeof raw)) return list;
-    if (!make_key(raw, one, sizeof one - 1) || !lookup(one, NULL, 0, NULL)) return list;
+    if (!guest_string(path, raw, sizeof raw) || !make_key(raw, one, sizeof one - 1)) return list;
+    // A data table is noted even when the game reads its own copy (no mod has it, or no mod is on): the restart line
+    // and a merge made ahead then know the game read it.
+    if (is_table(one)) note_table(one, romfs_mount_name());
+    if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED) || !lookup(one, NULL, 0, NULL)) return list;
     one[strlen(one) + 1] = 0;
     if (__atomic_fetch_add(&claim_logs, 1, __ATOMIC_RELAXED) < 64) rt_log("romfs mods: %s from a mod", one);
     return (uint64_t)(uintptr_t)one;
@@ -603,7 +610,7 @@ static void premerge_run(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);   // the game plays meanwhile; bdat_merge_serve's helpers match it
     maybe_reload();
-    char keys[MERGED_CAP][1024], mount[64];
+    char keys[STARTED_CAP][1024], mount[64];
     plat_mutex_lock_shared(&lock);
     int nk = 0;
     for (int i = 0; i < nstarted; i++)
@@ -611,7 +618,7 @@ static void premerge_run(void *arg) {
     snprintf(mount, sizeof mount, "%s", start_mount);
     plat_mutex_unlock_shared(&lock);
     bdat_merge_next_clear();
-    Merged done[MERGED_CAP];
+    Merged done[STARTED_CAP];
     int nd = 0;
     uint64_t t0 = plat_now_ms();
     for (int k = 0; k < nk; k++) {
@@ -632,7 +639,7 @@ static void premerge_run(void *arg) {
     rt_log("romfs mods: %d data table%s merged ahead for the next start, in %llu ms", nk, nk == 1 ? "" : "s",
            (unsigned long long)(plat_now_ms() - t0));
     plat_mutex_lock(&lock);
-    Merged gone[MERGED_CAP];
+    Merged gone[STARTED_CAP];
     int ngone = nahead;
     memcpy(gone, ahead, sizeof gone);
     memcpy(ahead, done, sizeof done);

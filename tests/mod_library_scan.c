@@ -39,6 +39,8 @@ int cfg_bool(const char *name) { (void)name; return 0; }
 void cfg_set(const char *name, const char *value) { (void)name; (void)value; }
 int cfg_save(void) { return 1; }
 
+const char *romfs_mount_name(void) { return "rom"; }
+
 int main(int argc, char **argv) {
     normalise();
     rescan();

@@ -176,6 +176,98 @@ int bdat_merge_status(int i, char *out, size_t cap, int *kind) {
     return ok;
 }
 
+// What each merge this run said about each mod that took part, for the tag on its row in the Mods tab: per mod and
+// file, its changes left out, its caveats, whether it adds nothing and how many of its tables are alike.
+typedef struct { char id[65], key[64]; int left, caveats, nothing, alike, changed; } ModTag;
+#define TAG_CAP 128
+static ModTag tags[TAG_CAP];
+static int ntags;
+
+static ModTag *tag_of(const char *id, const char *key) {
+    for (int i = 0; i < ntags; i++)
+        if (!strcmp(tags[i].id, id) && !strcmp(tags[i].key, key)) return &tags[i];
+    if (ntags == TAG_CAP) return NULL;
+    ModTag *t = &tags[ntags++];
+    memset(t, 0, sizeof *t);
+    snprintf(t->id, sizeof t->id, "%s", id);
+    snprintf(t->key, sizeof t->key, "%s", key);
+    return t;
+}
+
+// The events of one merge (its report's lines, "<kind>: <mod>: ...") onto the tags of the mods that took part. Mods are
+// named by label in events, and a label may hold ": " itself, so the longest label the line starts with is its mod.
+static void tag_events(const char *key, const char *text, const BdatModFiles *mods, char (*label)[160], int n) {
+    for (int k = 0; k < n; k++) tag_of(mods[k].id, key);
+    static const char *const kinds[] = {"left out: ", "caveat: ", "adds nothing: ", "partly alike: "};
+    for (const char *p = text; p && *p;) {
+        const char *e = strchr(p, '\n');
+        for (int x = 0; x < 4; x++) {
+            size_t kl = strlen(kinds[x]);
+            if (strncmp(p, kinds[x], kl)) continue;
+            const char *rest = p + kl;
+            int who = -1;
+            size_t best = 0;
+            for (int k = 0; k < n; k++) {
+                size_t ll = strlen(label[k]);
+                if (ll > best && !strncmp(rest, label[k], ll) && !strncmp(rest + ll, ": ", 2)) {
+                    who = k;
+                    best = ll;
+                }
+            }
+            ModTag *t = who >= 0 ? tag_of(mods[who].id, key) : NULL;
+            if (!t) break;
+            if (x == 0) t->left++;
+            else if (x == 1) t->caveats++;
+            else if (x == 2) t->nothing = 1;
+            else sscanf(rest + best + 2, "%d of the %d", &t->alike, &t->changed);
+            break;
+        }
+        p = e ? e + 1 : NULL;
+    }
+}
+
+int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags) {
+    plat_mutex_lock_shared(&lock);
+    int files = 0, nothing = 1, f = 0;
+    size_t w = 0;
+    out[0] = 0;
+    for (int i = 0; i < ntags; i++)
+        if (!strcmp(tags[i].id, id)) {
+            files++;
+            nothing &= tags[i].nothing;
+        }
+    if (files && nothing) {
+        snprintf(out, cap, "adds nothing");
+        f |= BDAT_TAG_ADDS_NOTHING;
+    } else {
+        int said = 0;   // files with something to say about it: their names go in front once there are several
+        for (int i = 0; i < ntags; i++)
+            said += !strcmp(tags[i].id, id) && (tags[i].left || tags[i].caveats || tags[i].alike);
+        for (int i = 0; i < ntags && w < cap; i++) {
+            const ModTag *t = &tags[i];
+            if (strcmp(t->id, id) || !(t->left || t->caveats || t->alike)) continue;
+            char part[160];
+            int pn = 0;
+            if (t->left) pn += snprintf(part + pn, sizeof part - (size_t)pn, "%s%d left out", pn ? ", " : "", t->left);
+            if (t->caveats)
+                pn += snprintf(part + pn, sizeof part - (size_t)pn, "%s%d caveat%s", pn ? ", " : "", t->caveats,
+                               t->caveats == 1 ? "" : "s");
+            if (t->alike)
+                pn += snprintf(part + pn, sizeof part - (size_t)pn, "%s%d/%d tables alike", pn ? ", " : "", t->alike,
+                               t->changed);
+            const char *base = strrchr(t->key, '/');
+            base = base ? base + 1 : t->key;
+            int bl = (int)strcspn(base, ".");
+            if (said > 1) w += (size_t)snprintf(out + w, cap - w, "%s%.*s: %s", w ? "; " : "", bl, base, part);
+            else w += (size_t)snprintf(out + w, cap - w, "%s%s", w ? "; " : "", part);
+            f |= (t->left ? BDAT_TAG_LEFT_OUT : 0) | (t->caveats ? BDAT_TAG_CAVEAT : 0);
+        }
+    }
+    plat_mutex_unlock_shared(&lock);
+    if (flags) *flags = f;
+    return out[0] != 0;
+}
+
 typedef struct { char *text; size_t n, cap; int lines; const char *key; } Notes;
 
 static void add_line(Notes *s, const char *line) {
@@ -424,6 +516,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
         if (last) {
             *last = 0;
             status_events(key, text);
+            tag_events(key, text, mods, label, n);
         }
         free(text);
         goto done;
@@ -450,6 +543,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     rt_log("bdat merge: %s: %s, in %llu ms (report %s)", key, line, (unsigned long long)(plat_now_ms() - t0), report);
     add_status(0, "%s: %s", key, line);
     status_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "");
+    tag_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "", mods, label, n);
 done:
     if (!ok && full >= 0) {
         rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",

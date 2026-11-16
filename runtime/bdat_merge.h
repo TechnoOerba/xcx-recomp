@@ -63,6 +63,12 @@ typedef struct {
 // own copy is written there and served. 0 when nothing is served: the caller serves the top mod's full copy.
 int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap);
 
+// What this run's merges said about mod id, for its row in the Mods tab: "adds nothing" when it adds nothing to any
+// file it is in, else its changes left out, caveats and tables alike ("2 left out, 13/22 tables alike"), per file
+// ("common: ...; common_ms: ...") when it has lines in several. 0 when there is nothing to say. *flags: BDAT_TAG_*.
+enum { BDAT_TAG_LEFT_OUT = 1, BDAT_TAG_CAVEAT = 2, BDAT_TAG_ADDS_NOTHING = 4 };
+int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags);
+
 // Line i (from 0) of what the merges did this run, for the F1 Mods tab; 0 past the last. *kind: 0 a summary line,
 // 1 a change left out, 2 a caveat, 3 a mod that adds nothing (a higher one has all its changes), 4 a mod partly alike.
 int bdat_merge_status(int i, char *out, size_t cap, int *kind);

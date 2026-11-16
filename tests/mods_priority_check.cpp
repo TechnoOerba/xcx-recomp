@@ -2,7 +2,7 @@
 // from a made-up mod list and merge status, for tests/mods_priority_test.py: the mods listed by their names, Up moving
 // one, the merge lines in their looks (left out, caveat, grey for mods that add nothing or are partly alike) and the
 // restart line once the list differs from what the game merged at start-up. Prints "ok <n>" or one "FAIL <check>" per
-// failure; the exit code is the failure count.
+// failure; the exit code is the failure count. Also each row's tag of what the merges said about it, and Turn off.
 #define XCX_MOD_UI_TESTING
 #include "../runtime/ui/mods_page.cpp"
 #include <cstdlib>
@@ -39,6 +39,20 @@ __attribute__((weak)) int bdat_merge_status(int i, char *out, size_t cap, int *k
     if (i < 0 || i >= test_nstatus) return 0;
     snprintf(out, cap, "%s", test_status[i]);
     if (kind) *kind = test_kind[i];
+    return 1;
+}
+// tags: "whole.piece" adds nothing and has only tables, "other" has a left-out change, "whole" has other files too
+__attribute__((weak)) int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags) {
+    const char *t = !strcmp(id, "whole.piece") || !strcmp(id, "whole") ? "adds nothing" : !strcmp(id, "other") ?
+                    "2 left out" : "";
+    snprintf(out, cap, "%s", t);
+    if (flags) *flags = !strcmp(t, "adds nothing") ? BDAT_TAG_ADDS_NOTHING : t[0] ? BDAT_TAG_LEFT_OUT : 0;
+    return t[0] != 0;
+}
+__attribute__((weak)) int romfs_mod_has_other_files(const char *id) { return !strcmp(id, "whole"); }
+static char turned_off[65];
+__attribute__((weak)) int romfs_mods_set(const char *id, int on) {
+    if (!on) snprintf(turned_off, sizeof turned_off, "%s", id);
     return 1;
 }
 const char *cfg_value(const char *) { return "en"; }
@@ -117,12 +131,23 @@ int main() {
     }
     test_nstatus = 5;
     refresh();
-    verify(find('P', "Whole mod: Piece") == 0 && find('P', "Other mod") == 2, "the mods are listed by name, in order");
+    verify(find('P', nullptr) == find('P', "Whole mod: Piece") && find('P', "Whole mod: Piece") < find('P', "Other mod"),
+           "the mods are listed by name, in order");
     verify(find('H', nullptr) >= 0, "the merge lines have their heading");
     verify(find('N', "3 mods merged") >= 0, "the summary line is plain");
     verify(find('O', "left out") >= 0 && find('Y', "caveat") >= 0, "left out and caveat lines have their colours");
     verify(find('G', "adds nothing") >= 0 && find('G', "partly alike") >= 0, "adds-nothing and partly-alike are grey");
     verify(find('R', nullptr) < 0, "no restart line while the list is what was merged");
+    verify(find('T', "adds nothing") == find('P', "Whole mod: Piece") + 1 && find('T', "2 left out") >= 0,
+           "each mod's row carries what the merges said about it");
+    verify(prio_off_shown[0] && !prio_off_shown[1] && !prio_off_shown[2],
+           "Turn off only for a mod that adds nothing and has no other files");
+    io.AddMousePosEvent((prio_off_low[0].x + prio_off_high[0].x) / 2, (prio_off_low[0].y + prio_off_high[0].y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    verify(!strcmp(turned_off, "whole.piece"), "Turn off turns that mod off");
 
     // Up on the third mod asks romfs_mods.c to move it
     io.AddMousePosEvent((prio_up_low[2].x + prio_up_high[2].x) / 2, (prio_up_low[2].y + prio_up_high[2].y) / 2);
@@ -138,6 +163,7 @@ int main() {
     int r = find('R', nullptr);
     verify(r >= 0 && r == find('H', nullptr) + 1 && r < find('N', nullptr), "the restart line comes first");
     verify(r >= 0 && strstr(prio_lines[r], "restart"), "the restart line says to restart");
+    verify(find('T', nullptr) < 0 && !prio_off_shown[0], "a changed list hides the tags, which are of the old one");
 
     // nothing merged and one mod left, but the list changed since start-up: the section still says so
     test_n = 1;

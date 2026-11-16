@@ -23,6 +23,8 @@ int romfs_mods_set(const char *id, int on);
 // 1 when the mods that data tables the game read at start-up would be made from (which mods, in which order) are no
 // longer the ones they were made from: the game reads those tables only at start-up, so it needs a restart.
 int romfs_mods_tables_changed(void);
+// 1 when the enabled mod id has files other than data tables (bdat/...): turning it off changes more than tables.
+int romfs_mod_has_other_files(const char *id);
 // The ids of romfs-enabled.txt in order, the top (winning) mod first, into ids; the count.
 int romfs_mods_priority(char (*ids)[65], int cap);
 // Swaps the mod with the one above it (up) or below it in romfs-enabled.txt; 1 when the list was written. Files follow

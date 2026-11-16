@@ -104,4 +104,6 @@ and one line per event:
   and which mods. Listed with the adds-nothing lines; not a conflict either.
 
 The log has the same lines (the first few of each merge), and the Mods tab shows the counts and the caveats and
-left-out changes of this run.
+left-out changes of this run. In its Mod priority list each mod's row also carries what the merges said about it
+("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several), and a mod that adds
+nothing to any file and has no files but data tables gets a **Turn off** button.

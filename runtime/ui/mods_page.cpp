@@ -21,6 +21,7 @@ static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
 // the Mod priority section as drawn (tests/mods_priority_check.cpp): each line and how it looks (P a priority row,
 // H the merges' heading, R the restart line, O left out, Y caveat, G grey, N a summary), and the rows' Up buttons
 static char prio_lines[64][340],prio_tag[64];static int prio_count;static ImVec2 prio_up_low[32],prio_up_high[32];
+static ImVec2 prio_off_low[32],prio_off_high[32];static bool prio_off_shown[32];   // Turn off buttons; T lines: tags
 static void prio_line(char tag,const char *text){if(prio_count<64){prio_tag[prio_count]=tag;snprintf(prio_lines[prio_count++],sizeof prio_lines[0],"%s",text);}}
 #define PRIO_LINE(tag,text) prio_line(tag,text)
 #else
@@ -37,15 +38,22 @@ void mods_page_select(const char *owner,const char *page){snprintf(requested_own
 // (runtime/bdat_merge_serve.c): a summary per file, then its changes left out (orange) and caveats (yellow). Shown
 // when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
 static void mod_priority(const ModLibView &v,bool idle) {
-    static char ids[32][65];static int n;static uint64_t seen=~0ull;static double next;static bool stale;
+    static char ids[32][65],tag[32][200];static int n,tag_flags[32];static bool tables_only[32];
+    static uint64_t seen=~0ull;static double next;static bool stale;
     double now=ImGui::GetTime();
-    if(v.generation!=seen||now>=next){n=romfs_mods_priority(ids,32);stale=romfs_mods_tables_changed()!=0;seen=v.generation;next=now+1.0;}
+    if(v.generation!=seen||now>=next){
+        n=romfs_mods_priority(ids,32);stale=romfs_mods_tables_changed()!=0;seen=v.generation;next=now+1.0;
+        for(int i=0;i<n;++i){
+            if(!bdat_merge_mod_tag(ids[i],tag[i],sizeof tag[i],&tag_flags[i]))tag[i][0]=0;
+            tables_only[i]=(tag_flags[i]&BDAT_TAG_ADDS_NOTHING)&&!romfs_mod_has_other_files(ids[i]);
+        }
+    }
     char line[320];int kind=0;bool merges=bdat_merge_status(0,line,sizeof line,&kind)!=0;
     if(n<2&&!merges&&!stale)return;
     ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_PRIORITY));
     if(n>=2){
         ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_PRIORITY_DESC));ImGui::PopTextWrapPos();
-        int move=-1;bool up=false;
+        int move=-1,off=-1;bool up=false;
         for(int i=0;i<n;++i){
             const char *name=ids[i];
             for(int k=0;k<v.count;++k)if(!strcmp(v.rows[k].id,ids[i])&&v.rows[k].name[0])name=v.rows[k].name;
@@ -57,9 +65,25 @@ static void mod_priority(const ModLibView &v,bool idle) {
             ImGui::SameLine();
             ImGui::BeginDisabled(!idle||i==n-1);if(ImGui::Button(menu_text(UI_MODS_DOWN))){move=i;up=false;}ImGui::EndDisabled();
             ImGui::SameLine();ImGui::Text("%d. %s",i+1,name);PRIO_LINE('P',name);
+            // what the merges said about it, after its name; a mod that only has data tables and adds nothing can be
+            // turned off from here (one with other files would lose those too)
+            if(tag[i][0]&&!stale){
+                ImGui::SameLine();
+                int f=tag_flags[i];
+                ImVec4 c=f&BDAT_TAG_LEFT_OUT?ImVec4(1.0f,0.7f,0.4f,1):f&BDAT_TAG_CAVEAT?ImVec4(1.0f,0.9f,0.5f,1):ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+                ImGui::TextColored(c,"(%s)",tag[i]);PRIO_LINE('T',tag[i]);
+                if(tables_only[i]){
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(!idle);if(ImGui::SmallButton(menu_text(UI_MODS_TURN_OFF)))off=i;ImGui::EndDisabled();
+#ifdef XCX_MOD_UI_TESTING
+                    if(i<32){prio_off_low[i]=ImGui::GetItemRectMin();prio_off_high[i]=ImGui::GetItemRectMax();prio_off_shown[i]=true;}
+#endif
+                }
+            }
             ImGui::PopID();
         }
         if(move>=0){romfs_mods_move(ids[move],up);next=0;}
+        if(off>=0){romfs_mods_set(ids[off],0);next=0;}
     }
     // The merges were made at start-up and the game doesn't read its tables again, so once the list would make them
     // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now.
@@ -157,7 +181,7 @@ static bool library(float scale,bool focus_first) {
 
 void mods_page(float scale,float bottom,bool focus_first) {
 #ifdef XCX_MOD_UI_TESTING
-    mods_widget_count=0;mods_retry_visible=false;mods_button_count=0;prio_count=0;
+    mods_widget_count=0;mods_retry_visible=false;mods_button_count=0;prio_count=0;memset(prio_off_shown,0,sizeof prio_off_shown);
 #endif
     mod_ui_interaction(1);
     static ModSnapshot snapshot;mod_ui_snapshot(&snapshot);

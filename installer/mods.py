@@ -447,14 +447,15 @@ def unpack_romfs(path, folder, dest=None, plan=None, layout=None):
 
 # ---- operations ----------------------------------------------------------------------------------------------------
 
-def write_info(staged, kind, name, author='', version='', source='', group='', part='', includes=()):
+def write_info(staged, kind, name, author='', version='', source='', group='', part='', includes=(), group_name=''):
     """<id>/library.ini: name, author, version and kind of an installed mod. The game's F1 menu writes the same file
     when it installs a mod (runtime/mod_library.c, write_library_ini), so each manager sees the other's installs.
-    A part of a library entry also names the entry (group), the part and the parts it contains (includes)."""
+    A part of a library entry also names the entry (group, and group_name for the game's Mods tab, which lists the
+    parts together under it), the part and the parts it contains (includes)."""
     clean = lambda v: ' '.join(str(v).split())[:90]
     rows = [('name', name), ('author', author), ('version', version), ('kind', kind), ('source', source)]
     if group:
-        rows += [('group', group), ('part', part), ('includes', ','.join(includes))]
+        rows += [('group', group), ('group_name', group_name or group), ('part', part), ('includes', ','.join(includes))]
     text = ''.join(f'{k} = {clean(v)}\n' for k, v in rows)
     (staged / 'library.ini').write_text(text, encoding='utf-8', newline='\n')
 
@@ -537,7 +538,8 @@ def install_part(dest, entry, part, path=None, progress=None, layout=None, plan=
         name = part_name(entry, part)
         source = entry.get('homepage') or 'library'
         write_info(staged, 'romfs', name, entry.get('author', ''), entry.get('version', ''), source,
-                   entry['id'] if part.get('id') else '', part.get('id', ''), part.get('includes', ()))
+                   entry['id'] if part.get('id') else '', part.get('id', ''), part.get('includes', ()),
+                   entry.get('name') or entry['id'])
         place(root, mid, staged)
     record = load_record(root)
     record[mid] = {'kind': 'romfs', 'version': entry.get('version', ''), 'name': name, 'source': source}

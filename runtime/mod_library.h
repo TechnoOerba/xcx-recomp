@@ -24,6 +24,11 @@ typedef struct {
     char version[32];         // the library's version; empty when the mod is not in the library
     uint64_t size;            // bytes of the download (a romfs mod's zip)
     int in_library, installed, enabled, update;
+    // A part of a library entry that comes in parts (installer/mods.py, install_part): the entry's id, its name and
+    // the part's id, from library.ini. The Mods tab lists an entry's parts together under one row that opens.
+    char group[65];
+    char group_name[96];
+    char part[65];
 } ModLibRow;
 
 enum { MODLIB_IDLE, MODLIB_LOADING, MODLIB_WORKING };

@@ -72,6 +72,9 @@ class ModsWindow:
         self.tree.pack(side='left', fill='both', expand=True)
         scroll.pack(side='right', fill='y')
         self.tree.bind('<<TreeviewSelect>>', lambda _e: self.refresh_selection())
+        self.opened = set()   # entries with parts the player opened
+        self.tree.bind('<<TreeviewOpen>>', lambda _e: self.opened.add(self.tree.focus()))
+        self.tree.bind('<<TreeviewClose>>', lambda _e: self.opened.discard(self.tree.focus()))
         w.protocol('WM_DELETE_WINDOW', self.on_close)
         self.refresh_selection()
         self.load()
@@ -179,7 +182,9 @@ class ModsWindow:
                 n_on = sum(1 for p in parts if p['enabled'])
                 n_in = sum(1 for p in parts if p['installed'])
                 state = self.cat('mods.state_parts', on=n_on, installed=n_in, total=len(parts)) if n_in else state
-            self.tree.insert('', 'end', iid=e['id'], open=True, values=(
+            # an entry with parts starts shut, so one with many optional pieces takes a row; the player's opening or
+            # shutting it lasts while the window is open
+            self.tree.insert('', 'end', iid=e['id'], open=e['id'] in self.opened, values=(
                 e.get('name') or e['id'], self.cat('mods.kind_' + e['kind']), e.get('author', ''), state))
             self.rows[e['id']] = e
             for part in parts:
@@ -187,6 +192,10 @@ class ModsWindow:
                                  values=('    ' + part['name'], '', '', self.state_text(part)))   # indented under the entry
                 self.rows[part['mid']] = ('part', e, part)
         if keep and self.tree.exists(keep):
+            parent = self.tree.parent(keep)
+            if parent:   # a picked part keeps its entry open
+                self.tree.item(parent, open=True)
+                self.opened.add(parent)
             self.tree.selection_set(keep)
 
     def selected_id(self):

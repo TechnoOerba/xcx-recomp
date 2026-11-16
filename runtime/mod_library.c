@@ -627,6 +627,10 @@ static int scan_entry(const char *name, int kind, uint64_t size, void *ctx) {
         ini_value(ini, "name", r.name, sizeof r.name);
         ini_value(ini, "author", r.author, sizeof r.author);
         ini_value(ini, "version", r.version, sizeof r.version);
+        ini_value(ini, "group", r.group, sizeof r.group);
+        ini_value(ini, "group_name", r.group_name, sizeof r.group_name);
+        ini_value(ini, "part", r.part, sizeof r.part);
+        if (!valid_id(r.group)) r.group[0] = 0;
         free(ini);
     }
     r.installed = 1;

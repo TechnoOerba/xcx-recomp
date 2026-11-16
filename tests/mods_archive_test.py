@@ -255,8 +255,8 @@ class PartsTest(unittest.TestCase):
         self.assertEqual((sorted(result['installed']), result['unknown']),
                          (['tweaks.all', 'tweaks.sensor'], [self.stranger]))
         info = mods.read_info(self.dest / 'mods' / 'tweaks.all')
-        self.assertEqual((info['name'], info['group'], info['part'], info['includes']),
-                         ('Tweaks: All', 'tweaks', 'all', 'probe,sensor'))
+        self.assertEqual((info['name'], info['group'], info['group_name'], info['part'], info['includes']),
+                         ('Tweaks: All', 'tweaks', 'Tweaks', 'all', 'probe,sensor'))
         self.assertTrue((self.dest / 'mods' / 'tweaks.sensor' / 'romfs' / 'bdat' / 'common.bdat').is_file())
         with self.assertRaises(mods.ModError) as e:
             mods.install(self.dest, self.entry, files=[self.stranger])

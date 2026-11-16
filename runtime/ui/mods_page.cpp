@@ -20,6 +20,28 @@ static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
 static const char *status_name(int status) {
     switch(status) {case MOD_LOADED:return "Loaded";case MOD_DISABLED:return "Disabled";case MOD_INCOMPATIBLE:return "Incompatible";case MOD_FAULTED:return "Faulted";default:return "Starting";}
 }
+// The name of the library entry a part belongs to: library.ini's group_name, else what its own name says before ": "
+// (installer/mods.py, part_name: "Tweaks mod: Probe tweak"), else the entry's id.
+static void group_label(const ModLibRow &r,char *out,size_t cap) {
+    const char *colon=strstr(r.name,": ");
+    if(r.group_name[0])snprintf(out,cap,"%s",r.group_name);
+    else if(colon)snprintf(out,cap,"%.*s",(int)(colon-r.name),r.name);
+    else snprintf(out,cap,"%s",r.group);
+}
+// A part's row under its entry: its name without the entry's name in front.
+static const char *part_label(const ModLibRow &r,const char *group) {
+    size_t n=strlen(group);
+    if(n&&!strncmp(r.name,group,n)&&!strncmp(r.name+n,": ",2)&&r.name[n+2])return r.name+n+2;
+    return r.name[0]?r.name:r.id;
+}
+static void library_row(const ModLibRow &r,int i,int &index,char *picked,size_t cap,bool focus,const char *label) {
+    ImGui::PushID(r.id);
+    if(focus)ImGui::SetKeyboardFocusHere();
+    if(ImGui::Selectable(label,i==index)){snprintf(picked,cap,"%s",r.id);index=i;}
+    UiTextId state=!r.installed?UI_MODS_STATE_AVAILABLE:r.update&&r.in_library?UI_MODS_STATE_UPDATE:r.enabled?UI_MODS_STATE_ON:UI_MODS_STATE_OFF;
+    ImGui::TextDisabled("%s",menu_text(state));ImGui::Spacing();ImGui::PopID();
+}
+
 static char requested_owner[65],requested_page[65];
 void mods_page_select(const char *owner,const char *page){snprintf(requested_owner,sizeof requested_owner,"%s",owner);snprintf(requested_page,sizeof requested_page,"%s",page);}
 
@@ -56,12 +78,32 @@ static bool library(float scale,bool focus_first) {
         ImGui::TableSetupColumn("##library_list",ImGuiTableColumnFlags_WidthFixed,300*scale);
         ImGui::TableSetupColumn("##library_detail",ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableNextColumn();
+        // An entry's parts (library.ini group) are one row that opens on them, shut at first, so an entry with many
+        // optional pieces takes one row; it opens by itself when the picked mod is one of them.
         for(int i=0;i<v.count;++i){
-            const ModLibRow &r=v.rows[i];ImGui::PushID(r.id);
-            if(focus_first&&i==index){ImGui::SetKeyboardFocusHere();focused=true;}
-            if(ImGui::Selectable(r.name[0]?r.name:r.id,i==index)){snprintf(picked,sizeof picked,"%s",r.id);index=i;}
-            UiTextId state=!r.installed?UI_MODS_STATE_AVAILABLE:r.update&&r.in_library?UI_MODS_STATE_UPDATE:r.enabled?UI_MODS_STATE_ON:UI_MODS_STATE_OFF;
-            ImGui::TextDisabled("%s",menu_text(state));ImGui::Spacing();ImGui::PopID();
+            const ModLibRow &r=v.rows[i];
+            if(!r.group[0]){
+                bool focus=focus_first&&i==index;focused|=focus;
+                library_row(r,i,index,picked,sizeof picked,focus,r.name[0]?r.name:r.id);continue;
+            }
+            bool first=true;for(int k=0;k<i&&first;++k)if(!strcmp(v.rows[k].group,r.group))first=false;
+            if(!first)continue;   // drawn under its entry's row
+            char group[96];group_label(r,group,sizeof group);
+            int parts=0,on=0;bool holds_pick=false;
+            for(int k=i;k<v.count;++k)if(!strcmp(v.rows[k].group,r.group)){parts++;on+=v.rows[k].enabled!=0;holds_pick|=k==index;}
+            ImGui::PushID("group");ImGui::PushID(r.group);
+            if(holds_pick)ImGui::SetNextItemOpen(true,ImGuiCond_Appearing);
+            bool focus=focus_first&&holds_pick;focused|=focus;
+            if(focus)ImGui::SetKeyboardFocusHere();
+            bool open=ImGui::TreeNodeEx("##parts",ImGuiTreeNodeFlags_SpanAvailWidth|ImGuiTreeNodeFlags_NoTreePushOnOpen,"%s",group);
+            ImGui::TextDisabled(menu_text(UI_MODS_STATE_PARTS),on,parts);ImGui::Spacing();
+            ImGui::PopID();ImGui::PopID();
+            if(open){
+                ImGui::Indent();
+                for(int k=i;k<v.count;++k)if(!strcmp(v.rows[k].group,r.group))
+                    library_row(v.rows[k],k,index,picked,sizeof picked,false,part_label(v.rows[k],group));
+                ImGui::Unindent();
+            }
         }
         ImGui::BeginDisabled(!idle);if(ImGui::Button(menu_text(UI_MODS_REFRESH)))modlib_refresh();ImGui::EndDisabled();
         ImGui::TableNextColumn();

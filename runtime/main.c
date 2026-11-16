@@ -766,7 +766,34 @@ static void profile_fallback(RtConfig *c) {
     c->profile = pp_profile;
 }
 
+// rt_restart_game: the copy started for a restart waits up to this long for the game it replaces to close.
+#define RESTART_WAIT_MS 120000
+
+void gfx_window_request_close(void);   // ui/menu.h (C++)
+
+int rt_restart_game(void) {
+    char pid[16];
+    snprintf(pid, sizeof pid, "%u", plat_process_id());
+    plat_setenv("XCX_RESTART_AFTER", pid);
+    int ok = plat_start_copy();
+    plat_setenv("XCX_RESTART_AFTER", NULL);
+    rt_log("restart: %s", ok ? "a new copy waits for this one to close" : "the new copy could not be started");
+    if (ok) gfx_window_request_close();
+    return ok;
+}
+
 int main(int argc, char **argv) {
+    // A restart from the menu (rt_restart_game): wait for the game this replaces to close, before anything here
+    // claims memory, files or the window.
+    const char *after = getenv("XCX_RESTART_AFTER");
+    if (after && *after) {
+        uint32_t old = (uint32_t)strtoul(after, NULL, 10);
+        plat_setenv("XCX_RESTART_AFTER", NULL);
+        if (old && !plat_wait_process_exit(old, RESTART_WAIT_MS)) {
+            fprintf(stderr, "restart: the game being restarted (process %u) did not close; not starting\n", old);
+            return 1;
+        }
+    }
     mem_init();   // first: claim the guest address space before anything else can land there; reads xcx.ini
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);

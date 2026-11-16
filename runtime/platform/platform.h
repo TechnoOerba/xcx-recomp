@@ -208,6 +208,12 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr));
 // Starts this program again with the same arguments and ends this process with the new one's exit code (Windows), or
 // replaces this process with it (Linux). Environment changes made before the call are passed on.
 _Noreturn void plat_reexec(void);
+// Starts another copy of this program with the same arguments and environment (changes made before the call
+// included) and returns at once, this process going on; 1 when it started. For a restart: the copy waits for this
+// process to end (plat_wait_process_exit) before it does anything.
+int plat_start_copy(void);
+// Waits up to ms for process pid to end; 1 when it has (or there is no such process), 0 when it still runs.
+int plat_wait_process_exit(uint32_t pid, uint32_t ms);
 
 // A crash goes to fn, which reports it and must end the process. The write-fault hook above runs first.
 // - A fault in this executable's own code (an access violation, an illegal instruction, a division by zero, a stack

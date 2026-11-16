@@ -105,12 +105,18 @@ and one line per event:
 
 The log has the same lines (the first few of each merge), and the Mods tab shows the counts and the caveats and
 left-out changes of this run. In its Mod priority list each mod's row also carries what the merges said about it
-("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several), and every row has a
-**Turn off** button beside its Up and Down.
+("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several); selecting that note shows
+the mod's own lines from the reports under its row. Every row has a **Turn off** button beside its Up and Down. A mod
+turned off and on again (here or in the library) while the game runs goes back where it was; any other mod turned on
+goes last, at the lowest priority, and is moved up from here if it should win. The library's picked mod says where it is in
+the list ("Priority 2 of 8").
 
-The game reads its data tables only at start-up, so once the list changes while it runs (another order, a mod
-turned on or off) the Mods tab says the change applies after a restart and offers **Merge now**: the new list is
+The game reads its data tables only at start-up, so once the mods change while it runs (another order, a mod
+turned on or off, or a mod's files updated: their sizes and times count) the Mods tab says the change applies after a restart and offers **Merge now**: the new list is
 merged in the background (half the logical processors, at most 4, below normal priority), its lines and tags are
 shown as the next start's, and the files land in the cache with their quick note, so the next start uses them as
 they are. **Merge automatically when the mods change** (xcx.ini `bdat_merge_auto`) does the same by itself 1.5 s after
-the last change.
+the last change. **Back to the start-up list** writes the list back as the game started with it, so no restart is
+needed, and **Restart now** starts a new copy of the game that waits for this one to close, then closes it; in the world
+(a save loaded or a new game started, not at the title screen) it asks first, since anything since the last save would
+be lost.

@@ -1059,6 +1059,41 @@ void plat_reexec(void) {
     _exit(70);
 }
 
+int plat_start_copy(void) {
+    static char args[16384];
+    char *argv[256];
+    int argc = 0;
+    FILE *f = fopen("/proc/self/cmdline", "rb");
+    size_t n = f ? fread(args, 1, sizeof args - 1, f) : 0;
+    if (f) fclose(f);
+    args[n] = 0;
+    for (size_t i = 0; i < n && argc < 255; i += strlen(args + i) + 1) argv[argc++] = args + i;
+    argv[argc] = NULL;
+    pid_t pid;
+    return argc && posix_spawn(&pid, "/proc/self/exe", NULL, NULL, argv, environ) == 0;
+}
+
+// Ended: no /proc entry, or a zombie its parent hasn't reaped yet (the launcher may not wait for it).
+static int process_ended(uint32_t pid) {
+    char path[64], buf[512];
+    snprintf(path, sizeof path, "/proc/%u/stat", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char *e = strrchr(buf, ')');
+    return !e || e[1] != ' ' || e[2] == 'Z' || e[2] == 'X';
+}
+
+int plat_wait_process_exit(uint32_t pid, uint32_t ms) {
+    for (uint32_t t = 0;; t += 50) {
+        if (process_ended(pid)) return 1;
+        if (t >= ms) return 0;
+        usleep(50000);
+    }
+}
+
 int plat_mem_read(uint64_t addr, void *out, size_t n) {
     struct iovec local = {out, n}, remote = {(void *)(uintptr_t)addr, n};
     return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)n;

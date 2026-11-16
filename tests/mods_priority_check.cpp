@@ -3,7 +3,9 @@
 // one, the merge lines in their looks (left out, caveat, grey for mods that add nothing or are partly alike) and the
 // restart line once the list differs from what the game merged at start-up. Prints "ok <n>" or one "FAIL <check>" per
 // failure; the exit code is the failure count. Also each row's tag of what the merges said about it, Turn off, and
-// Merge now: merging, then the next start's lines and tags in place of this run's.
+// Merge now: merging, then the next start's lines and tags in place of this run's. And a row's note opening that mod's
+// lines, Back to the start-up list, Restart now (asking first once a save is loaded), and the priority number in the
+// library's picked mod.
 #define XCX_MOD_UI_TESTING
 #include "../runtime/ui/mods_page.cpp"
 #include <cstdlib>
@@ -44,7 +46,23 @@ static const char *test_next[4];
 static int test_nnext;
 __attribute__((weak)) int romfs_mods_premerge(void) { premerges++; return 1; }
 __attribute__((weak)) int romfs_mods_premerge_state(void) { return test_ahead; }
-static int test_auto;
+static int test_auto, test_listchg, restores, rereads, restarts;
+static int test_world;
+__attribute__((weak)) int romfs_mods_list_changed(void) { return test_listchg; }
+static int test_updated;   // "other" updated since start
+__attribute__((weak)) int romfs_mod_changed(const char *id) { return test_updated && !strcmp(id, "other") ? 1 : 0; }
+__attribute__((weak)) int romfs_mods_restore_list(void) { restores++; return 1; }
+__attribute__((weak)) void modlib_reread_enabled(void) { rereads++; }
+__attribute__((weak)) int rt_restart_game(void) { restarts++; return 1; }
+__attribute__((weak)) int romfs_game_in_world(void) { return test_world; }
+// "other" has one line of its own in the reports, the others none
+__attribute__((weak)) int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds, int cap) {
+    (void)next;
+    if (strcmp(id, "other") || cap < 1) return 0;
+    snprintf(out[0], 320, "%s", "bdat/common.bdat: left out: Other mod: a change");
+    if (kinds) kinds[0] = 1;
+    return 1;
+}
 __attribute__((weak)) int romfs_mods_auto_merge(void) { return test_auto; }
 __attribute__((weak)) void romfs_mods_set_auto_merge(int on) { test_auto = on; }
 __attribute__((weak)) int bdat_merge_next_status(int i, char *out, size_t cap, int *kind) {
@@ -114,6 +132,15 @@ static void row(const char *id, const char *name) {
     snprintf(r.name, sizeof r.name, "%s", name);
     strcpy(r.kind, "romfs");
     r.installed = r.enabled = 1;
+}
+
+static void click(ImVec2 lo, ImVec2 hi) {   // a press and release in the middle of a widget, a frame each
+    ImGuiIO &io = ImGui::GetIO();
+    io.AddMousePosEvent((lo.x + hi.x) / 2, (lo.y + hi.y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
 }
 
 static int find(char tag, const char *text) {   // the index of a drawn line, -1 when there is none
@@ -218,6 +245,7 @@ int main() {
     refresh();
     int x = find('X', nullptr);
     verify(x > r && find('N', "(next)") == x + 1, "the next start's heading, then its lines");
+    verify(find('Q', nullptr) > r && find('Q', nullptr) < x, "the buttons sit right under the restart line");
     verify(find('T', "adds nothing") == find('P', "Other mod") + 1 && find('T', "2 left out") < 0,
            "the rows carry the next start's tags");
     test_nnext = 0;
@@ -245,6 +273,57 @@ int main() {
     test_n = 1;
     refresh();
     verify(find('P', "Whole mod") >= 0, "the last mod left stays listed");
+
+    // the picked mod in the library (the first row, "whole") says where it is in the priority list
+    strcpy(test_ids[0], "whole.piece");
+    strcpy(test_ids[1], "whole");
+    strcpy(test_ids[2], "other");
+    test_n = 3;
+    test_changed = 0;
+    test_auto = 0;
+    refresh();
+    verify(find('K', "Priority 2 of 3") >= 0, "the library's picked mod shows its priority number");
+
+    // a row's note opens that mod's own lines, and closes them again; a mod with none says so
+    click(prio_tag_low[2], prio_tag_high[2]);
+    refresh();
+    verify(find('D', "Other mod: a change") == find('T', "2 left out") + 1, "a note opens its mod's lines below it");
+    click(prio_tag_low[2], prio_tag_high[2]);
+    refresh();
+    verify(find('D', nullptr) < 0, "a second press closes them");
+    click(prio_tag_low[0], prio_tag_high[0]);
+    refresh();
+    verify(find('E', nullptr) >= 0, "a mod with no lines of its own says so");
+    click(prio_tag_low[0], prio_tag_high[0]);
+    refresh();
+
+    // a changed list: Back to the start-up list, which reads the lists again for the library, and Restart now
+    test_changed = 1;
+    test_listchg = 1;
+    refresh();
+    verify(find('U', nullptr) >= 0 && find('Q', nullptr) > find('U', nullptr), "Back to the start-up list, then Restart now");
+    click(prio_undo_low, prio_undo_high);
+    verify(restores == 1 && rereads == 1, "Back to the start-up list writes it back and updates the library");
+    test_listchg = 0;
+    refresh();
+    verify(find('U', nullptr) < 0 && find('Q', nullptr) >= 0, "an updated mod alone: Restart now, no way back");
+    test_updated = 1;
+    refresh();
+    verify(find('V', "updated after") == find('P', "Other mod") + 1, "the updated mod's row says so");
+    test_updated = 0;
+    refresh();
+    verify(find('V', nullptr) < 0, "no mark once nothing changed");
+
+    // at the title screen (no save loaded) Restart now restarts at once; in the world it asks first
+    test_world = 0;
+    click(prio_restart_low, prio_restart_high);
+    verify(restarts == 1, "Restart now at the title screen restarts at once");
+    test_world = 1;
+    click(prio_restart_low, prio_restart_high);
+    frame();
+    verify(restarts == 1 && find('C', nullptr) >= 0, "Restart now in the world asks first");
+    click(prio_yes_low, prio_yes_high);
+    verify(restarts == 2, "Restart in the question restarts");
 
     ImGui::DestroyContext();
     if (!failures) printf("ok %d\n", checks);

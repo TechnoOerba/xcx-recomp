@@ -171,6 +171,8 @@ typedef struct {
     int kind[STATUS_CAP], nstatus;
     ModTag tags[TAG_CAP];
     int ntags;
+    char files[8][2500];   // the report files of its merges, for bdat_merge_mod_lines
+    int nfiles;
 } Report;
 static Report reports[2];
 static PlatMutex text_lock = PLAT_MUTEX_INIT;
@@ -214,7 +216,7 @@ int bdat_merge_next_status(int i, char *out, size_t cap, int *kind) {
 
 void bdat_merge_next_clear(void) {
     plat_mutex_lock(&text_lock);
-    reports[1].nstatus = reports[1].ntags = 0;
+    reports[1].nstatus = reports[1].ntags = reports[1].nfiles = 0;
     plat_mutex_unlock(&text_lock);
 }
 
@@ -473,10 +475,19 @@ static int serve_game_copy(const char *profile, const char *key, const uint8_t *
 
 // A merge made before (file, its report next to it) served again: its report's last line is the summary, the lines
 // before it the events, which go to the status lines and the per-mod tags as when it was made.
+// The report file of a merge served (or made ahead) into the report of the merge in progress; under lock.
+static void note_report(const char *path) {
+    plat_mutex_lock(&text_lock);
+    Report *r = &reports[target];
+    if (r->nfiles < 8) snprintf(r->files[r->nfiles++], sizeof r->files[0], "%s", path);
+    plat_mutex_unlock(&text_lock);
+}
+
 static void reuse(const char *key, const char *file, const char *how, const BdatModFiles *mods, char (*label)[160],
                   int n) {
     char report[2500];
     snprintf(report, sizeof report, "%s.txt", file);
+    note_report(report);
     uint64_t rn = 0;
     char *text = (char *)plat_file_read(report, &rn);
     char *last = NULL;
@@ -735,6 +746,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     summary_line(line, sizeof line, n, &sum, label);
     add_line(&notes, line);
     plat_file_write_atomic(report, notes.text, notes.n);
+    note_report(report);
     if (!next) prune(pr.dir, flat, name);
     snprintf(out, cap, "%s", file);
     ok = 1;
@@ -782,4 +794,73 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
 int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *mods, int n) {
     char out[4096];
     return serve(mount, key, mods, n, out, sizeof out, 1);
+}
+
+// ---- one mod's lines, for the Mods tab's details under its row
+
+int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds, int cap) {
+    char files[8][2500], mine[160];
+    plat_mutex_lock_shared(&text_lock);
+    const Report *r = &reports[next ? 1 : 0];
+    int nf = r->nfiles;
+    memcpy(files, r->files, sizeof files);
+    plat_mutex_unlock_shared(&text_lock);
+    label_of(id, mine, sizeof mine);
+    static const char *const kind_names[] = {"priority: ", "left out: ", "caveat: ", "adds nothing: ", "partly alike: "};
+    static const int kind_of[] = {0, 1, 2, 3, 4};
+    int got = 0;
+    for (int f = 0; f < nf && got < cap; f++) {
+        uint64_t n = 0;
+        char *text = (char *)plat_file_read(files[f], &n), *t;
+        if (!text || !(t = realloc(text, n + 1))) {
+            free(text);
+            continue;
+        }
+        text = t;
+        text[n] = 0;
+        // the first line names the merge's mods: "<key> merged from, highest priority first: <a>; <b>; ..."
+        char key[256] = "", labels[64][160];
+        int nl = 0;
+        char *nl1 = strchr(text, '\n');
+        if (nl1) *nl1 = 0;
+        const char *first = strstr(text, " merged from, highest priority first: ");
+        if (first) {
+            snprintf(key, sizeof key, "%.*s", (int)(first - text), text);
+            for (const char *p = first + strlen(" merged from, highest priority first: "); *p && nl < 64;) {
+                const char *e = strstr(p, "; ");
+                size_t len = e ? (size_t)(e - p) : strcspn(p, "\r");
+                snprintf(labels[nl++], sizeof labels[0], "%.*s", (int)len, p);
+                if (!e) break;
+                p = e + 2;
+            }
+        }
+        for (char *p = nl1 ? nl1 + 1 : NULL; p && *p && got < cap;) {
+            char *e = strchr(p, '\n');
+            if (e) *e = 0;
+            if (e && e > p && e[-1] == '\r') e[-1] = 0;
+            for (int k = 0; k < 5; k++) {
+                size_t kl = strlen(kind_names[k]);
+                if (strncmp(p, kind_names[k], kl)) continue;
+                // its mod: the longest label the rest starts with, as in tag_events (a label may hold ": ")
+                const char *rest = p + kl, *who = NULL;
+                size_t best = 0;
+                for (int l = 0; l < nl; l++) {
+                    size_t ll = strlen(labels[l]);
+                    if (ll > best && !strncmp(rest, labels[l], ll) && !strncmp(rest + ll, ": ", 2)) {
+                        who = labels[l];
+                        best = ll;
+                    }
+                }
+                if (who && !strcmp(who, mine)) {
+                    snprintf(out[got], 320, "%s: %s", key, p);
+                    if (kinds) kinds[got] = kind_of[k];
+                    got++;
+                }
+                break;
+            }
+            p = e ? e + 1 : NULL;
+        }
+        free(text);
+    }
+    return got;
 }

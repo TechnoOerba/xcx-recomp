@@ -902,6 +902,27 @@ void plat_reexec(void) {
     ExitProcess(code);
 }
 
+int plat_start_copy(void) {
+    STARTUPINFOW si = {.cb = sizeof si};
+    PROCESS_INFORMATION pi;
+    wchar_t *cmd = _wcsdup(GetCommandLineW());   // CreateProcessW may write its command line
+    int ok = cmd && CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    free(cmd);
+    if (ok) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    return ok;
+}
+
+int plat_wait_process_exit(uint32_t pid, uint32_t ms) {
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (!h) return 1;   // gone already
+    DWORD r = WaitForSingleObject(h, ms);
+    CloseHandle(h);
+    return r == WAIT_OBJECT_0;
+}
+
 int plat_mem_read(uint64_t addr, void *out, size_t n) {
     SIZE_T got = 0;
     return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)addr, out, n, &got) && got == n;

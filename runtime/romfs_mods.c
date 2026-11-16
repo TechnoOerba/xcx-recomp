@@ -34,6 +34,8 @@
 #define LIST_CAP 4096          // bytes of romfs-enabled.txt
 #define MOD_CAP 32             // enabled mods
 #define CHECK_MS 500           // how often the list file is read again
+#define SIG_CAP (MOD_CAP * 76)  // table_inputs: per mod "<id>#<8 hex>,"
+#define LINE_CAP 128           // lines of romfs-enabled.txt the menu's switches keep
 #define AUTO_MS 1500           // with bdat_merge_auto, how long a changed list stays put before it is merged ahead
 
 // key: lowercase game path without a leading '/'. host: the top mod's copy. For a data table or a JSON table that
@@ -66,7 +68,8 @@ static char start_mount[64];               // the mount the game read them from
 static Merged ahead[STARTED_CAP];
 static int nahead, ahead_busy;
 static uint64_t changed_at;                // when the list last changed (rebuild); under check_lock
-static int auto_pending;                   // since then, not yet looked at for bdat_merge_auto; under check_lock
+static char cur_list[LIST_CAP + 1];        // the list text the map was built from; under lock
+static char *start_list;                   // the list text when the game read its first data table; under lock
 static int stale_now(void);
 static int ahead_state(void);
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
@@ -76,6 +79,7 @@ static char list_seen[LIST_CAP + 1];
 static int64_t list_len_seen = -2;         // -2: never read
 static uint64_t next_check_ms;
 static int claim_logs;
+static int in_world;                       // romfs_game_in_world
 
 static int mods_root(void) {
     if (root_state) return root_state > 0;
@@ -239,6 +243,7 @@ static void rebuild(const char *list) {
     }
     if (w.n) qsort(w.v, w.n, sizeof *w.v, by_key);
     plat_mutex_lock(&lock);
+    snprintf(cur_list, sizeof cur_list, "%s", list);
     ModFile *old = files;
     size_t nold = nfiles;
     files = w.v;
@@ -282,16 +287,14 @@ static void maybe_reload(void) {
             list_len_seen = len;
             if (len >= 0 || nfiles) rebuild(buf);
             changed_at = now;
-            auto_pending = 1;
         }
     }
-    // bdat_merge_auto: once a changed list has stayed put a moment (a few Up/Down clicks are one change), it is merged
-    // ahead, if the game has read its tables and they would now be made otherwise. A merge still running is waited for.
-    if (auto_pending && now - changed_at >= AUTO_MS && !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE)) {
-        auto_pending = 0;
-        if (cfg_bool("XCX_BDAT_MERGE_AUTO") && stale_now() && ahead_state() != 2 && romfs_mods_premerge())
-            rt_log("romfs mods: the list changed; merging its data tables ahead for the next start");
-    }
+    // bdat_merge_auto: once a changed list has stayed put a moment (a few Up/Down clicks are one change), the data
+    // tables are merged ahead whenever the game read them otherwise than they'd be made now (another list, or a mod's
+    // files updated) and no merge for this list is made or running.
+    if (now - changed_at >= AUTO_MS && !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE) &&
+        cfg_bool("XCX_BDAT_MERGE_AUTO") && stale_now() && ahead_state() == 0 && romfs_mods_premerge())
+        rt_log("romfs mods: the mods changed; merging their data tables ahead for the next start");
     plat_mutex_unlock(&check_lock);
 }
 
@@ -344,17 +347,41 @@ static const char *copy_of(const ModFile *f, const char *id) {
     return NULL;
 }
 
-// The enabled mods that have a copy of data table key or JSON tables of it, highest priority first, as "a,b," into
-// sig. Under the map's lock.
+static uint32_t fnv(uint32_t h, const void *p, size_t n) {
+    for (const uint8_t *b = p; n--; b++) h = (h ^ *b) * 16777619u;
+    return h;
+}
+
+// A file's path, size and last-write time into h: an updated copy (same mod, same place) changes it.
+static uint32_t stamp(uint32_t h, const char *path) {
+    int64_t v[2] = {0, 0};
+    plat_file_stat(path, &v[0], &v[1]);
+    return fnv(fnv(h, path, strlen(path)), v, sizeof v);
+}
+
+// The enabled mods that have a copy of data table key or JSON tables of it, highest priority first, each with a stamp
+// of those files ("a#1f2e3d4c,b#...,") into sig: what the table would be made from now. Under the map's lock.
 static void table_inputs(const char *key, char *sig, size_t cap) {
     size_t lo = 0, hi = 0, pre = strlen(key) - 4, n = 0;
     ModFile *f = find(key);
     json_range(key, &lo, &hi);
     sig[0] = 0;
     for (int m = 0; m < norder; m++) {
-        int has = f && copy_of(f, order[m]);
-        for (size_t i = lo; !has && i < hi; i++) has = is_json_of(files[i].key, pre) && copy_of(&files[i], order[m]);
-        if (has && n + strlen(order[m]) + 2 <= cap) n += (size_t)snprintf(sig + n, cap - n, "%s,", order[m]);
+        uint32_t h = 2166136261u;
+        int has = 0;
+        const char *full = f ? copy_of(f, order[m]) : NULL;
+        if (full) {
+            has = 1;
+            h = stamp(h, full);
+        }
+        for (size_t i = lo; i < hi; i++) {
+            const char *p = is_json_of(files[i].key, pre) ? copy_of(&files[i], order[m]) : NULL;
+            if (p) {
+                has = 1;
+                h = stamp(h, p);
+            }
+        }
+        if (has && n + strlen(order[m]) + 11 <= cap) n += (size_t)snprintf(sig + n, cap - n, "%s#%08x,", order[m], h);
     }
 }
 
@@ -409,8 +436,9 @@ static void note_table(const char *key, const char *mount) {
     if (!start_mount[0] && mount && strlen(mount) < sizeof start_mount) snprintf(start_mount, sizeof start_mount, "%s", mount);
     known = 0;
     for (int i = 0; i < nstarted; i++) known |= !strcmp(started[i].key, key);
+    if (!start_list) start_list = strdup(cur_list);   // the list the game started with, for romfs_mods_restore_list
     if (!known && nstarted < STARTED_CAP && (started[nstarted].key = strdup(key))) {
-        char sig[MOD_CAP * 66];
+        char sig[SIG_CAP];
         table_inputs(key, sig, sizeof sig);
         started[nstarted].path = strdup(sig);
         nstarted++;
@@ -514,6 +542,12 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     // A data table is noted even when the game reads its own copy (no mod has it, or no mod is on): the restart line
     // and a merge made ahead then know the game read it.
     if (is_table(one)) note_table(one, romfs_mount_name());
+    // In the world or at the title screen, from what the game loads (a file trace of boot, a save loaded, Return to
+    // Title): the world's map information and collision come only once a save is loaded or a new game started, and
+    // the title's scene (ev/title/) at boot and at each return to the title.
+    if (!strncmp(one, "ev/title/", 9)) __atomic_store_n(&in_world, 0, __ATOMIC_RELAXED);
+    else if (!strcmp(one, "gimmick/world_info.bin") || !strncmp(one, "map/mapcoli/", 12))
+        __atomic_store_n(&in_world, 1, __ATOMIC_RELAXED);
     if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED) || !lookup(one, NULL, 0, NULL)) return list;
     one[strlen(one) + 1] = 0;
     if (__atomic_fetch_add(&claim_logs, 1, __ATOMIC_RELAXED) < 64) rt_log("romfs mods: %s from a mod", one);
@@ -569,21 +603,158 @@ void romfs_mods_reload(void) {
     __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);
 }
 
-int romfs_mods_set(const char *id, int on) {
-    if (!mods_root() || !id || !valid_id(id, strlen(id))) return 0;
-    char ids[MOD_CAP][65];
-    int n = read_enabled(ids, MOD_CAP);
-    char text[LIST_CAP];
-    size_t len = 0;
-    if (on) len += (size_t)snprintf(text, sizeof text, "%s\n", id);   // a mod turned on goes first, so its files win
-    for (int i = 0; i < n && len + 66 < sizeof text; i++)
-        if (strcmp(ids[i], id)) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", ids[i]);
-    plat_file_mkdir_p(root);
+// ---- the list file as lines, for the menu's switches
+//
+// A mod turned off from the menu while the game runs is remembered with the mods that were on above it, so turning it
+// on again in the same run puts it back where it was. Any other mod turned on (new, on before a restart, or never on)
+// goes last, at the lowest priority: it shouldn't win over everything at once, and the player moves it up if it
+// should. Comment lines stay as they are.
+
+static int read_lines(char (*lines)[160], int cap) {
     char path[4200];
     snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
+    uint64_t size = 0;
+    char *text = (char *)plat_file_read(path, &size);
+    int n = 0;
+    for (char *p = text; p && *p && n < cap;) {
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        while (len && (p[len - 1] == '\r' || p[len - 1] == ' ')) len--;
+        if (len && len < 160) {
+            memcpy(lines[n], p, len);
+            lines[n++][len] = 0;
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    free(text);
+    return n;
+}
+
+static int write_lines(char (*lines)[160], int n) {
+    char text[LIST_CAP], path[4200];
+    size_t len = 0;
+    for (int i = 0; i < n && len + 162 < sizeof text; i++) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", lines[i]);
+    plat_file_mkdir_p(root);
+    snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
     int ok = plat_file_write_atomic(path, text, len);
-    rt_log("romfs mods: %s turned %s from the menu%s", id, on ? "on" : "off", ok ? "" : " (the list could not be written)");
     __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);   // the next file lookup reads the new list
+    return ok;
+}
+
+// Mods turned off from the menu this run: each with the mods that were on above it then, nearest first.
+typedef struct { char id[65]; char above[MOD_CAP][65]; int nabove; } OffPlace;
+static OffPlace places[MOD_CAP];
+static int nplaces;
+static PlatMutex place_lock = PLAT_MUTEX_INIT;
+
+static int is_mod_line(const char *line) { return line[0] != '#' && valid_id(line, strlen(line)); }
+
+int romfs_mods_set(const char *id, int on) {
+    if (!mods_root() || !id || !valid_id(id, strlen(id))) return 0;
+    char lines[LINE_CAP + 1][160];
+    int n = read_lines(lines, LINE_CAP), at = -1, k = 0;
+    for (int i = 0; i < n; i++) {   // its own line out (where it was kept in at)
+        if (!strcmp(lines[i], id)) {
+            if (at < 0) at = k;
+        } else {
+            if (k != i) memcpy(lines[k], lines[i], sizeof lines[k]);
+            k++;
+        }
+    }
+    n = k;
+    plat_mutex_lock(&place_lock);
+    int p = 0;
+    while (p < nplaces && strcmp(places[p].id, id)) p++;
+    if (!on && at >= 0) {   // remember the mods on above it, for turning it on again this run
+        if (p == nplaces && nplaces < MOD_CAP) nplaces++;
+        if (p < nplaces) {
+            OffPlace *o = &places[p];
+            snprintf(o->id, sizeof o->id, "%s", id);
+            o->nabove = 0;
+            for (int i = at - 1; i >= 0 && o->nabove < MOD_CAP; i--)
+                if (is_mod_line(lines[i])) snprintf(o->above[o->nabove++], 65, "%s", lines[i]);
+        }
+    } else if (on && at < 0) {
+        at = n;   // not remembered: last, the lowest priority
+        if (p < nplaces) {   // remembered: right below the nearest mod that was above it and is still on, else first
+            at = 0;
+            while (at < n && !is_mod_line(lines[at])) at++;   // first: above the first mod, below leading comments
+            int found = 0;
+            for (int a = 0; a < places[p].nabove && !found; a++)
+                for (int i = 0; i < n; i++)
+                    if (!strcmp(lines[i], places[p].above[a])) {
+                        at = i + 1;
+                        found = 1;
+                        break;
+                    }
+            places[p] = places[--nplaces];
+        }
+    }
+    plat_mutex_unlock(&place_lock);
+    if (on) {   // back in (at its old line when it was on already)
+        memmove(lines[at + 1], lines[at], sizeof lines[0] * (size_t)(n - at));
+        snprintf(lines[at], sizeof lines[at], "%s", id);
+        n++;
+    }
+    int ok = write_lines(lines, n);
+    rt_log("romfs mods: %s turned %s from the menu%s", id, on ? "on" : "off", ok ? "" : " (the list could not be written)");
+    return ok;
+}
+
+// The "<id>#<stamp>," entry of id in a table_inputs signature into out ("" when id isn't in it).
+static void sig_entry(const char *sig, const char *id, char *out, size_t cap) {
+    size_t il = strlen(id);
+    out[0] = 0;
+    for (const char *p = sig; p && *p;) {
+        const char *e = strchr(p, ',');
+        if (!strncmp(p, id, il) && p[il] == '#') {
+            snprintf(out, cap, "%.*s", (int)(e ? e - p : (long)strlen(p)), p);
+            return;
+        }
+        p = e ? e + 1 : NULL;
+    }
+}
+
+int romfs_mod_changed(const char *id) {
+    maybe_reload();
+    int how = 0;
+    plat_mutex_lock_shared(&lock);
+    for (int i = 0; i < nstarted && how != 1; i++) {
+        char now[SIG_CAP], a[96], b[96];
+        table_inputs(started[i].key, now, sizeof now);
+        sig_entry(started[i].path ? started[i].path : "", id, a, sizeof a);
+        sig_entry(now, id, b, sizeof b);
+        if (b[0] && !a[0]) how = 2;
+        else if (a[0] && b[0] && strcmp(a, b)) how = 1;
+    }
+    plat_mutex_unlock_shared(&lock);
+    return how;
+}
+
+int romfs_game_in_world(void) { return __atomic_load_n(&in_world, __ATOMIC_RELAXED); }
+
+int romfs_mods_list_changed(void) {
+    maybe_reload();
+    plat_mutex_lock_shared(&lock);
+    int changed = start_list && strcmp(start_list, cur_list) != 0;
+    plat_mutex_unlock_shared(&lock);
+    return changed;
+}
+
+int romfs_mods_restore_list(void) {
+    if (!mods_root()) return 0;
+    plat_mutex_lock_shared(&lock);
+    char *text = start_list ? strdup(start_list) : NULL;
+    plat_mutex_unlock_shared(&lock);
+    if (!text) return 0;
+    char path[4200];
+    snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
+    int ok = plat_file_write_atomic(path, text, strlen(text));
+    free(text);
+    rt_log("romfs mods: the list put back as the game started with it from the menu%s",
+           ok ? "" : " (the list could not be written)");
+    __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);
     return ok;
 }
 
@@ -596,7 +767,7 @@ static int stale_now(void) {
     plat_mutex_lock_shared(&lock);
     int changed = 0;
     for (int i = 0; !changed && i < nstarted; i++) {
-        char sig[MOD_CAP * 66];
+        char sig[SIG_CAP];
         table_inputs(started[i].key, sig, sizeof sig);
         changed = !started[i].path || strcmp(sig, started[i].path) != 0;
     }
@@ -623,7 +794,7 @@ static void premerge_run(void *arg) {
     uint64_t t0 = plat_now_ms();
     for (int k = 0; k < nk; k++) {
         BdatModFiles in[MOD_CAP];
-        char *mem[MOD_CAP * 66], sig[MOD_CAP * 66];
+        char *mem[MOD_CAP * 66], sig[SIG_CAP];
         int nmem = 0, ok = 1, merge = 0;
         plat_mutex_lock_shared(&lock);
         table_inputs(keys[k], sig, sizeof sig);
@@ -677,9 +848,6 @@ int romfs_mods_auto_merge(void) { return cfg_bool("XCX_BDAT_MERGE_AUTO"); }
 void romfs_mods_set_auto_merge(int on) {
     cfg_set("XCX_BDAT_MERGE_AUTO", on ? "1" : "0");
     cfg_save();
-    plat_mutex_lock(&check_lock);
-    auto_pending = on;   // turned on with the list already changed: merged ahead at the next check
-    plat_mutex_unlock(&check_lock);
 }
 
 static int ahead_state(void) {
@@ -687,7 +855,7 @@ static int ahead_state(void) {
     plat_mutex_lock_shared(&lock);
     int same = nahead > 0 && nahead >= nstarted;
     for (int i = 0; same && i < nahead; i++) {
-        char sig[MOD_CAP * 66];
+        char sig[SIG_CAP];
         table_inputs(ahead[i].key, sig, sizeof sig);
         same = ahead[i].path && !strcmp(sig, ahead[i].path);
     }
@@ -702,19 +870,16 @@ int romfs_mods_priority(char (*ids)[65], int cap) {
 
 int romfs_mods_move(const char *id, int up) {
     if (!mods_root() || !id) return 0;
-    char ids[MOD_CAP][65], tmp[65];
-    int n = read_enabled(ids, MOD_CAP), i = 0;
-    while (i < n && strcmp(ids[i], id)) i++;
-    int j = up ? i - 1 : i + 1;
+    char lines[LINE_CAP][160], tmp[160];
+    int n = read_lines(lines, LINE_CAP), i = 0;
+    while (i < n && strcmp(lines[i], id)) i++;
+    int j = i;   // the next mod that is on above or below; comment lines (and turned-off places) stay where they are
+    do j += up ? -1 : 1; while (j >= 0 && j < n && !is_mod_line(lines[j]));
     if (i == n || j < 0 || j >= n) return 0;
-    memcpy(tmp, ids[i], sizeof tmp);
-    memcpy(ids[i], ids[j], sizeof tmp);
-    memcpy(ids[j], tmp, sizeof tmp);
-    char text[LIST_CAP], path[4200];
-    size_t len = 0;
-    for (int k = 0; k < n && len + 66 < sizeof text; k++) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", ids[k]);
-    snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
-    int ok = plat_file_write_atomic(path, text, len);
+    memcpy(tmp, lines[i], sizeof tmp);
+    memcpy(lines[i], lines[j], sizeof tmp);
+    memcpy(lines[j], tmp, sizeof tmp);
+    int ok = write_lines(lines, n);
     rt_log("romfs mods: %s moved %s in the priority list from the menu%s", id, up ? "up" : "down",
            ok ? "" : " (the list could not be written)");
     __atomic_store_n(&next_check_ms, 0, __ATOMIC_RELAXED);

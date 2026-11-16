@@ -309,18 +309,26 @@ static int read_list(const char *file, char (*ids)[65], int cap) {
     return n;
 }
 
-// Writes a list with id first (on) or without it (off), through a rename so the game never reads half a list.
+// Writes a list with id first (on) or without it (off), through a rename so the game never reads half a list. Other
+// lines stay as they are, comments included; id's own line goes.
 static int write_list(const char *file, const char *id, int on) {
-    char ids[64][65];
-    int n = read_list(file, ids, 64);
-    char text[64 * 66 + 66];
+    char path[4200];
+    join(path, sizeof path, root(), file);
+    uint64_t size = 0;
+    char *old = (char *)plat_file_read(path, &size);
+    char text[8192];
     size_t len = 0;
     if (on) len += (size_t)snprintf(text, sizeof text, "%s\n", id);
-    for (int i = 0; i < n; i++)
-        if (strcmp(ids[i], id)) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", ids[i]);
-    char path[4200];
+    for (char *p = old, *e; p && *p; p = e ? e + 1 : NULL) {
+        e = strchr(p, '\n');
+        if (e) *e = 0;
+        size_t n = strlen(p);
+        while (n && (p[n - 1] == '\r' || p[n - 1] == ' ')) p[--n] = 0;
+        int mine = !strcmp(p, id);
+        if (n && !mine && len + n + 2 < sizeof text) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", p);
+    }
+    free(old);
     plat_file_mkdir_p(root());
-    join(path, sizeof path, root(), file);
     return plat_file_write_atomic(path, text, len);
 }
 
@@ -1008,6 +1016,16 @@ void modlib_install(const char *id) {
 
 void modlib_remove(const char *id) {
     if (id && valid_id(id)) start(JOB_REMOVE, id);
+}
+
+void modlib_reread_enabled(void) {
+    plat_mutex_lock(&lock);
+    for (int i = 0; i < view.count; i++)
+        if (view.rows[i].installed)
+            view.rows[i].enabled = in_list(!strcmp(view.rows[i].kind, "romfs") ? "romfs-enabled.txt" : "enabled.txt",
+                                           view.rows[i].id);
+    publish_locked();
+    plat_mutex_unlock(&lock);
 }
 
 void modlib_set_enabled(const char *id, int on) {

@@ -84,6 +84,12 @@ enum { BDAT_TAG_LEFT_OUT = 1, BDAT_TAG_CAVEAT = 2, BDAT_TAG_ADDS_NOTHING = 4 };
 int bdat_merge_mod_tag(const char *id, char *out, size_t cap, int *flags);
 int bdat_merge_next_mod_tag(const char *id, char *out, size_t cap, int *flags);   // of the merges made for the next start
 
+// The lines of this run's merges (next 0) or of those made for the next start (next 1) that are about mod id, read
+// from their report files: values it won or lost by priority, its changes left out, its caveats, and whether it adds
+// nothing or is partly alike, each as "<file>: <line>" into out (*kinds: as bdat_merge_status, priority lines 0). The
+// count, up to cap. For the Mods tab's details under the mod's row.
+int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds, int cap);
+
 // Line i (from 0) of what the merges did this run, for the F1 Mods tab; 0 past the last. *kind: 0 a summary line,
 // 1 a change left out, 2 a caveat, 3 a mod that adds nothing (a higher one has all its changes), 4 a mod partly alike.
 int bdat_merge_status(int i, char *out, size_t cap, int *kind);

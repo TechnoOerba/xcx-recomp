@@ -1,6 +1,7 @@
-# The mod manager's tests on Linux and Windows: zip layouts, the layout planner, manual library entries and RAR
-# through xcx-unpack, built from deps/libarchive (tools/build_unpack.py). Windows builds with MSYS2 UCRT64 clang,
-# the mingw target the release's llvm-mingw has; Linux with the runner's clang. No game files.
+# The mod manager's tests on Linux and Windows: zip layouts, the layout planner, manual library entries, RAR
+# through xcx-unpack (built from deps/libarchive by tools/build_unpack.py) and the F1 Mods tab's library list (headless
+# ImGui). Windows builds with MSYS2 UCRT64 clang, the mingw target the release's llvm-mingw has; Linux with the
+# runner's clang. No game files.
 name: Mod manager tests
 
 on:
@@ -41,5 +42,6 @@ jobs:
         run: |
           export PATH="/c/msys64/ucrt64/bin:$PATH"
           python tests/mods_archive_test.py -v
+          python tests/mods_library_test.py -v
           # its game-side check compiles runtime/platform/linux.c, which needs more than the runner has
           if [ "$RUNNER_OS" = Windows ]; then python tests/mods_manager_test.py -v; fi

@@ -17,6 +17,11 @@ static ImVec2 mods_row_low[MOD_UI_MAX],mods_row_high[MOD_UI_MAX];
 static ImGuiID mods_button_id[4];static ImGuiWindow *mods_button_window[4];
 static ImVec2 mods_button_low[4],mods_button_high[4];static int mods_button_count;
 static ImVec2 mods_retry_low,mods_retry_high;static bool mods_retry_visible;
+// the library list as drawn (tests/mods_library_check.cpp): its rows' labels, its entries with parts (label, parts on
+// text, rect), the height of its scroll box and the most the box may take
+static char lib_rows[128][100];static int lib_row_count;
+static char lib_groups[16][100],lib_group_state[16][64];static ImVec2 lib_group_low[16],lib_group_high[16];static int lib_group_count;
+static float lib_box_height,lib_box_max;
 #endif
 static const char *status_name(int status) {
     switch(status) {case MOD_LOADED:return "Loaded";case MOD_DISABLED:return "Disabled";case MOD_INCOMPATIBLE:return "Incompatible";case MOD_FAULTED:return "Faulted";default:return "Starting";}
@@ -39,6 +44,9 @@ static void library_row(const ModLibRow &r,int i,int &index,char *picked,size_t 
     ImGui::PushID(r.id);
     if(focus)ImGui::SetKeyboardFocusHere();
     if(ImGui::Selectable(label,i==index)){snprintf(picked,cap,"%s",r.id);index=i;}
+#ifdef XCX_MOD_UI_TESTING
+    if(lib_row_count<128)snprintf(lib_rows[lib_row_count++],sizeof lib_rows[0],"%s",label);
+#endif
     UiTextId state=!r.installed?UI_MODS_STATE_AVAILABLE:r.update&&r.in_library?UI_MODS_STATE_UPDATE:r.enabled?UI_MODS_STATE_ON:UI_MODS_STATE_OFF;
     ImGui::TextDisabled("%s",menu_text(state));ImGui::Spacing();ImGui::PopID();
 }
@@ -102,6 +110,13 @@ static bool library(float scale,bool focus_first) {
             bool focus=focus_first&&holds_pick;focused|=focus;
             if(focus)ImGui::SetKeyboardFocusHere();
             bool open=ImGui::TreeNodeEx("##parts",ImGuiTreeNodeFlags_SpanAvailWidth|ImGuiTreeNodeFlags_NoTreePushOnOpen,"%s",group);
+#ifdef XCX_MOD_UI_TESTING
+            if(lib_group_count<16){
+                int g=lib_group_count++;snprintf(lib_groups[g],sizeof lib_groups[0],"%s",group);
+                snprintf(lib_group_state[g],sizeof lib_group_state[0],menu_text(UI_MODS_STATE_PARTS),on,parts);
+                lib_group_low[g]=ImGui::GetItemRectMin();lib_group_high[g]=ImGui::GetItemRectMax();
+            }
+#endif
             ImGui::TextDisabled(menu_text(UI_MODS_STATE_PARTS),on,parts);ImGui::Spacing();
             ImGui::PopID();ImGui::PopID();
             if(open){
@@ -112,6 +127,9 @@ static bool library(float scale,bool focus_first) {
             }
         }
         ImGui::EndChild();
+#ifdef XCX_MOD_UI_TESTING
+        lib_box_height=ImGui::GetItemRectSize().y;lib_box_max=rows_max;
+#endif
         ImGui::BeginDisabled(!idle);if(ImGui::Button(menu_text(UI_MODS_REFRESH)))modlib_refresh();ImGui::EndDisabled();
         ImGui::TableNextColumn();
         const ModLibRow &r=v.rows[index];ImGui::PushID(r.id);
@@ -147,7 +165,7 @@ static bool library(float scale,bool focus_first) {
 
 void mods_page(float scale,float bottom,bool focus_first) {
 #ifdef XCX_MOD_UI_TESTING
-    mods_widget_count=0;mods_retry_visible=false;mods_button_count=0;
+    mods_widget_count=0;mods_retry_visible=false;mods_button_count=0;lib_row_count=0;lib_group_count=0;
 #endif
     mod_ui_interaction(1);
     static ModSnapshot snapshot;mod_ui_snapshot(&snapshot);

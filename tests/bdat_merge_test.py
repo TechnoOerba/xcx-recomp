@@ -428,6 +428,17 @@ class BdatMerge(unittest.TestCase):
         self.assertEqual(keys(out[0]), keys(a[0]) + [0x9009])
         self.has(notes, 'left out: b:', "a's row layout is")
 
+    def test_the_same_row_layout_twice_loses_nothing(self):
+        g = game()
+        a, b = mod_of(g), mod_of(g)   # a whole copy and one of its pieces both remove the same row
+        del a[0].rows[2]
+        del b[0].rows[2]
+        edit(a[1], 0, 1, 7)
+        out, notes, s = self.merge(g, ('a', a), ('b', b))
+        self.assertEqual(keys(out[0]), keys(a[0]))
+        self.assertFalse([n for n in notes if n.startswith('left out')], notes)
+        self.assertEqual(s['leftout'], 0)
+
     def test_keys_stay_unique(self):
         g = game()
         a, b = mod_of(g), mod_of(g)

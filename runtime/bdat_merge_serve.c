@@ -25,7 +25,7 @@
 #include "sha256.h"
 #include "platform/platform.h"
 
-#define VERSION "bdat-merge 2"   // part of the cache name: a change to the merge rules makes new files
+#define VERSION "bdat-merge 3"   // part of the cache name: a change to the merge rules makes new files
 #define LOG_NOTES 20             // event lines in the log per merge; the report file has all of them
 #define STATUS_CAP 48
 #define STATUS_EVENTS 8          // left-out and caveat lines per merge in the Mods tab; the report has all

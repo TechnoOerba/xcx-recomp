@@ -523,6 +523,9 @@ static int merge_table(Job *j, int *P, int np, Buf *out, char *why, size_t why_c
         Change *c = j->ch[P[w]];
         if (!c->layout && !c->ndeleted) continue;
         if (owner < 0) owner = P[w];
+        else if (j->m[P[w]]->rc == j->m[owner]->rc &&
+                 !memcmp(c->pos, j->ch[owner]->pos, (size_t)j->m[owner]->rc * sizeof *c->pos))
+            continue;   // the same layout as the owner's (docs/bdat-merge.md, "Row layout"): nothing of it is left out
         else
             event(ev, LEFT_OUT, P[w], "table %08X: its removed or reordered rows are not used; %s's row layout is "
                   "(rows it adds are kept, at the end)", t->name, ev->mods[owner].name);

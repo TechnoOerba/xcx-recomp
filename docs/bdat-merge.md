@@ -44,7 +44,9 @@ Per table:
 - **Opaque changes.** If the top mod changing a table has an opaque change, its table is used whole and the other
   mods' changes to it are left out. A lower mod's opaque change is left out.
 - **Row layout.** Of the mods with a new row layout, the top one's is used: its rows, in its order. A lower mod's
-  removals and reordering are left out; the rows it added are kept, at the end.
+  removals and reordering are left out; the rows it added are kept, at the end. A lower mod whose layout is the same
+  as the top one's (the same game rows, in the same order, with its added rows in the same places) loses nothing,
+  like two mods setting a cell alike, and isn't reported.
 - **Removed rows.** A row the layout's mod removed stays removed, unless a higher mod edits it or another mod's
   changes refer to its key. Then it is kept, but only where it doesn't move any other row: a row put back in the
   middle would renumber every row after it, and other tables may point at rows by number. A row that can't be put

@@ -53,7 +53,7 @@ static int merge_lines(bool ahead) {
 // The game-file mods that are on, highest priority first as romfs-enabled.txt lists them (runtime/romfs_mods.c,
 // romfs_mods_priority), with Up and Down to change which one wins, and what the data table merges did this run
 // (runtime/bdat_merge_serve.c): a summary per file, then its changes left out (orange) and caveats (yellow). Shown
-// when two or more are on, or when a merge ran. The list file is read again once a second and after a change.
+// while any is on, or when a merge ran. The list file is read again once a second and after a change.
 // Once the list differs from what the game merged at start-up, Merge now merges it ahead (romfs_mods_premerge): its
 // lines and tags then show what the next start will have, and that start uses the files it made. "Merge
 // automatically" (bdat_merge_auto) has romfs_mods.c do that by itself after each change.
@@ -73,7 +73,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
     }
     bool tags_now=!stale||ahead==2;   // tags of the list as it is: this run's, or those merged ahead for it
     char line[320];int kind=0;bool merges=bdat_merge_status(0,line,sizeof line,&kind)!=0;
-    if(n<2&&!merges&&!stale)return;
+    if(n<1&&!merges&&!stale)return;   // one mod on stays listed, for its Turn off
     ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_PRIORITY));
     bool autom=romfs_mods_auto_merge()!=0;
     if(ImGui::Checkbox(menu_text(UI_MODS_MERGE_AUTO),&autom)){romfs_mods_set_auto_merge(autom);next=0;}
@@ -82,7 +82,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
     prio_auto_low=ImGui::GetItemRectMin();prio_auto_high=ImGui::GetItemRectMax();
 #endif
     if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",menu_text(UI_MODS_MERGE_AUTO_DESC));
-    if(n>=2){
+    if(n>=1){
         ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_PRIORITY_DESC));ImGui::PopTextWrapPos();
         int move=-1,off=-1;bool up=false;
         for(int i=0;i<n;++i){

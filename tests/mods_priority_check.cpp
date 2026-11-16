@@ -131,11 +131,16 @@ int main() {
     row("other", "Other mod");
     test_view.state = MODLIB_IDLE;
 
-    // one mod on and nothing merged: no section
+    // no mod on and nothing merged: no section
+    test_n = 0;
+    refresh();
+    verify(prio_count == 0, "no mod and no merge: no Mod priority section");
+
+    // one mod on (one without data tables, say) and nothing merged: still listed, with Turn off
     strcpy(test_ids[0], "whole");
     test_n = 1;
     refresh();
-    verify(prio_count == 0, "one mod and no merge: no Mod priority section");
+    verify(find('P', "Whole mod") >= 0 && prio_off_shown[0], "one mod on is listed, with Turn off");
 
     // three mods, merged with one of each kind of line
     strcpy(test_ids[0], "whole.piece");
@@ -228,11 +233,14 @@ int main() {
     verify(find('M', nullptr) < 0 && find('W', nullptr) >= 0,
            "merging automatically: no Merge now, the changed list shows as merging");
 
-    // nothing merged and one mod left, but the list changed since start-up: the section still says so
-    test_n = 1;
+    // nothing merged and no mod left, but the list changed since start-up: the section still says so
+    test_n = 0;
     test_nstatus = 0;
     refresh();
     verify(find('R', nullptr) >= 0 && find('P', nullptr) < 0, "a changed list shows the restart line on its own");
+    test_n = 1;
+    refresh();
+    verify(find('P', "Whole mod") >= 0, "the last mod left stays listed");
 
     ImGui::DestroyContext();
     if (!failures) printf("ok %d\n", checks);

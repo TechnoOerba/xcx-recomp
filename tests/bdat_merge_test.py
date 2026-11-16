@@ -196,11 +196,13 @@ def named(tables):
     t.name = mm3(b'T0')
     t.cols = [(mm3(b'Id'), t.cols[0][1]), (mm3(b'Count'), t.cols[1][1])] + t.cols[2:]
     t.rows[0] = (mm3(b'FirstRow'),) + tuple(t.rows[0][1:])
+    tables[3].name = mm3(b'DEADBEEF')   # a plain name that is 8 hex digits: not a table's hash, so its murmur3
     return tables
 
 
-# A table known only by its hash is <8 hex digits>.json, which Windows can't name a file.
-HASH_STEM = None if os.name == 'nt' else '<%08X>'
+# bdat-toolset names a table known only by its hash with the 8 hex digits, no brackets (toolset/src/convert/schema.rs,
+# AsFileName for Label); the reader also takes <8 hex digits>.
+HASH_STEM = '%08X'
 
 
 def to_json(t, plain=False):
@@ -513,11 +515,16 @@ class BdatMerge(unittest.TestCase):
         edit(part2, 2, 2, 22)
         edit(full[0], 1, 1, 11)                    # a full copy that has part 1's change too, and one of its own
         edit(full[0], 5, 3, 0.5)
+        part3 = g[3].copy()
+        edit(part3, 0, 1, 33)
         out, notes, s = self.merge_json(g, ('p1', None, [('T0', to_json(part1, plain=True))]),
-                                        ('p2', None, [(HASH_STEM % g[0].name if HASH_STEM else 'T0', to_json(part2))]),
+                                        ('p2', None, [(HASH_STEM % g[0].name, to_json(part2)),
+                                                      ('DEADBEEF', to_json(part3))]),
                                         ('all', full, []))
         t = out[0]
         self.assertEqual((t.rows[1][1], t.rows[2][2], t.rows[5][3]), (11, 22, 0.5))
+        self.assertEqual(out[3].rows[0][1], 33)
+        out[3] = g[3]
         self.assertEqual((s['priority'], s['leftout'], s['caveat'], s['file']), ('0', '0', '0', 'merged'))
         self.assertEqual([x.rows for x in out[1:]], [x.rows for x in g[1:]])
         out, notes, s = self.merge_json(g, ('p1', None, [('T0', to_json(part1, plain=True))]))

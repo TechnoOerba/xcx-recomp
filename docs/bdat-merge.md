@@ -66,7 +66,10 @@ Some mods ship only the tables they change, as [bdat-toolset](https://github.com
 `-f json`: one file per table, `bdat/<file>/<table>.json` (for example `bdat/common/ITM_BeaconList.json` for
 `bdat/common.bdat`, `bdat/us/common_ms/ITM_BeaconList_ms.json` for the text). Each holds the table's columns
 (`schema`: name and type) and its rows (`rows`: `$id` and a value per column). Names are either `<8 hex digits>`, the
-hash itself, or the plain name, which hashes (murmur3) to the game's; hash cells are written the same way.
+hash itself, or the plain name, which hashes (murmur3) to the game's; hash cells are written the same way. The file
+name is the table's: its plain name, or for a table known only by its hash the 8 hex digits without brackets
+(`1A2B3C4D.json`, as bdat-toolset writes it on every system); `<1A2B3C4D>.json` is read too. A file name of 8 hex
+digits is taken as the hash when the game's file has a table with that hash, else hashed like any plain name.
 
 A mod's JSON tables are its copy of just those tables: the mod's full file, or the game's when it has none, gives
 the rest, and the result is merged like any other copy. A cell a JSON table leaves as the game has it is not a
@@ -77,9 +80,6 @@ that mod is the only one.
 Only whole tables are read: a JSON file whose rows aren't numbered one after another (a table with only some of its
 rows), that isn't valid JSON, has a value that doesn't fit its column, or names a table the game's file doesn't have
 is left out and reported. If a mod has only JSON tables and none of it can be used, the game gets its own copy.
-
-Windows doesn't allow `<` and `>` in file names, so a table known only by its hash can't be named `<hash>.json`
-there; how bdat-toolset names such a table on Windows is still to be seen.
 
 ## The report
 

@@ -1249,6 +1249,21 @@ static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int
             continue;
         }
         uint32_t name = rd32(t.p + rd32(t.p + 40) + 1), j = 0;
+        // bdat-toolset names a table known only by its hash with the 8 hex digits, no brackets ("1A2B3C4D.json"):
+        // such a name is the hash when the game's file has that table (else, as any name, its murmur3)
+        int hex8 = strlen(js[x].stem) == 8;
+        uint32_t h = 0;
+        for (int i = 0; hex8 && i < 8; i++) {
+            int v = hexval((unsigned char)js[x].stem[i]);
+            hex8 = v >= 0;
+            h = h << 4 | (uint32_t)(v & 15);
+        }
+        for (uint32_t i = 0; hex8 && i < f.count; i++)
+            if (f.t[i].name == h) {
+                name = h;
+                wr32(t.p + rd32(t.p + 40) + 1, h);   // the name is in the string table only
+                break;
+            }
         while (j < f.count && f.t[j].name != name) j++;
         if (j == f.count) {
             event(ev, LEFT_OUT, k, "its table %s.json is not used (the game's file has no such table)", js[x].stem);

@@ -20,9 +20,9 @@ const char *mod_zip_unpack_romfs(const uint8_t *zip, size_t n, const char *dir) 
     return "not in this test";
 }
 // No game archive here: data tables two mods have are served from the top mod, as when they can't be merged.
-int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, char *const *ids, int n, char *out,
-                     size_t cap) {
-    (void)mount; (void)key; (void)hosts; (void)ids; (void)n; (void)out; (void)cap;
+#include "../runtime/bdat_merge.h"
+int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap) {
+    (void)mount; (void)key; (void)mods; (void)n; (void)out; (void)cap;
     return 0;
 }
 

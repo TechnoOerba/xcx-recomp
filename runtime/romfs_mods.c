@@ -13,10 +13,12 @@
 // manager switches mods by rewriting romfs-enabled.txt. A changed mod applies to files the game opens after that;
 // what it has already loaded stays until it loads the file again.
 //
-// Data tables (bdat/*.bdat) that two or more enabled mods have are merged instead (runtime/bdat_merge.c): the map
-// keeps every enabled mod's copy of such a file in priority order, and the first open after a rebuild asks
-// bdat_merge_serve for the merged file, which then stands in for the top mod's copy. When the files can't be merged,
-// the top mod's copy is served as before.
+// Data tables (bdat/*.bdat) are merged instead (runtime/bdat_merge.c, docs/bdat-merge.md) when two or more enabled
+// mods have the file, or when any has some of its tables as bdat-toolset JSON (bdat/<file>/<table>.json, as
+// bdat/common/ITM_BeaconList.json for bdat/common.bdat). The map keeps every enabled mod's copy of such files in
+// priority order, and the first open of the data table after a rebuild asks bdat_merge_serve for the merged file,
+// which then stands in for the top mod's copy. When it can't be merged, the top mod's copy is served as before (or,
+// with only JSON tables, the game's own copy).
 #include "romfs_mods.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -30,19 +32,26 @@
 #define MOD_CAP 32             // enabled mods
 #define CHECK_MS 500           // how often the list file is read again
 
-// key: lowercase game path without a leading '/'. host: the top mod's copy. For a data table that several mods
-// have: every copy and its mod's id (alts[0] == host), and the merged copy once asked for (merge 1; -1 not mergeable).
+// key: lowercase game path without a leading '/'. host: the top mod's copy. For a data table or a JSON table that
+// several mods have: every copy and its mod's id (alts[0] == host).
 typedef struct {
     char *key, *host;
     char **alts, **ids;
-    int nalts, merge;
-    char *merged;
+    int nalts;
 } ModFile;
+
+// A data table merged since the last rebuild: its key and the file served for it (NULL: none).
+typedef struct { char *key, *path; } Merged;
+#define MERGED_CAP 16
 
 static PlatMutex lock = PLAT_MUTEX_INIT;   // guards files / nfiles (shared for lookups)
 static ModFile *files;
 static size_t nfiles;
 static uint64_t files_gen;                 // counts rebuilds, so a merge made for an older map is not kept
+static char order[MOD_CAP][65];            // the enabled mods with a romfs folder, highest priority first
+static int norder;
+static Merged merged[MERGED_CAP];
+static int nmerged;
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -79,9 +88,14 @@ typedef struct {
     const char *id;                        // the mod being walked
 } Walk;
 
+static int ends(const char *s, const char *tail) {
+    size_t n = strlen(s), t = strlen(tail);
+    return n > t && !strcmp(s + n - t, tail);
+}
+
+// A data table (bdat/....bdat) or a table of one as bdat-toolset JSON (bdat/.../<table>.json).
 static int mergeable(const char *key) {
-    size_t n = strlen(key);
-    return !strncmp(key, "bdat/", 5) && n > 10 && !strcmp(key + n - 5, ".bdat");
+    return !strncmp(key, "bdat/", 5) && strlen(key) > 10 && (ends(key, ".bdat") || ends(key, ".json"));
 }
 
 // The mod id of a host path <root>/<id>/romfs/..., into id.
@@ -119,7 +133,6 @@ static void free_file(ModFile *f) {
     for (int i = 0; i < f->nalts; i++) free(f->ids[i]);
     free(f->alts);
     free(f->ids);
-    free(f->merged);
     free(f->key);
     free(f->host);
 }
@@ -179,7 +192,7 @@ static int valid_id(const char *id, size_t n) {
 static void rebuild(const char *list) {
     Walk w = {0};
     int mods = 0;
-    char line[256];
+    char line[256], ids[MOD_CAP][65];
     for (const char *p = list; *p && mods < MOD_CAP;) {
         const char *e = strchr(p, '\n');
         size_t n = e ? (size_t)(e - p) : strlen(p);
@@ -195,6 +208,7 @@ static void rebuild(const char *list) {
                     w.key[0] = 0;
                     w.id = line;
                     plat_fs_list(w.host, walk_entry, &w);
+                    memcpy(ids[mods], line, n + 1);
                     mods++;
                 } else {
                     rt_log("romfs mods: %s has no romfs folder", line);
@@ -213,7 +227,17 @@ static void rebuild(const char *list) {
     files = w.v;
     nfiles = w.n;
     files_gen++;
+    memcpy(order, ids, sizeof order);
+    norder = mods;
+    Merged gone[MERGED_CAP];
+    int ngone = nmerged;
+    memcpy(gone, merged, sizeof gone);
+    nmerged = 0;
     plat_mutex_unlock(&lock);
+    for (int i = 0; i < ngone; i++) {
+        free(gone[i].key);
+        free(gone[i].path);
+    }
     for (size_t i = 0; i < nold; i++) free_file(&old[i]);
     free(old);
     rt_log("romfs mods: %d mod%s, %zu file%s", mods, mods == 1 ? "" : "s", w.n, w.n == 1 ? "" : "s");
@@ -258,49 +282,112 @@ static ModFile *find(const char *key) {
     return NULL;
 }
 
+// The entries of key's JSON tables (bdat/common.bdat: bdat/common/<table>.json), as [*lo, *hi); under lock.
+static void json_range(const char *key, size_t *lo, size_t *hi) {
+    char prefix[1100];
+    size_t n = strlen(key) - 5;   // without ".bdat"
+    *lo = *hi = 0;
+    if (n + 2 > sizeof prefix) return;
+    memcpy(prefix, key, n);
+    prefix[n++] = '/';
+    prefix[n] = 0;
+    size_t a = 0, b = nfiles;
+    while (a < b) {
+        size_t mid = (a + b) / 2;
+        if (strcmp(files[mid].key, prefix) < 0) a = mid + 1;
+        else b = mid;
+    }
+    *lo = a;
+    while (a < nfiles && !strncmp(files[a].key, prefix, n)) a++;
+    *hi = a;
+}
+
+static int is_json_of(const char *key, size_t prefix) {   // directly in the table's folder, a .json
+    return !strchr(key + prefix, '/') && ends(key, ".json");
+}
+
+// Mod id's copy among an entry's copies, or NULL.
+static const char *copy_of(const ModFile *f, const char *id) {
+    char top[80];
+    if (f->nalts < 2) {
+        id_of(f->host, top, sizeof top);
+        return strcmp(top, id) ? NULL : f->host;
+    }
+    for (int i = 0; i < f->nalts; i++)
+        if (!strcmp(f->ids[i], id)) return f->alts[i];
+    return NULL;
+}
+
 // The host path of the mod file for key (lowercase, no leading '/'), copied to out; 0 when no enabled mod has it.
-// mount (the RomFS mount name; NULL when only asking whether a mod has the file) lets a data table that several
-// mods have be merged.
+// mount (the RomFS mount name; NULL when only asking whether a mod has the file) lets a data table be merged.
 static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     plat_mutex_lock_shared(&lock);
     ModFile *f = find(key);
-    if (!f) {
+    size_t lo = 0, hi = 0, nj = 0;
+    int table = !strncmp(key, "bdat/", 5) && ends(key, ".bdat");
+    if (table) {
+        json_range(key, &lo, &hi);
+        for (size_t i = lo; i < hi; i++) nj += (size_t)is_json_of(files[i].key, strlen(key) - 4);
+    }
+    if (!f && !nj) {
         plat_mutex_unlock_shared(&lock);
         return 0;
     }
-    int n = f->nalts;
-    if (!mount || !out || n < 2 || f->merge) {
-        const char *p = f->merge > 0 ? f->merged : f->host;
-        if (out && strlen(p) < cap) strcpy(out, p);
+    int merge = table && (nj || f->nalts >= 2);
+    if (!merge || !mount || !out) {
+        if (out && f && strlen(f->host) < cap) strcpy(out, f->host);
         plat_mutex_unlock_shared(&lock);
-        return 1;
+        return f || !out;
     }
-    // the first open of a data table several mods have: merged outside the map's lock, from copies of the paths
+    for (int i = 0; i < nmerged; i++)
+        if (!strcmp(merged[i].key, key)) {
+            int ok = merged[i].path && strlen(merged[i].path) < cap;
+            if (ok) strcpy(out, merged[i].path);
+            plat_mutex_unlock_shared(&lock);
+            return ok;
+        }
+    // the first open since the rebuild: merged outside the map's lock, from copies of the paths, per mod in priority
+    // order its full copy (if any) and its JSON tables
     uint64_t gen = files_gen;
-    char *alts[MOD_CAP], *ids[MOD_CAP];
-    if (n > MOD_CAP) n = MOD_CAP;
-    for (int i = 0; i < n; i++) {
-        alts[i] = strdup(f->alts[i]);
-        ids[i] = f->ids[i] ? strdup(f->ids[i]) : NULL;
+    BdatModFiles in[MOD_CAP];
+    char *mem[MOD_CAP * 66];
+    int nin = 0, nmem = 0, ok = 1;
+    size_t pre = strlen(key) - 4;
+    for (int m = 0; m < norder; m++) {
+        const char *full = f ? copy_of(f, order[m]) : NULL;
+        const char **json = NULL;
+        int njson = 0;
+        for (size_t i = lo; i < hi && njson < 64; i++) {
+            const char *p = is_json_of(files[i].key, pre) ? copy_of(&files[i], order[m]) : NULL;
+            if (!p) continue;
+            if (!json && !(json = calloc(64, sizeof *json))) ok = 0;
+            if (json) json[njson++] = mem[nmem++] = strdup(p);
+        }
+        if (!full && !njson) continue;
+        char *id = mem[nmem++] = strdup(order[m]), *copy = NULL;
+        if (full) copy = mem[nmem++] = strdup(full);
+        in[nin++] = (BdatModFiles){id, copy, json, njson};
     }
     plat_mutex_unlock_shared(&lock);
-    char merged[4096];
-    int ok = 1;
-    for (int i = 0; i < n; i++) ok &= alts[i] && ids[i];
-    ok = ok && bdat_merge_serve(mount, key, alts, ids, n, merged, sizeof merged);
-    const char *p = ok ? merged : alts[0];
-    if (p && strlen(p) < cap) strcpy(out, p);
+    for (int i = 0; i < nmem; i++) ok &= mem[i] != NULL;
+    char path[4096];
+    ok = ok && bdat_merge_serve(mount, key, in, nin, path, sizeof path);
+    const char *served = ok ? path : NULL;
+    for (int i = 0; !served && i < nin; i++) served = in[i].full;   // not merged: the top mod's whole copy
+    if (served && strlen(served) < cap) strcpy(out, served);
+    else served = NULL;
     plat_mutex_lock(&lock);
-    if (files_gen == gen && (f = find(key)) && !f->merge) {
-        f->merged = ok ? strdup(merged) : NULL;
-        f->merge = f->merged ? 1 : -1;
+    int known = 0;
+    for (int i = 0; i < nmerged; i++) known |= !strcmp(merged[i].key, key);
+    if (files_gen == gen && !known && nmerged < MERGED_CAP) {
+        merged[nmerged].key = strdup(key);
+        merged[nmerged].path = served ? strdup(served) : NULL;
+        if (merged[nmerged].key) nmerged++;
     }
     plat_mutex_unlock(&lock);
-    for (int i = 0; i < n; i++) {
-        free(alts[i]);
-        free(ids[i]);
-    }
-    return 1;
+    for (int i = 0; i < nin; i++) free((void *)in[i].json);
+    for (int i = 0; i < nmem; i++) free(mem[i]);
+    return served != NULL;
 }
 
 // key from a game path: drops a "<mount>:" prefix and leading slashes, lowercases.

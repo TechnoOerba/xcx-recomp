@@ -41,22 +41,43 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc >= 5 && !strcmp(argv[1], "merge")) {
-        BdatInput base, mods[64];
-        int n = argc - 4;
-        if (n > 64) return 1;
+        // name=file.bdat (the mod's full copy) or name=Table.json (one of its tables), any number per name; a mod's
+        // priority is where its name first appears
+        BdatInput base = {0}, mods[64] = {{0}};
+        static BdatJson json[64][256];
+        int n = 0;
         base.name = "game";
         if (!(base.data = slurp(argv[2], &base.size))) return 1;
-        for (int k = 0; k < n; k++) {
-            const char *p = argv[4 + k], *eq = strchr(p, '=');   // name=path, or the path as the name
-            mods[k].name = p;
-            if (eq) {
-                char *name = malloc((size_t)(eq - p) + 1);
-                memcpy(name, p, (size_t)(eq - p));
-                name[eq - p] = 0;
-                mods[k].name = name;
-                p = eq + 1;
+        for (int a = 4; a < argc; a++) {
+            const char *p = argv[a], *eq = strchr(p, '=');
+            if (!eq) return 1;
+            char *name = malloc((size_t)(eq - p) + 1);
+            memcpy(name, p, (size_t)(eq - p));
+            name[eq - p] = 0;
+            p = eq + 1;
+            int k = 0;
+            while (k < n && strcmp(mods[k].name, name)) k++;
+            if (k == n) {
+                if (n == 64) return 1;
+                mods[n].name = name;
+                mods[n].json = json[n];
+                n++;
             }
-            if (!(mods[k].data = slurp(p, &mods[k].size))) return 1;
+            size_t len = strlen(p), sz;
+            const uint8_t *data = slurp(p, &sz);
+            if (!data) return 1;
+            if (len > 5 && !strcmp(p + len - 5, ".json")) {
+                if (mods[k].njson == 256) return 1;
+                const char *slash = strrchr(p, '/'), *back = strrchr(p, '\\');
+                const char *file = slash && (!back || slash > back) ? slash + 1 : back ? back + 1 : p;
+                char *stem = malloc(strlen(file) - 4);
+                memcpy(stem, file, strlen(file) - 5);
+                stem[strlen(file) - 5] = 0;
+                json[k][mods[k].njson++] = (BdatJson){stem, data, sz};
+            } else {
+                mods[k].data = data;
+                mods[k].size = sz;
+            }
         }
         size_t out_n = 0;
         BdatSummary s;

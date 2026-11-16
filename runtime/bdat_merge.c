@@ -761,6 +761,524 @@ done:
     return ok;
 }
 
+// ---- bdat-toolset JSON tables
+//
+// Some mods ship only the tables they change, as bdat-toolset writes them with -f json, one file per table under
+// bdat/<file>/<table>.json: {"schema": [{"name": n, "type": t}, ...], "rows": [{"$id": i, n: value, ...}, ...]}.
+// A name is "<8 hex digits>" (the hash itself) or the plain name, which hashes with murmur3 (seed 0) to the game's.
+// Hash cells are written the same way, strings as JSON strings, numbers as JSON numbers. Only whole tables are read
+// (rows numbered one after another); such a table is the mod's copy of that table, and the game's copy (or the mod's
+// full file) gives the rest. The reader is strict JSON (RFC 8259), with no NaN or Infinity and only valid UTF-8.
+
+static uint32_t mm3(const uint8_t *d, size_t n) {
+    uint32_t h = 0, k;
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        k = rd32(d + i) * 0xcc9e2d51u;
+        k = (k << 15 | k >> 17) * 0x1b873593u;
+        h ^= k;
+        h = (h << 13 | h >> 19) * 5 + 0xe6546b64u;
+    }
+    k = 0;
+    switch (n & 3) {
+    case 3: k ^= (uint32_t)d[i + 2] << 16; /* fall through */
+    case 2: k ^= (uint32_t)d[i + 1] << 8; /* fall through */
+    case 1:
+        k ^= d[i];
+        k *= 0xcc9e2d51u;
+        k = (k << 15 | k >> 17) * 0x1b873593u;
+        h ^= k;
+    }
+    h ^= (uint32_t)n;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    return h ^ (h >> 16);
+}
+
+static int hexval(int c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+// A name as bdat-toolset writes it: "<8 hex digits>" is the hash itself, anything else is hashed.
+static uint32_t hashname(const char *s, size_t n) {
+    if (n == 10 && s[0] == '<' && s[9] == '>') {
+        uint32_t v = 0;
+        int ok = 1;
+        for (int i = 1; i < 9; i++) {
+            int x = hexval((unsigned char)s[i]);
+            ok &= x >= 0;
+            v = v << 4 | (uint32_t)(x & 15);
+        }
+        if (ok) return v;
+    }
+    return mm3((const uint8_t *)s, n);
+}
+
+enum { J_NULL, J_FALSE, J_TRUE, J_NUM, J_STR, J_ARR, J_OBJ };
+
+typedef struct JNode JNode;
+struct JNode {
+    uint8_t type, isint;
+    int64_t i;            // J_NUM with isint
+    double d;             // J_NUM
+    char *s;              // J_STR: UTF-8, NUL-terminated (may hold NULs: len counts them)
+    size_t len;           // J_STR length; J_ARR / J_OBJ item count
+    JNode **items;        // J_ARR values; J_OBJ values
+    char **keys;          // J_OBJ keys
+    size_t *klen;
+};
+
+typedef struct { const char *p, *end; int depth, bad; } JParse;
+
+static void jfree(JNode *n) {
+    if (!n) return;
+    for (size_t i = 0; (n->type == J_ARR || n->type == J_OBJ) && i < n->len; i++) {
+        jfree(n->items[i]);
+        if (n->keys) free(n->keys[i]);
+    }
+    free(n->items);
+    free(n->keys);
+    free(n->klen);
+    free(n->s);
+    free(n);
+}
+
+static void jws(JParse *j) {
+    while (j->p < j->end && (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r')) j->p++;
+}
+
+static int put_utf8(Buf *b, uint32_t c) {
+    uint8_t u[4];
+    size_t n;
+    if (c < 0x80) u[0] = (uint8_t)c, n = 1;
+    else if (c < 0x800) u[0] = (uint8_t)(0xc0 | c >> 6), u[1] = (uint8_t)(0x80 | (c & 63)), n = 2;
+    else if (c < 0x10000)
+        u[0] = (uint8_t)(0xe0 | c >> 12), u[1] = (uint8_t)(0x80 | (c >> 6 & 63)), u[2] = (uint8_t)(0x80 | (c & 63)), n = 3;
+    else
+        u[0] = (uint8_t)(0xf0 | c >> 18), u[1] = (uint8_t)(0x80 | (c >> 12 & 63)), u[2] = (uint8_t)(0x80 | (c >> 6 & 63)),
+        u[3] = (uint8_t)(0x80 | (c & 63)), n = 4;
+    return put(b, u, n);
+}
+
+// A JSON string at j->p (on the opening quote) into *s (malloc'd, NUL-terminated) and *len.
+static int jstring(JParse *j, char **s, size_t *len) {
+    Buf b = {0};
+    j->p++;
+    while (j->p < j->end && *j->p != '"') {
+        unsigned char c = (unsigned char)*j->p;
+        if (c < 0x20) goto bad;
+        if (c != '\\') {
+            if (!put(&b, j->p++, 1)) goto bad;
+            continue;
+        }
+        if (++j->p >= j->end) goto bad;
+        char e = *j->p++;
+        const char *simple = strchr("\"\\/bfnrt", e);
+        if (simple && e) {
+            static const char out[] = "\"\\/\b\f\n\r\t";
+            if (!put(&b, &out[simple - "\"\\/bfnrt"], 1)) goto bad;
+            continue;
+        }
+        if (e != 'u' || j->end - j->p < 4) goto bad;
+        uint32_t u = 0;
+        for (int i = 0; i < 4; i++) {
+            int x = hexval((unsigned char)j->p[i]);
+            if (x < 0) goto bad;
+            u = u << 4 | (uint32_t)x;
+        }
+        j->p += 4;
+        if (u >= 0xdc00 && u < 0xe000) goto bad;   // half a surrogate pair is not text
+        if (u >= 0xd800 && u < 0xdc00) {
+            if (j->end - j->p < 6 || j->p[0] != '\\' || j->p[1] != 'u') goto bad;
+            uint32_t lo = 0;
+            for (int i = 0; i < 4; i++) {
+                int x = hexval((unsigned char)j->p[2 + i]);
+                if (x < 0) goto bad;
+                lo = lo << 4 | (uint32_t)x;
+            }
+            if (lo < 0xdc00 || lo >= 0xe000) goto bad;
+            j->p += 6;
+            u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00);
+        }
+        if (!put_utf8(&b, u)) goto bad;
+    }
+    if (j->p >= j->end || !put(&b, "", 1)) goto bad;
+    j->p++;
+    *len = b.n - 1;
+    *s = (char *)b.p;
+    return 1;
+bad:
+    free(b.p);
+    return 0;
+}
+
+static JNode *jvalue(JParse *j);
+
+static int jadd(JNode *n, JNode *v, char *key, size_t klen) {
+    if ((n->len & (n->len - 1)) == 0) {   // grow at 0, 1, 2, 4, 8 ...
+        size_t cap = n->len ? n->len * 2 : 1;
+        JNode **it = realloc(n->items, cap * sizeof *it);
+        if (!it) return 0;
+        n->items = it;
+        if (n->type == J_OBJ) {
+            char **k = realloc(n->keys, cap * sizeof *k);
+            if (!k) return 0;
+            n->keys = k;
+            size_t *kl = realloc(n->klen, cap * sizeof *kl);
+            if (!kl) return 0;
+            n->klen = kl;
+        }
+    }
+    n->items[n->len] = v;
+    if (n->type == J_OBJ) {
+        n->keys[n->len] = key;
+        n->klen[n->len] = klen;
+    }
+    n->len++;
+    return 1;
+}
+
+static JNode *jvalue(JParse *j) {
+    jws(j);
+    if (j->p >= j->end || ++j->depth > 500) return NULL;
+    JNode *n = calloc(1, sizeof *n);
+    if (!n) return NULL;
+    char c = *j->p;
+    if (c == '{' || c == '[') {
+        n->type = c == '{' ? J_OBJ : J_ARR;
+        j->p++;
+        jws(j);
+        if (j->p < j->end && *j->p == (c == '{' ? '}' : ']')) {
+            j->p++;
+            j->depth--;
+            return n;
+        }
+        for (;;) {
+            char *key = NULL;
+            size_t klen = 0;
+            if (n->type == J_OBJ) {
+                jws(j);
+                if (j->p >= j->end || *j->p != '"' || !jstring(j, &key, &klen)) goto bad;
+                jws(j);
+                if (j->p >= j->end || *j->p != ':') {
+                    free(key);
+                    goto bad;
+                }
+                j->p++;
+            }
+            JNode *v = jvalue(j);
+            if (!v || !jadd(n, v, key, klen)) {
+                jfree(v);
+                free(key);
+                goto bad;
+            }
+            jws(j);
+            if (j->p < j->end && *j->p == ',') {
+                j->p++;
+                continue;
+            }
+            if (j->p < j->end && *j->p == (c == '{' ? '}' : ']')) {
+                j->p++;
+                break;
+            }
+            goto bad;
+        }
+    } else if (c == '"') {
+        n->type = J_STR;
+        if (!jstring(j, &n->s, &n->len)) goto bad;
+    } else if (j->end - j->p >= 4 && !memcmp(j->p, "true", 4)) {
+        n->type = J_TRUE;
+        j->p += 4;
+    } else if (j->end - j->p >= 5 && !memcmp(j->p, "false", 5)) {
+        n->type = J_FALSE;
+        j->p += 5;
+    } else if (j->end - j->p >= 4 && !memcmp(j->p, "null", 4)) {
+        n->type = J_NULL;
+        j->p += 4;
+    } else {
+        // -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
+        const char *s = j->p, *q = s;
+        n->type = J_NUM;
+        n->isint = 1;
+        if (q < j->end && *q == '-') q++;
+        if (q >= j->end || *q < '0' || *q > '9') goto bad;
+        if (*q == '0') q++;
+        else
+            while (q < j->end && *q >= '0' && *q <= '9') q++;
+        if (q < j->end && *q == '.') {
+            n->isint = 0;
+            if (++q >= j->end || *q < '0' || *q > '9') goto bad;
+            while (q < j->end && *q >= '0' && *q <= '9') q++;
+        }
+        if (q < j->end && (*q == 'e' || *q == 'E')) {
+            n->isint = 0;
+            if (++q < j->end && (*q == '+' || *q == '-')) q++;
+            if (q >= j->end || *q < '0' || *q > '9') goto bad;
+            while (q < j->end && *q >= '0' && *q <= '9') q++;
+        }
+        char tmp[400];
+        size_t len = (size_t)(q - s);
+        if (len >= sizeof tmp) goto bad;
+        memcpy(tmp, s, len);
+        tmp[len] = 0;
+        n->d = strtod(tmp, NULL);
+        if (n->isint) {
+            // an integer past 64 bits is still an integer, just out of every column's range
+            int neg = tmp[0] == '-';
+            uint64_t v = 0;
+            int big = 0;
+            for (const char *x = tmp + neg; *x; x++) {
+                if (v > (UINT64_MAX - 9) / 10) big = 1;
+                v = v * 10 + (uint64_t)(*x - '0');
+            }
+            if (big || v > (uint64_t)INT64_MAX) n->i = neg ? INT64_MIN : INT64_MAX, n->isint = 2;   // out of range
+            else n->i = neg ? -(int64_t)v : (int64_t)v;
+        }
+        j->p = q;
+    }
+    j->depth--;
+    return n;
+bad:
+    jfree(n);
+    return NULL;
+}
+
+// Valid UTF-8, without overlong forms or surrogates (as Python's decoder takes it).
+static int utf8_ok(const uint8_t *p, size_t n) {
+    for (size_t i = 0; i < n;) {
+        uint8_t c = p[i];
+        size_t k = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
+        if (!k || i + k > n) return 0;
+        uint32_t u = k == 1 ? c : k == 2 ? c & 31u : k == 3 ? c & 15u : c & 7u;
+        for (size_t x = 1; x < k; x++) {
+            if ((p[i + x] & 0xc0) != 0x80) return 0;
+            u = u << 6 | (p[i + x] & 63u);
+        }
+        if ((k == 2 && u < 0x80) || (k == 3 && u < 0x800) || (k == 4 && (u < 0x10000 || u > 0x10ffff)) ||
+            (u >= 0xd800 && u < 0xe000))
+            return 0;
+        i += k;
+    }
+    return 1;
+}
+
+// The value of key in object o (the last one when a key repeats, as Python's json does), or NULL.
+static const JNode *jget(const JNode *o, const char *key, size_t klen) {
+    if (!o || o->type != J_OBJ) return NULL;
+    for (size_t i = o->len; i-- > 0;)
+        if (o->klen[i] == klen && !memcmp(o->keys[i], key, klen)) return o->items[i];
+    return NULL;
+}
+
+// A JSON table as BDAT table bytes in out (the writer's layout), or 0 with the reason in why.
+static int json_table(const uint8_t *data, size_t size, const char *stem, Buf *out, char *why, size_t cap) {
+    JNode *root = NULL;
+    Buf raw = {0};
+    Src *from = NULL;
+    Tab t = {0};
+    int ok = 0;
+    uint32_t cc = 0, rc = 0;
+    if (!utf8_ok(data, size)) goto notjson;
+    JParse jp = {(const char *)data, (const char *)data + size, 0, 0};
+    root = jvalue(&jp);
+    jws(&jp);
+    if (!root || jp.p != jp.end) goto notjson;
+    const JNode *schema = jget(root, "schema", 6), *rows = jget(root, "rows", 4);
+    if (!schema || schema->type != J_ARR || !rows || rows->type != J_ARR) {
+        snprintf(why, cap, "no schema or rows");
+        goto done;
+    }
+    cc = (uint32_t)schema->len;
+    rc = (uint32_t)rows->len;
+    if (!cc || !rc || cc > 4096 || rows->len > 0xffffffu) {
+        snprintf(why, cap, "no columns or no rows");
+        goto done;
+    }
+    // a table of the writer's layout with each string written where it is met: read_table then write_table give
+    // the canonical bytes
+    uint8_t types[4096];
+    uint32_t names[4096], rl = 0;
+    for (uint32_t c = 0; c < cc; c++) {
+        const JNode *col = schema->items[c], *nm = jget(col, "name", 4), *ty = jget(col, "type", 4);
+        if (!nm || nm->type != J_STR || !ty || ty->type != J_NUM || ty->isint != 1 || ty->i < 1 || ty->i > 13) {
+            snprintf(why, cap, "column %u: no name or no known type", c);
+            goto done;
+        }
+        types[c] = (uint8_t)ty->i;
+        names[c] = hashname(nm->s, nm->len);
+        rl += TSIZE[types[c]];
+    }
+    Buf st = {0}, rb = {0};
+    uint8_t head[9] = {0};
+    wr32(head + 1, hashname(stem, strlen(stem)));
+    if (!put(&st, head, 9)) goto oom_st;
+    for (uint32_t c = 0; c < cc; c++) {
+        uint8_t h[4];
+        wr32(h, names[c]);
+        if (!put(&st, h, 4)) goto oom_st;
+    }
+    if (!put(&rb, NULL, (size_t)rl * rc)) goto oom_st;
+    int64_t first = 0;
+    for (uint32_t r = 0; r < rc; r++) {
+        const JNode *row = rows->items[r], *id = jget(row, "$id", 3);
+        if (!row || row->type != J_OBJ || !id || id->type != J_NUM || id->isint != 1) {
+            snprintf(why, cap, "row %u: no $id", r);
+            goto fail_st;
+        }
+        if (!r) first = id->i;
+        if (id->i != first + r || id->i < 0 || id->i > 0xffffffffll) {
+            snprintf(why, cap, "its rows are not numbered one after another (a table with only some rows is not read)");
+            goto fail_st;
+        }
+        uint8_t *d = rb.p + (size_t)r * rl;
+        for (uint32_t c = 0; c < cc; c++) {
+            const JNode *nm = jget(schema->items[c], "name", 4), *v = jget(row, nm->s, nm->len);
+            uint8_t ty = types[c];
+            if (!v) {
+                snprintf(why, cap, "row %lld: no value for column %u", (long long)id->i, c);
+                goto fail_st;
+            }
+            int good = 1;
+            if (IS_STR(ty)) {
+                good = v->type == J_STR && !memchr(v->s, 0, v->len);
+                if (good) {
+                    if (st.n + v->len + 1 > 0xffffffffu) good = 0;
+                    else {
+                        wr32(d, (uint32_t)st.n);
+                        if (!put(&st, v->s, v->len + 1)) goto oom_st;
+                    }
+                }
+            } else if (ty == 8) {
+                double x = v->type != J_NUM ? 0 : v->isint == 1 ? (double)v->i : v->d;
+                good = v->type == J_NUM && x >= -3.4028234663852886e38 && x <= 3.4028234663852886e38;
+                float f = (float)x;
+                memcpy(d, &f, 4);
+            } else if (ty == 9 && v->type == J_STR) {
+                wr32(d, hashname(v->s, v->len));
+            } else if (v->type != J_NUM || v->isint != 1) {
+                good = 0;
+            } else {
+                int64_t x = v->i;
+                int64_t lo = ty == 4 ? -128 : ty == 5 ? -32768 : ty == 6 ? INT32_MIN : 0;
+                int64_t hi = ty == 4 ? 127 : ty == 5 ? 32767 : ty == 6 ? INT32_MAX : TSIZE[ty] == 1 ? 255 :
+                             TSIZE[ty] == 2 ? 65535 : 0xffffffffll;
+                good = x >= lo && x <= hi;
+                uint32_t u = (uint32_t)x;
+                memcpy(d, &u, TSIZE[ty]);
+            }
+            if (!good) {
+                snprintf(why, cap, "row %lld column %u: not a value of its type", (long long)id->i, c);
+                goto fail_st;
+            }
+            d += TSIZE[ty];
+        }
+    }
+    uint32_t co = 48, ro = co + 3 * cc;
+    uint64_t so = (uint64_t)ro + (uint64_t)rl * rc;
+    uint8_t h[48];
+    memcpy(h, "BDAT", 4);
+    uint32_t f[11] = {0x3004, cc, rc, (uint32_t)first, 0, co, ro, ro, rl, (uint32_t)so, (uint32_t)st.n};
+    if (so + st.n > 0xffffffffu) goto oom_st;
+    for (int i = 0; i < 11; i++) wr32(h + 4 + 4 * i, f[i]);
+    if (!put(&raw, h, 48)) goto oom_st;
+    for (uint32_t c = 0; c < cc; c++) {
+        uint8_t col[3] = {types[c]};
+        wr16(col + 1, (uint16_t)(9 + 4 * c));
+        if (!put(&raw, col, 3)) goto oom_st;
+    }
+    if (!put(&raw, rb.p, rb.n) || !put(&raw, st.p, st.n)) goto oom_st;
+    free(st.p);
+    free(rb.p);
+    if (!read_table(raw.p, (uint32_t)raw.n, &t)) {
+        snprintf(why, cap, "no table can be made of it");
+        goto done;
+    }
+    const Tab *src[1] = {&t};
+    if (!(from = malloc(((size_t)rc * cc + 1) * sizeof *from))) goto oom;
+    for (uint32_t r = 0; r < rc; r++)
+        for (uint32_t c = 0; c < cc; c++) from[(size_t)r * cc + c] = (Src){r, 0};
+    if (!write_table(out, &t, src, from, rc, 0)) goto oom;
+    ok = 1;
+    goto done;
+fail_st:
+    free(st.p);
+    free(rb.p);
+    goto done;
+oom_st:
+    free(st.p);
+    free(rb.p);
+oom:
+    snprintf(why, cap, "out of memory");
+    goto done;
+notjson:
+    snprintf(why, cap, "not valid JSON");
+done:
+    jfree(root);
+    free(raw.p);
+    free(from);
+    free(t.off);
+    return ok;
+}
+
+static int by_stem(const void *a, const void *b) {
+    return strcmp(((const BdatJson *)a)->stem, ((const BdatJson *)b)->stem);
+}
+
+// file (the mod's full copy, or the game's) with the mod's JSON tables in place of those tables: a new file in *out.
+static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int k, Events *ev, Buf *out, char *why,
+                      size_t cap) {
+    File f;
+    char r[300];
+    if (!read_file(file, size, &f, r, sizeof r)) {
+        snprintf(why, cap, "%s", r);
+        return 0;
+    }
+    BdatJson *js = malloc((size_t)in->njson * sizeof *js);
+    Buf *tabs = calloc(f.count, sizeof *tabs);
+    int ok = 0;
+    if (!js || !tabs) goto done;
+    memcpy(js, in->json, (size_t)in->njson * sizeof *js);
+    qsort(js, (size_t)in->njson, sizeof *js, by_stem);
+    for (int x = 0; x < in->njson; x++) {
+        Buf t = {0};
+        if (!json_table(js[x].data, js[x].size, js[x].stem, &t, r, sizeof r)) {
+            event(ev, LEFT_OUT, k, "its table %s.json is not used (%s)", js[x].stem, r);
+            free(t.p);
+            continue;
+        }
+        uint32_t name = rd32(t.p + rd32(t.p + 40) + 1), j = 0;
+        while (j < f.count && f.t[j].name != name) j++;
+        if (j == f.count) {
+            event(ev, LEFT_OUT, k, "its table %s.json is not used (the game's file has no such table)", js[x].stem);
+            free(t.p);
+            continue;
+        }
+        free(tabs[j].p);
+        tabs[j] = t;
+    }
+    size_t head = 16 + 4 * (size_t)f.count;
+    if (!put(out, NULL, head)) goto done;
+    memcpy(out->p, "BDAT", 4);
+    wr32(out->p + 4, 0x01001004);
+    wr32(out->p + 8, f.count);
+    for (uint32_t j = 0; j < f.count; j++) {
+        wr32(out->p + 16 + 4 * j, (uint32_t)out->n);
+        if (tabs[j].p ? !put(out, tabs[j].p, tabs[j].n) : !put(out, f.t[j].p, f.t[j].len)) goto done;
+    }
+    if (out->n > 0xffffffffu) goto done;
+    wr32(out->p + 12, (uint32_t)out->n);
+    ok = 1;
+done:
+    if (!ok && !why[0]) snprintf(why, cap, "out of memory");
+    for (uint32_t j = 0; tabs && j < f.count; j++) free(tabs[j].p);
+    free(tabs);
+    free(js);
+    file_free(&f);
+    return ok;
+}
+
 // The hash values a mod's changes put in cells other than keys: what its added and edited rows refer to.
 static int refs_of(const File *bf, const File *mf, const Change *ch, Set *out) {
     for (uint32_t j = 0; j < bf->count; j++) {
@@ -796,6 +1314,8 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     int live[MAX_MODS], nlive = 0;
     Change *ch[MAX_MODS] = {0};
     Set refs[MAX_MODS] = {{0}};
+    BdatInput in[MAX_MODS];          // the mods as merged: with their JSON tables put in
+    Buf made[MAX_MODS] = {{0}};      // the files made for that
     Buf body = {0};
     uint32_t *offs = NULL;
     uint8_t *result = NULL;
@@ -811,8 +1331,20 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
         return NULL;
     }
     for (int k = 0; k < n; k++) {
-        if (!read_file(mods[k].data, mods[k].size, &mf[k], r, sizeof r)) {
-            event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", r);
+        in[k] = mods[k];
+        if (mods[k].njson) {
+            // the mod's JSON tables in its full copy, or in the game's when it has none
+            r[0] = 0;
+            if (!apply_json(mods[k].data ? mods[k].data : base->data, mods[k].data ? mods[k].size : base->size,
+                            &mods[k], k, &ev, &made[k], r, sizeof r)) {
+                event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", r);
+                continue;
+            }
+            in[k].data = made[k].p;
+            in[k].size = made[k].n;
+        }
+        if (!in[k].data || !read_file(in[k].data, in[k].size, &mf[k], r, sizeof r)) {
+            event(&ev, LEFT_OUT, k, "its copy can't be read (%s)", in[k].data ? r : "none given");
             continue;
         }
         int same = mf[k].count == bf.count;
@@ -829,7 +1361,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
                       "and is used whole", mods[k].name);
             s.file_mode = BDAT_FILE_WHOLE;
             s.file_mod = k;
-            if (!(result = copy_of(&mods[k], out_n))) snprintf(why, why_cap, "out of memory");
+            if (!(result = copy_of(&in[k], out_n))) snprintf(why, why_cap, "out of memory");
             goto done;
         }
         event(&ev, LEFT_OUT, k, "its changes to this file are not used: its copy has another list of tables");
@@ -841,7 +1373,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     if (nlive == 1) {
         s.file_mode = BDAT_FILE_COPIED;
         s.file_mod = live[0];
-        if (!(result = copy_of(&mods[live[0]], out_n))) snprintf(why, why_cap, "out of memory");
+        if (!(result = copy_of(&in[live[0]], out_n))) snprintf(why, why_cap, "out of memory");
         goto done;
     }
     // every mod's change to every table, and what its changes refer to
@@ -926,6 +1458,7 @@ done:
         free(ch[k]);
         free(refs[k].v);
         file_free(&mf[k]);
+        free(made[k].p);
     }
     file_free(&bf);
     free(offs);

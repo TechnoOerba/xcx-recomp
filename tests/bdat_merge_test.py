@@ -165,6 +165,59 @@ def engine():
     return ('c', clang()) if clang() else None
 
 
+
+
+def mm3(d):
+    """murmur3 (32 bits, seed 0): bdat-toolset's hash of plain names."""
+    c1, c2, h, n, M = 0xcc9e2d51, 0x1b873593, 0, len(d), 0xffffffff
+    rot = lambda x, k: ((x << k) | (x >> (32 - k))) & M
+    for i in range(0, n - n % 4, 4):
+        k = rot(struct.unpack_from('<I', d, i)[0] * c1 & M, 15) * c2 & M
+        h = (rot(h ^ k, 13) * 5 + 0xe6546b64) & M
+    k = 0
+    for j, b in enumerate(d[n - n % 4:]):
+        k |= b << (8 * j)
+    if n % 4:
+        h ^= rot(k * c1 & M, 15) * c2 & M
+    h ^= n
+    h ^= h >> 16
+    h = h * 0x85ebca6b & M
+    h ^= h >> 13
+    h = h * 0xc2b2ae35 & M
+    return h ^ (h >> 16)
+
+
+PLAIN = {mm3(s.encode()): s for s in ('Id', 'Count', 'FirstRow', 'T0')}   # made-up names and their hashes
+
+
+def named(tables):
+    """The made-up game with table 0, its first two columns and its first row's key named by PLAIN's hashes."""
+    t = tables[0]
+    t.name = mm3(b'T0')
+    t.cols = [(mm3(b'Id'), t.cols[0][1]), (mm3(b'Count'), t.cols[1][1])] + t.cols[2:]
+    t.rows[0] = (mm3(b'FirstRow'),) + tuple(t.rows[0][1:])
+    return tables
+
+
+# A table known only by its hash is <8 hex digits>.json, which Windows can't name a file.
+HASH_STEM = None if os.name == 'nt' else '<%08X>'
+
+
+def to_json(t, plain=False):
+    """Table t as bdat-toolset writes it with -f json; plain: the names and hash cells PLAIN knows as plain text."""
+    import json as _json
+    name = lambda h: PLAIN[h] if plain and h in PLAIN else '<%08X>' % h
+    cols = [name(h) for h, _ in t.cols]
+    rows = []
+    for i, r in enumerate(t.rows):
+        row = {'$id': t.base + i}
+        for n, (_, ty), v in zip(cols, t.cols, r):
+            row[n] = name(v) if ty == 9 else v.decode('utf-8') if ty in (7, 11) else v
+        rows.append(row)
+    return _json.dumps({'schema': [{'name': n, 'type': ty} for n, (_, ty) in zip(cols, t.cols)], 'rows': rows},
+                       indent=2)
+
+
 @unittest.skipUnless(engine(), 'needs clang (MSYS2 UCRT64, or XCX_CLANG)')
 class BdatMerge(unittest.TestCase):
     @classmethod
@@ -432,6 +485,74 @@ class BdatMerge(unittest.TestCase):
                 self.has(notes, 'left out: b:', "can't be read")
         _, notes, lines = self.merge(g, ('a', good[:100]), ('b', good[:50]), expect=2)
         self.assertTrue(any(x.startswith('unmergeable') for x in lines), lines)
+
+    # ---- bdat-toolset JSON tables
+
+    def merge_json(self, base, *mods, expect=0):
+        """mods: (name, tables or None, {table index: json text}) highest priority first."""
+        args = self.cmd + ['merge', self.put('game.bdat', write_file(base)), str(self.dir / 'out.bdat')]
+        for name, tables, jsons in mods:
+            if tables is not None:
+                args.append('%s=%s' % (name, self.put(name + '.bdat', write_file(tables))))
+            for stem, text in jsons:
+                d = self.dir / name
+                d.mkdir(exist_ok=True)
+                args.append('%s=%s' % (name, self.put('%s/%s.json' % (name, stem), text.encode('utf-8')
+                                                      if isinstance(text, str) else text)))
+        r = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(r.returncode, expect, r.stdout + r.stderr)
+        lines = r.stdout.splitlines()
+        notes = [x[5:] for x in lines if x.startswith('note ')]
+        summary = dict(kv.split('=', 1) for kv in next(x for x in lines if x.startswith('summary ')).split()[1:])
+        return read_file((self.dir / 'out.bdat').read_bytes()), notes, summary
+
+    def test_json_tables_merge_like_tables(self):
+        g = named(game())
+        part1, part2, full = g[0].copy(), g[0].copy(), mod_of(g)
+        edit(part1, 1, 1, 11)                      # two parts of one mod, other cells of the same table
+        edit(part2, 2, 2, 22)
+        edit(full[0], 1, 1, 11)                    # a full copy that has part 1's change too, and one of its own
+        edit(full[0], 5, 3, 0.5)
+        out, notes, s = self.merge_json(g, ('p1', None, [('T0', to_json(part1, plain=True))]),
+                                        ('p2', None, [(HASH_STEM % g[0].name if HASH_STEM else 'T0', to_json(part2))]),
+                                        ('all', full, []))
+        t = out[0]
+        self.assertEqual((t.rows[1][1], t.rows[2][2], t.rows[5][3]), (11, 22, 0.5))
+        self.assertEqual((s['priority'], s['leftout'], s['caveat'], s['file']), ('0', '0', '0', 'merged'))
+        self.assertEqual([x.rows for x in out[1:]], [x.rows for x in g[1:]])
+        out, notes, s = self.merge_json(g, ('p1', None, [('T0', to_json(part1, plain=True))]))
+        self.assertEqual(s['file'], 'copied:p1')             # one JSON mod alone: the game's file with its table
+        self.assertEqual(out[0].rows, part1.rows)
+        self.assertIn(write_table(g[1]), (self.dir / 'out.bdat').read_bytes())
+
+    def test_json_table_with_no_change_is_no_change(self):
+        g = named(game())
+        a = mod_of(g)
+        edit(a[0], 1, 1, 9)
+        out, notes, s = self.merge_json(g, ('p', None, [('T0', to_json(g[0], plain=True))]), ('a', a, []))
+        self.assertEqual((s['changed'], s['merged'], notes), ('1', '0', []))
+
+    def test_json_tables_that_cant_be_used(self):
+        g = named(game())
+        a = mod_of(g)
+        edit(a[0], 1, 1, 9)
+        t = g[0].copy()
+        edit(t, 3, 1, 7)
+        good = to_json(t, plain=True)
+        cases = {
+            'not valid JSON': good[:-3],
+            'no schema or rows': '{"schema": [], "row": []}',
+            'not numbered one after another': good.replace('"$id": 3', '"$id": 30'),
+            'not a value of its type': good.replace('"Count": 7', '"Count": 700'),
+            "has no such table": None,
+        }
+        for reason, text in cases.items():
+            with self.subTest(reason):
+                stem = 'T0' if text is not None else 'NoSuchTable'
+                out, notes, s = self.merge_json(g, ('p', None, [(stem, text if text is not None else good)]),
+                                                ('a', a, []))
+                self.has(notes, 'left out: p:', 'is not used', reason)
+                self.assertEqual(out[0].rows, a[0].rows)
 
 
 if __name__ == '__main__':

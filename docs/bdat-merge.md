@@ -60,6 +60,27 @@ Per table:
 A mod whose file has another list of tables, or that can't be read, is not merged: if it is the top mod its whole
 file is used (with the other mods' changes to that file left out), otherwise its changes to that file are left out.
 
+## Tables as JSON
+
+Some mods ship only the tables they change, as [bdat-toolset](https://github.com/RoccoDev/bdat-rs) writes them with
+`-f json`: one file per table, `bdat/<file>/<table>.json` (for example `bdat/common/ITM_BeaconList.json` for
+`bdat/common.bdat`, `bdat/us/common_ms/ITM_BeaconList_ms.json` for the text). Each holds the table's columns
+(`schema`: name and type) and its rows (`rows`: `$id` and a value per column). Names are either `<8 hex digits>`, the
+hash itself, or the plain name, which hashes (murmur3) to the game's; hash cells are written the same way.
+
+A mod's JSON tables are its copy of just those tables: the mod's full file, or the game's when it has none, gives
+the rest, and the result is merged like any other copy. A cell a JSON table leaves as the game has it is not a
+change, so options of one mod that change different cells of a table stack, and an option that repeats what another
+part already changes adds nothing. The game merges a file whenever an enabled mod has JSON tables for it, also when
+that mod is the only one.
+
+Only whole tables are read: a JSON file whose rows aren't numbered one after another (a table with only some of its
+rows), that isn't valid JSON, has a value that doesn't fit its column, or names a table the game's file doesn't have
+is left out and reported. If a mod has only JSON tables and none of it can be used, the game gets its own copy.
+
+Windows doesn't allow `<` and `>` in file names, so a table known only by its hash can't be named `<hash>.json`
+there; how bdat-toolset names such a table on Windows is still to be seen.
+
 ## The report
 
 Each merge writes `<hash>-<file>.txt` next to the merged file. It lists the mods in priority order, what was merged,

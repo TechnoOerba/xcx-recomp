@@ -242,39 +242,94 @@ static void hex(const uint8_t *d, int n, char *out) {
 }
 
 // The status line of a merge: what was done and how much didn't go to plan.
-static void summary_line(char *out, size_t cap, int n, const BdatSummary *s, char *const *ids) {
-    if (s->file_mode == BDAT_FILE_COPIED)
-        snprintf(out, cap, "only %s's copy is used (the other mods' copies can't be)", ids[s->file_mod]);
+static void summary_line(char *out, size_t cap, int n, const BdatSummary *s, const BdatModFiles *mods) {
+    if (s->file_mode == BDAT_FILE_COPIED && n == 1 && s->left_out)
+        snprintf(out, cap, "%s's tables put in, %d left out (no other mod changes this file)", mods[0].id, s->left_out);
+    else if (s->file_mode == BDAT_FILE_COPIED && n == 1)
+        snprintf(out, cap, "%s's tables put in (no other mod changes this file)", mods[0].id);
+    else if (s->file_mode == BDAT_FILE_COPIED)
+        snprintf(out, cap, "only %s's copy is used (the other mods' copies can't be)", mods[s->file_mod].id);
     else if (s->file_mode == BDAT_FILE_WHOLE)
-        snprintf(out, cap, "%s's whole copy is used (it has another list of tables)", ids[s->file_mod]);
+        snprintf(out, cap, "%s's whole copy is used (it has another list of tables)", mods[s->file_mod].id);
     else
         snprintf(out, cap, "%d mods merged: %d table%s from several mods, %d settled by priority, %d change%s left out, "
                  "%d caveat%s", n, s->tables_merged, s->tables_merged == 1 ? "" : "s", s->priority, s->left_out,
                  s->left_out == 1 ? "" : "s", s->caveats, s->caveats == 1 ? "" : "s");
 }
 
-int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, char *const *ids, int n, char *out,
-                     size_t cap) {
-    if (n < 2 || n > 64 || !mount || !key) return 0;
+// The file name of a host path without its folders and .json.
+static void stem_of(const char *path, char *out, size_t cap) {
+    const char *slash = strrchr(path, '/'), *back = strrchr(path, '\\');
+    const char *f = slash && (!back || slash > back) ? slash + 1 : back ? back + 1 : path;
+    size_t n = strlen(f);
+    if (n > 5 && !strcmp(f + n - 5, ".json")) n -= 5;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, f, n);
+    out[n] = 0;
+}
+
+// The game's own copy as <profile>/bdat-merge/game-<key with / as _>, its path in out; 0 when it can't be written.
+static int serve_game_copy(const char *profile, const char *key, const uint8_t *game, size_t n, char *out, size_t cap) {
+    char dir[2100], file[2400];
+    if (!game) return 0;
+    snprintf(dir, sizeof dir, "%s/bdat-merge", profile);
+    int len = snprintf(file, sizeof file, "%s/game-", dir);
+    for (const char *c = key; *c && len < (int)sizeof file - 1; c++) file[len++] = *c == '/' || *c == '\\' ? '_' : *c;
+    file[len] = 0;
+    if ((size_t)len >= cap) return 0;
+    plat_file_mkdir_p(dir);
+    if (plat_file_size(file) != (int64_t)n && !plat_file_write_atomic(file, game, n)) return 0;
+    snprintf(out, cap, "%s", file);
+    return 1;
+}
+
+int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out, size_t cap) {
+    if (n < 1 || n > 64 || !mount || !key) return 0;
     const RtConfig *cfg = rt_config();
     if (!cfg || !cfg->profile) return 0;
     plat_mutex_lock(&lock);
-    int ok = 0;
+    int ok = 0, full = -1;
     char why[400] = "";
     uint8_t *game = NULL, *merged = NULL;
     uint8_t *data[64] = {0};
     uint64_t size[64] = {0};
+    BdatJson *json[64] = {0};
+    int njson[64] = {0};
+    char stems[64][64][128];
     size_t game_n = 0, merged_n = 0;
     Notes notes = {.key = key};
     uint64_t t0 = plat_now_ms();
-    for (int k = 0; k < n; k++)
-        if (!(data[k] = plat_file_read(hosts[k], &size[k]))) {
-            snprintf(why, sizeof why, "%s's copy can't be read", ids[k]);
-            goto done;
+    char head[600];
+    size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
+    for (int k = 0; k < n && hn < sizeof head - 70; k++)
+        hn += (size_t)snprintf(head + hn, sizeof head - hn, " %s", mods[k].id);
+    add_line(&notes, head);
+    for (int k = 0; k < n; k++) {
+        if (mods[k].full) {
+            if (full < 0) full = k;
+            if (!(data[k] = plat_file_read(mods[k].full, &size[k]))) {
+                snprintf(why, sizeof why, "%s's copy can't be read", mods[k].id);
+                goto done;
+            }
         }
+        if (mods[k].njson && !(json[k] = calloc((size_t)mods[k].njson, sizeof *json[k]))) goto done;
+        for (int x = 0; x < mods[k].njson && x < 64; x++) {
+            uint64_t sz = 0;
+            uint8_t *p = plat_file_read(mods[k].json[x], &sz);
+            stem_of(mods[k].json[x], stems[k][x], sizeof stems[k][x]);
+            if (!p) {
+                char line[400];
+                snprintf(line, sizeof line, "left out: %s: its table %s.json can't be read", mods[k].id, stems[k][x]);
+                on_note(&notes, line);
+                continue;
+            }
+            json[k][njson[k]++] = (BdatJson){stems[k][x], p, (size_t)sz};
+        }
+    }
     if (!(game = game_copy(mount, key, &game_n, why, sizeof why))) goto done;
 
-    // the file name: <first 16 bytes of SHA-256(version, game copy, each mod's id and copy)>-<key with / as _>
+    // the file name: <first 16 bytes of SHA-256(version, game copy, per mod its id, full copy and JSON tables)>-<key
+    // with / as _>
     Sha256 s;
     uint8_t d[32];
     sha256_init(&s);
@@ -282,9 +337,15 @@ int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, cha
     sha256(game, game_n, d);
     sha256_update(&s, d, 32);
     for (int k = 0; k < n; k++) {
-        sha256_update(&s, ids[k], strlen(ids[k]) + 1);
-        sha256(data[k], size[k], d);
+        sha256_update(&s, mods[k].id, strlen(mods[k].id) + 1);
+        sha256(data[k] ? data[k] : (const uint8_t *)"", data[k] ? size[k] : 0, d);
+        sha256_update(&s, data[k] ? "f" : "-", 1);
         sha256_update(&s, d, 32);
+        for (int x = 0; x < njson[k]; x++) {
+            sha256_update(&s, json[k][x].stem, strlen(json[k][x].stem) + 1);
+            sha256(json[k][x].data, json[k][x].size, d);
+            sha256_update(&s, d, 32);
+        }
     }
     sha256_final(&s, d);
     Prune pr;
@@ -325,22 +386,17 @@ int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, cha
         goto done;
     }
 
-    BdatInput base = {game, game_n, "game"}, mods[64];
-    for (int k = 0; k < n; k++) mods[k] = (BdatInput){data[k], (size_t)size[k], ids[k]};
+    BdatInput base = {game, game_n, "game", NULL, 0}, in[64];
+    for (int k = 0; k < n; k++) in[k] = (BdatInput){data[k], (size_t)size[k], mods[k].id, json[k], njson[k]};
     BdatSummary sum;
-    char head[600];
-    size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
-    for (int k = 0; k < n && hn < sizeof head - 70; k++)
-        hn += (size_t)snprintf(head + hn, sizeof head - hn, " %s", ids[k]);
-    add_line(&notes, head);
-    if (!(merged = bdat_merge(&base, mods, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
+    if (!(merged = bdat_merge(&base, in, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
     plat_file_mkdir_p(pr.dir);
     if (!plat_file_write_atomic(file, merged, merged_n)) {
         snprintf(why, sizeof why, "%s can't be written", file);
         goto done;
     }
     char line[400];
-    summary_line(line, sizeof line, n, &sum, ids);
+    summary_line(line, sizeof line, n, &sum, mods);
     add_line(&notes, line);
     plat_file_write_atomic(report, notes.text, notes.n);
     pr.suffix = flat;
@@ -352,13 +408,23 @@ int bdat_merge_serve(const char *mount, const char *key, char *const *hosts, cha
     add_status(0, "%s: %s", key, line);
     status_events(key, strchr(notes.text, '\n') ? strchr(notes.text, '\n') + 1 : "");
 done:
-    if (!ok) {
+    if (!ok && full >= 0) {
         rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",
-               ids[0]);
-        add_status(1, "%s: not merged (%s); %s's whole file is used", key, why, ids[0]);
+               mods[full].id);
+        add_status(1, "%s: not merged (%s); %s's whole file is used", key, why, mods[full].id);
+    } else if (!ok) {
+        // only JSON tables, and they can't be put in: the game's own copy, so the game still finds the file
+        ok = serve_game_copy(cfg->profile, key, game, game_n, out, cap);
+        rt_log("bdat merge: %s: not merged (%s); %s", key, why[0] ? why : "no room for the path",
+               ok ? "the game's own copy is used" : "the game's own copy can't be served either");
+        add_status(1, "%s: not merged (%s); %s", key, why, ok ? "the game's own copy is used" : "nothing can be served");
     }
     plat_mutex_unlock(&lock);
-    for (int k = 0; k < n; k++) free(data[k]);
+    for (int k = 0; k < n; k++) {
+        free(data[k]);
+        for (int x = 0; x < njson[k]; x++) free((void *)json[k][x].data);
+        free(json[k]);
+    }
     free(game);
     free(merged);
     free(notes.text);

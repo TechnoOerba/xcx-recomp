@@ -21,6 +21,7 @@
 
 #include "fs.h"
 #include "host.h"
+#include "romfs_mods.h"
 #include "sha256.h"
 #include "platform/platform.h"
 
@@ -242,19 +243,48 @@ static void hex(const uint8_t *d, int n, char *out) {
 }
 
 // The status line of a merge: what was done and how much didn't go to plan.
-static void summary_line(char *out, size_t cap, int n, const BdatSummary *s, const BdatModFiles *mods) {
+static void summary_line(char *out, size_t cap, int n, const BdatSummary *s, char (*label)[160]) {
     if (s->file_mode == BDAT_FILE_COPIED && n == 1 && s->left_out)
-        snprintf(out, cap, "%s's tables put in, %d left out (no other mod changes this file)", mods[0].id, s->left_out);
+        snprintf(out, cap, "%s's tables put in, %d left out (no other mod changes this file)", label[0], s->left_out);
     else if (s->file_mode == BDAT_FILE_COPIED && n == 1)
-        snprintf(out, cap, "%s's tables put in (no other mod changes this file)", mods[0].id);
+        snprintf(out, cap, "%s's tables put in (no other mod changes this file)", label[0]);
     else if (s->file_mode == BDAT_FILE_COPIED)
-        snprintf(out, cap, "only %s's copy is used (the other mods' copies can't be)", mods[s->file_mod].id);
+        snprintf(out, cap, "only %s's copy is used (the other mods' copies can't be)", label[s->file_mod]);
     else if (s->file_mode == BDAT_FILE_WHOLE)
-        snprintf(out, cap, "%s's whole copy is used (it has another list of tables)", mods[s->file_mod].id);
+        snprintf(out, cap, "%s's whole copy is used (it has another list of tables)", label[s->file_mod]);
     else
         snprintf(out, cap, "%d mods merged: %d table%s from several mods, %d settled by priority, %d change%s left out, "
                  "%d caveat%s", n, s->tables_merged, s->tables_merged == 1 ? "" : "s", s->priority, s->left_out,
                  s->left_out == 1 ? "" : "s", s->caveats, s->caveats == 1 ? "" : "s");
+}
+
+// What a mod is called in events: the name in its library.ini (mods/<id>/library.ini, written by the mod managers;
+// for a part of a mod, "<mod>: <part>"), else its id.
+static void label_of(const char *id, char *out, size_t cap) {
+    snprintf(out, cap, "%s", id);
+    const char *dir = romfs_mods_dir();
+    char path[4200];
+    if (!dir || snprintf(path, sizeof path, "%s/%s/library.ini", dir, id) >= (int)sizeof path) return;
+    uint64_t n = 0;
+    char *text = (char *)plat_file_read(path, &n);
+    for (char *p = text; p && p < text + n;) {
+        char *e = memchr(p, '\n', (size_t)(text + n - p)), *end = e ? e : text + n, *q = p;
+        while (q < end && (*q == ' ' || *q == '\t')) q++;
+        if (end - q > 4 && !strncmp(q, "name", 4)) {
+            q += 4;
+            while (q < end && (*q == ' ' || *q == '\t')) q++;
+            if (q < end && *q == '=') {
+                q++;
+                while (q < end && (*q == ' ' || *q == '\t')) q++;
+                char *v = end;
+                while (v > q && (v[-1] == ' ' || v[-1] == '\t' || v[-1] == '\r')) v--;
+                if (v > q) snprintf(out, cap, "%.*s", (int)(v - q), q);
+                break;
+            }
+        }
+        p = e ? e + 1 : NULL;
+    }
+    free(text);
 }
 
 // The file name of a host path without its folders and .json.
@@ -295,20 +325,21 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     uint64_t size[64] = {0};
     BdatJson *json[64] = {0};
     int njson[64] = {0};
-    char stems[64][64][128];
+    char stems[64][64][128], label[64][160];
+    for (int k = 0; k < n; k++) label_of(mods[k].id, label[k], sizeof label[k]);
     size_t game_n = 0, merged_n = 0;
     Notes notes = {.key = key};
     uint64_t t0 = plat_now_ms();
     char head[600];
     size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
     for (int k = 0; k < n && hn < sizeof head - 70; k++)
-        hn += (size_t)snprintf(head + hn, sizeof head - hn, " %s", mods[k].id);
+        hn += (size_t)snprintf(head + hn, sizeof head - hn, "%s %s", k ? ";" : "", label[k]);
     add_line(&notes, head);
     for (int k = 0; k < n; k++) {
         if (mods[k].full) {
             if (full < 0) full = k;
             if (!(data[k] = plat_file_read(mods[k].full, &size[k]))) {
-                snprintf(why, sizeof why, "%s's copy can't be read", mods[k].id);
+                snprintf(why, sizeof why, "%s's copy can't be read", label[k]);
                 goto done;
             }
         }
@@ -319,7 +350,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
             stem_of(mods[k].json[x], stems[k][x], sizeof stems[k][x]);
             if (!p) {
                 char line[400];
-                snprintf(line, sizeof line, "left out: %s: its table %s.json can't be read", mods[k].id, stems[k][x]);
+                snprintf(line, sizeof line, "left out: %s: its table %s.json can't be read", label[k], stems[k][x]);
                 on_note(&notes, line);
                 continue;
             }
@@ -387,7 +418,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     }
 
     BdatInput base = {game, game_n, "game", NULL, 0}, in[64];
-    for (int k = 0; k < n; k++) in[k] = (BdatInput){data[k], (size_t)size[k], mods[k].id, json[k], njson[k]};
+    for (int k = 0; k < n; k++) in[k] = (BdatInput){data[k], (size_t)size[k], label[k], json[k], njson[k]};
     BdatSummary sum;
     if (!(merged = bdat_merge(&base, in, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
     plat_file_mkdir_p(pr.dir);
@@ -396,7 +427,7 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
         goto done;
     }
     char line[400];
-    summary_line(line, sizeof line, n, &sum, mods);
+    summary_line(line, sizeof line, n, &sum, label);
     add_line(&notes, line);
     plat_file_write_atomic(report, notes.text, notes.n);
     pr.suffix = flat;
@@ -410,8 +441,8 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
 done:
     if (!ok && full >= 0) {
         rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",
-               mods[full].id);
-        add_status(1, "%s: not merged (%s); %s's whole file is used", key, why, mods[full].id);
+               label[full]);
+        add_status(1, "%s: not merged (%s); %s's whole file is used", key, why, label[full]);
     } else if (!ok) {
         // only JSON tables, and they can't be put in: the game's own copy, so the game still finds the file
         ok = serve_game_copy(cfg->profile, key, game, game_n, out, cap);

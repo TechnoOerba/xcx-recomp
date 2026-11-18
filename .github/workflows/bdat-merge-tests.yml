@@ -28,8 +28,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # A core update (pacman, bash, msys2-runtime) makes the first -Syu close MSYS2 before it installs anything, so
+      # update twice, then install.
       - if: runner.os == 'Windows'
-        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm --needed mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-zstd"
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-zstd"
       - if: runner.os == 'Linux'
         run: sudo apt-get install -y libzstd-dev
       - name: Tests
@@ -38,6 +43,8 @@ jobs:
           XCX_CLANG: ${{ matrix.clang }}
         run: |
           export PATH="/c/msys64/ucrt64/bin:$PATH"
+          # The tests skip themselves without clang; here that would be a pass that tested nothing.
+          "$XCX_CLANG" --version
           python tests/bdat_merge_test.py -v
           python tests/mods_priority_test.py -v
       # The merge's game side (runtime/bdat_merge_serve.c: its threads, the quick check and the cache check; the

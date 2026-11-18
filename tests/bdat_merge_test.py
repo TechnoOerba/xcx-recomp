@@ -24,7 +24,8 @@ STR = (7, 11)
 
 
 def clang():
-    found = os.environ.get('XCX_CLANG') or shutil.which('clang') or \
+    # XCX_CLANG may be a path or a name on PATH (CI's Linux job gives just 'clang')
+    found = shutil.which(os.environ.get('XCX_CLANG', '')) or os.environ.get('XCX_CLANG') or shutil.which('clang') or \
         ('C:/msys64/ucrt64/bin/clang.exe' if os.name == 'nt' else None)
     return found if found and Path(found).is_file() else None
 

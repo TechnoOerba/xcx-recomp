@@ -309,8 +309,10 @@ static int read_list(const char *file, char (*ids)[65], int cap) {
     return n;
 }
 
-// Writes a list with id first (on) or without it (off), through a rename so the game never reads half a list. Other
-// lines stay as they are, comments included; id's own line goes.
+// Writes a list with id last (on) or without it (off), through a rename so the game never reads half a list. Other
+// lines stay as they are, comments included; id's own line goes. Last, as romfs_mods_set puts a game-file mod turned
+// on (docs/bdat-merge.md, "The report"): one rule for every list. Only romfs-enabled.txt's order decides anything
+// (which mod wins), and that list goes through romfs_mods_set; the Lua lists here are sets.
 static int write_list(const char *file, const char *id, int on) {
     char path[4200];
     join(path, sizeof path, root(), file);
@@ -318,7 +320,6 @@ static int write_list(const char *file, const char *id, int on) {
     char *old = (char *)plat_file_read(path, &size);
     char text[8192];
     size_t len = 0;
-    if (on) len += (size_t)snprintf(text, sizeof text, "%s\n", id);
     for (char *p = old, *e; p && *p; p = e ? e + 1 : NULL) {
         e = strchr(p, '\n');
         if (e) *e = 0;
@@ -328,6 +329,7 @@ static int write_list(const char *file, const char *id, int on) {
         if (n && !mine && len + n + 2 < sizeof text) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", p);
     }
     free(old);
+    if (on && len + strlen(id) + 2 < sizeof text) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", id);
     plat_file_mkdir_p(root());
     return plat_file_write_atomic(path, text, len);
 }

@@ -208,10 +208,12 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr));
 // Starts this program again with the same arguments and ends this process with the new one's exit code (Windows), or
 // replaces this process with it (Linux). Environment changes made before the call are passed on.
 _Noreturn void plat_reexec(void);
-// Starts another copy of this program with the same arguments and environment (changes made before the call
-// included) and returns at once, this process going on; 1 when it started. For a restart: the copy waits for this
-// process to end (plat_wait_process_exit) before it does anything.
-int plat_start_copy(void);
+// Starts another copy of this program (this executable's own path, the same arguments) and returns at once, this
+// process going on; 1 when it started. The copy gets this process's environment with set ("NAME=value", or NULL)
+// added and the names in drop (NULL-terminated, or NULL) removed, built for the copy alone: this process's own
+// environment isn't changed, so threads reading it meanwhile see nothing move. It inherits no handles or descriptors.
+// For a restart: the copy waits for this process to end (plat_wait_process_exit) before it does anything.
+int plat_start_copy(const char *set, const char *const *drop);
 // Waits up to ms for process pid to end; 1 when it has (or there is no such process), 0 when it still runs.
 int plat_wait_process_exit(uint32_t pid, uint32_t ms);
 
@@ -298,6 +300,11 @@ int64_t plat_file_size(const char *path);                 // bytes of a file, -1
 // Size and last-write time (nanoseconds since an arbitrary epoch, comparable only with itself) of a file; 0 when
 // missing or unreadable.
 int plat_file_stat(const char *path, int64_t *size, int64_t *mtime_ns);
+// What copy tools can't carry over from another file: id[0] its change time (metadata or contents; Windows ChangeTime,
+// Linux st_ctime), id[1] and id[2] the file's identity on its volume (Windows FileId, Linux st_ino), id[3] the volume
+// (Windows serial number, Linux st_dev). 0 when the file can't be read or the file system doesn't keep a change time
+// (FAT, exFAT, some network shares): then nothing short of reading the file says whether it changed.
+int plat_file_identity(const char *path, uint64_t id[4]);
 int plat_file_set_readonly(const char *path, int on);     // sets or clears the read-only attribute; 1 on success
 // A file that only grows and other processes may read meanwhile: each write lands whole at its end, from any thread,
 // and reaches the file even if the process dies right after (no user-space buffer, no flush to the disk).

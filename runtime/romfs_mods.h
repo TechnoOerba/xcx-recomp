@@ -24,8 +24,10 @@ int romfs_mods_set(const char *id, int on);
 // 1 when romfs-enabled.txt is no longer as it was when the game read its data tables (romfs_mods_tables_changed can
 // also be 1 for an updated mod with the list unchanged).
 int romfs_mods_list_changed(void);
-// 1 once the game has loaded into the world (a save, or a new game), 0 at boot and again after Return to Title: from
-// the files it asks the archive for (romfs_mod_declines). Restart now in the Mods tab asks first only in the world.
+// 0 when the game is at the title screen (it loaded the title's scene, at boot or after Return to Title, and no world
+// since), else 1: in the world (a save, or a new game) or not known, from the files it asks the archive for
+// (romfs_mod_declines). Restart now in the Mods tab asks first unless the game is known to be at the title: if the
+// guess from file names is ever wrong, it asks once too often rather than skipping the question in the world.
 int romfs_game_in_world(void);
 // How mod id's data tables differ from what the game read at start-up: 1 its files were updated since (sizes or
 // times), 2 it was turned on since, 0 neither (or it has none). For the mark on its Mod priority row.

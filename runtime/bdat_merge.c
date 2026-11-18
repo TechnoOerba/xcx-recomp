@@ -149,7 +149,7 @@ static int same_row(const Tab *a, uint32_t ra, const Tab *b, uint32_t rb) {
         if (c == a->cc) return 1;
     }
     for (uint32_t c = 0; c < a->cc; c++)
-        if (!same_cell(a, ra, b, rb, c)) return 0;
+        if (ctype(a, c) != ctype(b, c) || !same_cell(a, ra, b, rb, c)) return 0;   // cells of another type differ
     return 1;
 }
 
@@ -501,6 +501,8 @@ static void event(Events *ev, int kind, int mod, const char *fmt, ...) {
     char line[700];
     int n = snprintf(line, sizeof line, "%s: ", names[kind]);
     if (mod >= 0) n += snprintf(line + n, sizeof line - (size_t)n, "%s: ", ev->mods[mod].name);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof line) n = (int)sizeof line - 1;   // a long mod name: the line is cut, never overrun
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
@@ -718,7 +720,8 @@ static int merge_table(Job *j, int *P, int np, Buf *out, char *why, size_t why_c
         Pair *at = malloc((n + 1) * sizeof *at);
         if (!at) goto oom;
         int again = 1;
-        for (int round = 0; again && round < 4; round++) {
+        // each round puts back the game's key of at least one renamed row, and the game's keys are unique, so it ends
+        for (uint32_t round = 0; again && round <= n; round++) {
             again = 0;
             uint32_t na = 0;
             for (uint32_t i = 0; i < n; i++)
@@ -1657,7 +1660,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
                 continue;
             }
         }
-        if (!put(&body, copy->p, copy->len)) goto oom;
+        if (!put(&body, copy->p, copy->len) || !put(&body, NULL, (4 - (body.n & 3)) & 3)) goto oom;   // tables 4-aligned
     }
     size_t head = 16 + 4 * (size_t)bf.count, total = head + body.n;
     if (total > 0xffffffffu || !(result = malloc(total))) {

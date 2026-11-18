@@ -780,6 +780,16 @@ int plat_file_stat(const char *path, int64_t *size, int64_t *mtime_ns) {
     return 1;
 }
 
+int plat_file_identity(const char *path, uint64_t id[4]) {
+    struct stat st;
+    if (stat(path, &st) || (!st.st_ctim.tv_sec && !st.st_ctim.tv_nsec)) return 0;
+    id[0] = (uint64_t)st.st_ctim.tv_sec * 1000000000u + (uint64_t)st.st_ctim.tv_nsec;
+    id[1] = (uint64_t)st.st_ino;
+    id[2] = 0;
+    id[3] = (uint64_t)st.st_dev;
+    return 1;
+}
+
 // The owner's write permission stands for Windows' read-only attribute.
 int plat_file_set_readonly(const char *path, int on) {
     struct stat st;
@@ -1059,18 +1069,50 @@ void plat_reexec(void) {
     _exit(70);
 }
 
-int plat_start_copy(void) {
+// Whether environment entry e ("NAME=value") is named name.
+static int env_named(const char *e, const char *name) {
+    size_t n = strlen(name);
+    return !strncmp(e, name, n) && e[n] == '=';
+}
+
+int plat_start_copy(const char *set, const char *const *drop) {
     static char args[16384];
     char *argv[256];
     int argc = 0;
-    FILE *f = fopen("/proc/self/cmdline", "rb");
+    FILE *f = fopen("/proc/self/cmdline", "rbe");
     size_t n = f ? fread(args, 1, sizeof args - 1, f) : 0;
     if (f) fclose(f);
     args[n] = 0;
     for (size_t i = 0; i < n && argc < 255; i += strlen(args + i) + 1) argv[argc++] = args + i;
     argv[argc] = NULL;
+    if (!argc) return 0;
+    // the copy's environment: this process's, less drop and set's name, plus set; this process's own isn't touched
+    char setname[256] = "";
+    const char *eq = set ? strchr(set, '=') : NULL;
+    if (eq && (size_t)(eq - set) < sizeof setname) memcpy(setname, set, (size_t)(eq - set));
+    size_t count = 0;
+    for (char **e = environ; e && *e; e++) count++;
+    char **envp = malloc((count + 2) * sizeof *envp);
+    if (!envp) return 0;
+    size_t k = 0;
+    for (char **e = environ; e && *e; e++) {
+        int skip = setname[0] && env_named(*e, setname);
+        for (const char *const *d = drop; d && *d && !skip; d++) skip = env_named(*e, *d);
+        if (!skip) envp[k++] = *e;
+    }
+    if (set) envp[k++] = (char *)set;
+    envp[k] = NULL;
+    // no descriptor of this process goes to the copy, whether or not it was opened with O_CLOEXEC
+    posix_spawn_file_actions_t fa;
+    int have_fa = posix_spawn_file_actions_init(&fa) == 0;
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+    if (have_fa) posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+#endif
     pid_t pid;
-    return argc && posix_spawn(&pid, "/proc/self/exe", NULL, NULL, argv, environ) == 0;
+    int ok = posix_spawn(&pid, "/proc/self/exe", have_fa ? &fa : NULL, NULL, argv, envp) == 0;
+    if (have_fa) posix_spawn_file_actions_destroy(&fa);
+    free(envp);
+    return ok;
 }
 
 // Ended: no /proc entry, or a zombie its parent hasn't reaped yet (the launcher may not wait for it).

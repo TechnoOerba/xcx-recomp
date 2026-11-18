@@ -108,7 +108,8 @@ left-out changes of this run. In its Mod priority list each mod's row also carri
 ("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several); selecting that note shows
 the mod's own lines from the reports under its row. Every row has a **Turn off** button beside its Up and Down. A mod
 turned off and on again (here or in the library) while the game runs goes back where it was; any other mod turned on
-goes last, at the lowest priority, and is moved up from here if it should win. The library's picked mod says where it is in
+goes last, at the lowest priority, and is moved up from here if it should win. That is the one rule for a mod
+turned on, whichever does it (the Mod priority list, the library, a mod manager writing `romfs-enabled.txt`): last. The library's picked mod says where it is in
 the list ("Priority 2 of 8").
 
 The game reads its data tables only at start-up, so once the mods change while it runs (another order, a mod

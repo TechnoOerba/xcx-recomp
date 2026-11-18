@@ -36,6 +36,7 @@
 #define CHECK_MS 500           // how often the list file is read again
 #define SIG_CAP (MOD_CAP * 76)  // table_inputs: per mod "<id>#<8 hex>,"
 #define LINE_CAP 128           // lines of romfs-enabled.txt the menu's switches keep
+#define LINE_LEN 1024          // and the longest one, comments included (longer: the list isn't rewritten)
 #define AUTO_MS 1500           // with bdat_merge_auto, how long a changed list stays put before it is merged ahead
 
 // key: lowercase game path without a leading '/'. host: the top mod's copy. For a data table or a JSON table that
@@ -79,7 +80,7 @@ static char list_seen[LIST_CAP + 1];
 static int64_t list_len_seen = -2;         // -2: never read
 static uint64_t next_check_ms;
 static int claim_logs;
-static int in_world;                       // romfs_game_in_world
+static int in_world = -1;                  // romfs_game_in_world: -1 not known yet, 0 at the title, 1 in the world
 
 static int mods_root(void) {
     if (root_state) return root_state > 0;
@@ -386,40 +387,52 @@ static void table_inputs(const char *key, char *sig, size_t cap) {
 }
 
 // Per enabled mod with a copy of data table key or JSON tables of it, in priority order: those files as in[] (the
-// count), with copies of the paths (and each mod's JSON list) for the caller to free with free_gathered. *merge: 1
+// count), with copies of the paths (in in[] itself: each mod's id, full copy and JSON list) for the caller to free with free_gathered; any number of JSON tables. *merge: 1
 // when they are to be merged (JSON tables, or two or more full copies). Under the map's lock.
-static int gather(const char *key, BdatModFiles *in, char **mem, int *nmem, int *ok, int *merge) {
+static int gather(const char *key, BdatModFiles *in, int *ok, int *merge) {
     ModFile *f = find(key);
     size_t lo = 0, hi = 0, pre = strlen(key) - 4;
     int nin = 0, full = 0, json_any = 0;
     json_range(key, &lo, &hi);
-    *nmem = 0;
     *ok = 1;
     for (int m = 0; m < norder; m++) {
         const char *copy_full = f ? copy_of(f, order[m]) : NULL;
         const char **json = NULL;
-        int njson = 0;
-        for (size_t i = lo; i < hi && njson < 64; i++) {
+        int njson = 0, cap = 0;
+        for (size_t i = lo; i < hi; i++) {
             const char *p = is_json_of(files[i].key, pre) ? copy_of(&files[i], order[m]) : NULL;
             if (!p) continue;
-            if (!json && !(json = calloc(64, sizeof *json))) *ok = 0;
-            if (json) json[njson++] = mem[(*nmem)++] = strdup(p);
+            if (njson == cap) {
+                const char **g = realloc(json, (size_t)(cap = cap ? cap * 2 : 16) * sizeof *json);
+                if (!g) {
+                    *ok = 0;
+                    break;
+                }
+                json = g;
+            }
+            if (!(json[njson++] = strdup(p))) *ok = 0;
         }
-        if (!copy_full && !njson) continue;
-        char *id = mem[(*nmem)++] = strdup(order[m]), *copy = NULL;
-        if (copy_full) copy = mem[(*nmem)++] = strdup(copy_full);
+        if (!copy_full && !njson) {
+            free(json);
+            continue;
+        }
+        char *id = strdup(order[m]), *copy = copy_full ? strdup(copy_full) : NULL;
+        if (!id || (copy_full && !copy)) *ok = 0;
         in[nin++] = (BdatModFiles){id, copy, json, njson};
         full += copy_full != NULL;
         json_any |= njson > 0;
     }
-    for (int i = 0; i < *nmem; i++) *ok &= mem[i] != NULL;
     *merge = json_any || full >= 2;
     return nin;
 }
 
-static void free_gathered(BdatModFiles *in, int nin, char **mem, int nmem) {
-    for (int i = 0; i < nin; i++) free((void *)in[i].json);
-    for (int i = 0; i < nmem; i++) free(mem[i]);
+static void free_gathered(BdatModFiles *in, int nin) {
+    for (int i = 0; i < nin; i++) {
+        for (int x = 0; x < in[i].njson; x++) free((void *)in[i].json[x]);
+        free((void *)in[i].json);
+        free((void *)in[i].id);
+        free((void *)in[i].full);
+    }
 }
 
 // A data table file the game reads (it reads them only at start-up), kept in started with the mods it would be made
@@ -483,9 +496,8 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     // order its full copy (if any) and its JSON tables
     uint64_t gen = files_gen;
     BdatModFiles in[MOD_CAP];
-    char *mem[MOD_CAP * 66];
-    int nmem = 0, ok = 1, many = 0;
-    int nin = gather(key, in, mem, &nmem, &ok, &many);
+    int ok = 1, many = 0;
+    int nin = gather(key, in, &ok, &many);
     (void)many;   // decided above, from the map as the game reads it
     plat_mutex_unlock_shared(&lock);
     char path[4096];
@@ -503,7 +515,7 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
         if (merged[nmerged].key) nmerged++;
     }
     plat_mutex_unlock(&lock);
-    free_gathered(in, nin, mem, nmem);
+    free_gathered(in, nin);
     return served != NULL;
 }
 
@@ -548,7 +560,18 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     if (!strncmp(one, "ev/title/", 9)) __atomic_store_n(&in_world, 0, __ATOMIC_RELAXED);
     else if (!strcmp(one, "gimmick/world_info.bin") || !strncmp(one, "map/mapcoli/", 12))
         __atomic_store_n(&in_world, 1, __ATOMIC_RELAXED);
-    if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED) || !lookup(one, NULL, 0, NULL)) return list;
+    if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED)) return list;
+    if (is_table(one)) {
+        // A data table is claimed only once there is a file to serve for it: the merge (or the reuse of one made
+        // before) runs here, before the game is told to open its rom:/ path. When nothing can be served (the profile
+        // can't be written, a path too long, out of memory, JSON tables before the RomFS is mounted), the game reads
+        // its own copy from the archive instead of finding no file at all.
+        char host[4096];
+        const char *mount = romfs_mount_name();
+        if (!lookup(one, host, sizeof host, mount && *mount ? mount : NULL)) return list;
+    } else if (!lookup(one, NULL, 0, NULL)) {
+        return list;
+    }
     one[strlen(one) + 1] = 0;
     if (__atomic_fetch_add(&claim_logs, 1, __ATOMIC_RELAXED) < 64) rt_log("romfs mods: %s from a mod", one);
     return (uint64_t)(uintptr_t)one;
@@ -610,17 +633,23 @@ void romfs_mods_reload(void) {
 // goes last, at the lowest priority: it shouldn't win over everything at once, and the player moves it up if it
 // should. Comment lines stay as they are.
 
-static int read_lines(char (*lines)[160], int cap) {
+static int read_lines(char (*lines)[LINE_LEN], int cap) {
     char path[4200];
     snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
     uint64_t size = 0;
     char *text = (char *)plat_file_read(path, &size);
     int n = 0;
-    for (char *p = text; p && *p && n < cap;) {
+    for (char *p = text; p && *p;) {
         char *e = strchr(p, '\n');
         size_t len = e ? (size_t)(e - p) : strlen(p);
         while (len && (p[len - 1] == '\r' || p[len - 1] == ' ')) len--;
-        if (len && len < 160) {
+        if (len >= LINE_LEN || (len && n == cap)) {   // a line or a list it can't keep whole: not rewritten at all
+            rt_log("romfs mods: romfs-enabled.txt has %s; the menu leaves it as it is",
+                   len >= LINE_LEN ? "a line too long to keep" : "more lines than it keeps");
+            free(text);
+            return -1;
+        }
+        if (len) {
             memcpy(lines[n], p, len);
             lines[n++][len] = 0;
         }
@@ -631,7 +660,7 @@ static int read_lines(char (*lines)[160], int cap) {
     return n;
 }
 
-static int write_lines(char (*lines)[160], int n) {
+static int write_lines(char (*lines)[LINE_LEN], int n) {
     char text[LIST_CAP], path[4200];
     size_t len = 0;
     for (int i = 0; i < n && len + 162 < sizeof text; i++) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", lines[i]);
@@ -652,8 +681,9 @@ static int is_mod_line(const char *line) { return line[0] != '#' && valid_id(lin
 
 int romfs_mods_set(const char *id, int on) {
     if (!mods_root() || !id || !valid_id(id, strlen(id))) return 0;
-    char lines[LINE_CAP + 1][160];
+    char lines[LINE_CAP + 1][LINE_LEN];
     int n = read_lines(lines, LINE_CAP), at = -1, k = 0;
+    if (n < 0) return 0;
     for (int i = 0; i < n; i++) {   // its own line out (where it was kept in at)
         if (!strcmp(lines[i], id)) {
             if (at < 0) at = k;
@@ -732,7 +762,7 @@ int romfs_mod_changed(const char *id) {
     return how;
 }
 
-int romfs_game_in_world(void) { return __atomic_load_n(&in_world, __ATOMIC_RELAXED); }
+int romfs_game_in_world(void) { return __atomic_load_n(&in_world, __ATOMIC_RELAXED) != 0; }   // unknown counts as in
 
 int romfs_mods_list_changed(void) {
     maybe_reload();
@@ -794,15 +824,15 @@ static void premerge_run(void *arg) {
     uint64_t t0 = plat_now_ms();
     for (int k = 0; k < nk; k++) {
         BdatModFiles in[MOD_CAP];
-        char *mem[MOD_CAP * 66], sig[SIG_CAP];
-        int nmem = 0, ok = 1, merge = 0;
+        char sig[SIG_CAP];
+        int ok = 1, merge = 0;
         plat_mutex_lock_shared(&lock);
         table_inputs(keys[k], sig, sizeof sig);
-        int nin = gather(keys[k], in, mem, &nmem, &ok, &merge);
+        int nin = gather(keys[k], in, &ok, &merge);
         plat_mutex_unlock_shared(&lock);
         // as the next start would: merged where there is something to merge; else one mod's copy or the game's own
         if (ok && merge && mount[0]) bdat_merge_prepare(mount, keys[k], in, nin);
-        free_gathered(in, nin, mem, nmem);
+        free_gathered(in, nin);
         done[nd].key = strdup(keys[k]);
         done[nd].path = strdup(sig);
         nd++;
@@ -870,8 +900,9 @@ int romfs_mods_priority(char (*ids)[65], int cap) {
 
 int romfs_mods_move(const char *id, int up) {
     if (!mods_root() || !id) return 0;
-    char lines[LINE_CAP][160], tmp[160];
+    char lines[LINE_CAP][LINE_LEN], tmp[LINE_LEN];
     int n = read_lines(lines, LINE_CAP), i = 0;
+    if (n < 0) return 0;
     while (i < n && strcmp(lines[i], id)) i++;
     int j = i;   // the next mod that is on above or below; comment lines (and turned-off places) stay where they are
     do j += up ? -1 : 1; while (j >= 0 && j < n && !is_mod_line(lines[j]));

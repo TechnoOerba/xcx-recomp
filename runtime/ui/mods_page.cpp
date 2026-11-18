@@ -12,6 +12,7 @@ extern "C" {
 #include "ui_text.h"
 // host.h is C only: the one the page needs, as declared there
 int rt_restart_game(void);
+int rt_restart_started(void);
 }
 #ifdef XCX_MOD_UI_TESTING
 #include "imgui_internal.h"
@@ -191,7 +192,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
             if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",menu_text(UI_MODS_UNDO_DESC));
             ImGui::SameLine();
         }
-        ImGui::BeginDisabled(ahead==1);
+        ImGui::BeginDisabled(ahead==1||rt_restart_started());
         if(ImGui::Button(menu_text(UI_MODS_RESTART))){
             restart_failed=false;
             if(romfs_game_in_world())ImGui::OpenPopup("##restart");   // in the world: ask first
@@ -204,7 +205,9 @@ static void mod_priority(const ModLibView &v,bool idle) {
 #endif
         if(ImGui::BeginPopupModal("##restart",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoTitleBar)){
             ImGui::TextUnformatted(menu_text(UI_MODS_RESTART_CONFIRM));PRIO_LINE('C',menu_text(UI_MODS_RESTART_CONFIRM));
+            ImGui::BeginDisabled(rt_restart_started());
             if(ImGui::Button(menu_text(UI_MODS_RESTART_YES))){ImGui::CloseCurrentPopup();if(!rt_restart_game())restart_failed=true;}
+            ImGui::EndDisabled();
 #ifdef XCX_MOD_UI_TESTING
             prio_yes_low=ImGui::GetItemRectMin();prio_yes_high=ImGui::GetItemRectMax();
 #endif

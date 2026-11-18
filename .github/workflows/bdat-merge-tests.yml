@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.12"
       - if: runner.os == 'Windows'
-        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-zstd"
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm --needed mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-zstd"
       - if: runner.os == 'Linux'
         run: sudo apt-get install -y libzstd-dev
       - name: Tests
@@ -40,10 +40,11 @@ jobs:
           export PATH="/c/msys64/ucrt64/bin:$PATH"
           python tests/bdat_merge_test.py -v
           python tests/mods_priority_test.py -v
-      # The merge's game side (runtime/bdat_merge_serve.c: its threads and the quick check) and the platform file it
-      # needs file times from are built only with the whole game, which these runners don't build; compile them here
-      # so a mistake on either system shows. linux.c's one SDL call gets a declaration of its own, since the runner
-      # has no SDL3 package.
+      # The merge's game side (runtime/bdat_merge_serve.c: its threads, the quick check and the cache check; the
+      # archive hook and the mod list in romfs_mods.c; the library's lists in mod_library.c; Restart in main.c) and the
+      # platform file it needs file times, file identities and the restart's process start from are built only with
+      # the whole game, which these runners don't build; compile them here so a mistake on either system shows.
+      # linux.c's one SDL call gets a declaration of its own, since the runner has no SDL3 package.
       - name: Compile the merge's game side
         shell: bash
         env:
@@ -55,6 +56,6 @@ jobs:
           printf '#include <stdbool.h>\nbool SDL_SetClipboardText(const char *text);\n' > "$stub/SDL3/SDL_clipboard.h"
           plat=runtime/platform/linux.c
           if [ "$RUNNER_OS" = Windows ]; then plat=runtime/platform/win32.c; fi
-          for f in runtime/bdat_merge_serve.c "$plat"; do
+          for f in runtime/bdat_merge_serve.c runtime/romfs_mods.c runtime/mod_library.c runtime/main.c "$plat"; do
             "$CLANG" -std=gnu11 -fsyntax-only -Wall -Werror=implicit-function-declaration -Iruntime -I"$stub" "$f"
           done

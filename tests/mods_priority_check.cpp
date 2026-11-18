@@ -46,7 +46,7 @@ static const char *test_next[4];
 static int test_nnext;
 __attribute__((weak)) int romfs_mods_premerge(void) { premerges++; return 1; }
 __attribute__((weak)) int romfs_mods_premerge_state(void) { return test_ahead; }
-static int test_auto, test_listchg, restores, rereads, restarts;
+static int test_auto, test_listchg, restores, rereads, restarts, test_restarted;
 static int test_world;
 __attribute__((weak)) int romfs_mods_list_changed(void) { return test_listchg; }
 static int test_updated;   // "other" updated since start
@@ -54,6 +54,7 @@ __attribute__((weak)) int romfs_mod_changed(const char *id) { return test_update
 __attribute__((weak)) int romfs_mods_restore_list(void) { restores++; return 1; }
 __attribute__((weak)) void modlib_reread_enabled(void) { rereads++; }
 __attribute__((weak)) int rt_restart_game(void) { restarts++; return 1; }
+__attribute__((weak)) int rt_restart_started(void) { return test_restarted; }
 __attribute__((weak)) int romfs_game_in_world(void) { return test_world; }
 // "other" has one line of its own in the reports, the others none
 __attribute__((weak)) int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds, int cap) {
@@ -325,6 +326,19 @@ int main() {
     verify(restarts == 1 && find('C', nullptr) >= 0, "Restart now in the world asks first");
     click(prio_yes_low, prio_yes_high);
     verify(restarts == 2, "Restart in the question restarts");
+
+    // once a restart has started a copy, neither Restart nor the question's Restart starts another while the window closes
+    test_restarted = 1;
+    test_world = 0;
+    click(prio_restart_low, prio_restart_high);
+    verify(restarts == 2, "Restart now does nothing once a restart is under way");
+    test_world = 1;
+    test_restarted = 0;
+    click(prio_restart_low, prio_restart_high);
+    frame();
+    test_restarted = 1;
+    click(prio_yes_low, prio_yes_high);
+    verify(restarts == 2, "the question's Restart does nothing once a restart is under way");
 
     ImGui::DestroyContext();
     if (!failures) printf("ok %d\n", checks);

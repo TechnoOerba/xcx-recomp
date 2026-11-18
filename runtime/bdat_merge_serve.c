@@ -21,6 +21,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 
 #include <zstd.h>
@@ -31,7 +32,7 @@
 #include "sha256.h"
 #include "platform/platform.h"
 
-#define VERSION "bdat-merge 5"   // part of the cache name: a change to the merge rules makes new files
+#define VERSION "bdat-merge 6"   // part of the cache name: a change to the merge rules makes new files
 #define LOG_NOTES 20             // event lines in the log per merge; the report file has all of them
 #define STATUS_CAP 48
 #define STATUS_EVENTS 8          // left-out and caveat lines per merge in the Mods tab; the report has all
@@ -372,14 +373,27 @@ static void status_events(const char *key, const char *text) {
 
 typedef struct { const char *suffix; const char *keep; char dir[2100]; } Prune;
 
+// One of this game file's merges: "<32 hex digits>-<flat>" with nothing after it, ".txt" (its report), ".sum" (its
+// check) or a temporary file a write left (".<...>.tmp", from a process ended in the middle of a merge); or a
+// temporary file of the quick note. Only the exact form: another file's key that ends like this one never matches.
+static int merge_file_of(const char *name, const char *flat) {
+    size_t f = strlen(flat);
+    if (!strncmp(name, flat, f) && !strncmp(name + f, ".quick.", 7)) return strlen(name) > 4 && !strcmp(name + strlen(name) - 4, ".tmp");
+    for (int i = 0; i < 32; i++)
+        if (!isxdigit((unsigned char)name[i])) return 0;
+    if (name[32] != '-' || strncmp(name + 33, flat, f)) return 0;
+    const char *rest = name + 33 + f;
+    size_t r = strlen(rest);
+    return !*rest || !strcmp(rest, ".txt") || !strcmp(rest, ".sum") ||
+           (rest[0] == '.' && r > 4 && !strcmp(rest + r - 4, ".tmp"));
+}
+
 static int prune_entry(const char *name, int kind, uint64_t size, void *ctx) {
     (void)size;
     Prune *p = ctx;
-    size_t n = strlen(name), s = strlen(p->suffix);
-    const char *tail = n > s ? name + n - s : NULL;
-    int ours = kind == PLAT_FS_FILE && tail && (!strcmp(tail, p->suffix) ||
-               (n > s + 4 && !strcmp(name + n - 4, ".txt") && !strncmp(name + n - 4 - s, p->suffix, s)));
-    if (ours && strncmp(name, p->keep, strlen(p->keep))) {
+    size_t k = strlen(p->keep);
+    int kept = !strncmp(name, p->keep, k) && (!name[k] || !strcmp(name + k, ".txt") || !strcmp(name + k, ".sum"));
+    if (kind == PLAT_FS_FILE && merge_file_of(name, p->suffix) && !kept) {
         char path[2400];
         snprintf(path, sizeof path, "%s/%s", p->dir, name);
         plat_file_delete(path);   // may fail while the game still has it open; then the next merge deletes it
@@ -514,17 +528,46 @@ static void reuse(const char *key, const char *file, const char *how, const Bdat
 //
 // Finding the merge made before by its name means reading and hashing every mod's copy: at 50 whole-file mods most
 // of a start's 270 ms. So <profile>/bdat-merge/<key with / as _>.quick holds a key made only of what can be seen
-// without reading them (each mod's id, and each of its files' path, size and last-write time; the game's stored copy,
-// hashed with XXH64 instead of unpacked) and the name of the merged file that key gave. The same key and that file
-// still there: it is served without reading the mods. Anything else (a file replaced, one added, another order, a
-// game update): the inputs are read and hashed as before, and the quick file is written again.
+// without reading them (each mod's id, and each of its files' path, size, last-write time, change time and identity
+// on its volume; the game's stored copy, hashed with XXH64 instead of unpacked) and the name of the merged file that
+// key gave. A copy tool can carry a file's size and last-write time over to a changed file, but not its change time
+// or identity (plat_file_identity), so a changed mod file gives another key. A file system that keeps no change time
+// (FAT, exFAT, some network shares) gives no quick key at all. The same key and that file still there, and still the
+// file that was written (cached_ok): it is served without reading the mods. Anything else (a file replaced, one
+// added, another order, a game update): the inputs are read and hashed as before, and the quick file is written again.
 
 static int quick_file(Sha256 *s, const char *path) {
     int64_t v[2];
-    if (!plat_file_stat(path, &v[0], &v[1])) return 0;
+    uint64_t id[4];
+    if (!plat_file_stat(path, &v[0], &v[1]) || !plat_file_identity(path, id)) return 0;
     sha256_update(s, path, strlen(path) + 1);
     sha256_update(s, v, sizeof v);
+    sha256_update(s, id, sizeof id);
     return 1;
+}
+
+// <merged file>.sum: its size and XXH64, written after it. A merged file found again (by the quick key or by its
+// name) is served only when it still has both; a file cut short, changed or left by an older build is merged again.
+static int write_sum(const char *file, const uint8_t *data, size_t n) {
+    char path[2600], line[64];
+    int w = snprintf(line, sizeof line, "%zu %016llx\n", n, (unsigned long long)xxh64(data, n));
+    return snprintf(path, sizeof path, "%s.sum", file) < (int)sizeof path && w > 0 &&
+           plat_file_write_atomic(path, line, (size_t)w);
+}
+
+static int cached_ok(const char *file) {
+    char path[2600], line[64] = "";
+    if (snprintf(path, sizeof path, "%s.sum", file) >= (int)sizeof path) return 0;
+    uint64_t sn = 0, n = 0;
+    char *sum = (char *)plat_file_read(path, &sn);
+    if (sum && sn < sizeof line) memcpy(line, sum, (size_t)sn);
+    free(sum);
+    unsigned long long want_n = 0, want_h = 0;
+    if (sscanf(line, "%llu %llx", &want_n, &want_h) != 2 || plat_file_size(file) != (int64_t)want_n) return 0;
+    uint8_t *data = plat_file_read(file, &n);
+    int ok = data && n == want_n && xxh64(data, (size_t)n) == want_h;
+    free(data);
+    return ok;
 }
 
 // The quick key as 32 hex digits in out; 0 when a file can't be seen (then there's no quick check).
@@ -598,9 +641,12 @@ typedef struct {
     uint64_t *size;
     BdatJson **json;
     int *njson;
-    char (*stems)[64][128];
-    uint8_t d_full[64][32], d_json[64][64][32];
-    uint8_t full_bad[64], oom[64], json_bad[64][64];
+    // per mod, one entry per JSON table it has (read_mod allocates them; any number of tables)
+    char (*stems[64])[128];
+    uint8_t (*d_json[64])[32];
+    uint8_t *json_bad[64];
+    uint8_t d_full[64][32];
+    uint8_t full_bad[64], oom[64];
 } Reads;
 
 static void read_mod(void *ctx, int k) {
@@ -611,11 +657,14 @@ static void read_mod(void *ctx, int k) {
         return;
     }
     sha256(r->data[k] ? r->data[k] : (const uint8_t *)"", r->data[k] ? r->size[k] : 0, r->d_full[k]);
-    if (m->njson && !(r->json[k] = calloc((size_t)m->njson, sizeof *r->json[k]))) {
+    if (m->njson && (!(r->json[k] = calloc((size_t)m->njson, sizeof *r->json[k])) ||
+                     !(r->stems[k] = calloc((size_t)m->njson, sizeof *r->stems[k])) ||
+                     !(r->d_json[k] = calloc((size_t)m->njson, sizeof *r->d_json[k])) ||
+                     !(r->json_bad[k] = calloc((size_t)m->njson, 1)))) {
         r->oom[k] = 1;
         return;
     }
-    for (int x = 0; x < m->njson && x < 64; x++) {
+    for (int x = 0; x < m->njson; x++) {
         uint64_t sz = 0;
         uint8_t *p = plat_file_read(m->json[x], &sz);
         stem_of(m->json[x], r->stems[k][x], sizeof r->stems[k][x]);
@@ -633,6 +682,10 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     if (n < 1 || n > 64 || !mount || !key) return 0;
     const RtConfig *cfg = rt_config();
     if (!cfg || !cfg->profile) return 0;
+    // lock is held for the whole merge, one at a time. A merge made ahead (bdat_merge_prepare) runs below normal
+    // priority, so a game thread opening a data table meanwhile waits on it: a priority inversion, accepted because the
+    // game opens its tables only at start-up (before any merge ahead can run) and the Mods tab's next start is the
+    // only other caller. A finer lock would be needed if that changed.
     plat_mutex_lock(&lock);
     target = next;
     int ok = 0, full = -1;
@@ -643,7 +696,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     uint64_t size[64] = {0};
     BdatJson *json[64] = {0};
     int njson[64] = {0};
-    char stems[64][64][128], label[64][160];
+    char label[64][160];
     for (int k = 0; k < n; k++) label_of(mods[k].id, label[k], sizeof label[k]);
     size_t game_n = 0, merged_n = 0, stored_n = 0;
     Notes notes = {.key = key};
@@ -664,7 +717,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
         char *q = (char *)plat_file_read(quick, &qn), *nl = q ? strchr(q, '\n') : NULL;
         if (nl) *nl = 0;
         if (q && qn > 34 && !memcmp(q, qkey, 32) && q[32] == ' ' && !strchr(q + 33, '/') && !strchr(q + 33, '\\') &&
-            snprintf(file, sizeof file, "%s/%s", pr.dir, q + 33) < (int)cap && plat_file_size(file) > 0) {
+            snprintf(file, sizeof file, "%s/%s", pr.dir, q + 33) < (int)cap && cached_ok(file)) {
             snprintf(out, cap, "%s", file);
             ok = 1;
             reuse(key, file, "inputs unchanged", mods, label, n);
@@ -681,7 +734,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     // every mod's copies read and hashed (at the same time when there are threads), then taken in priority order as
     // if one after another: a copy that can't be read ends it, and its notes come in order
     if (!(reads = calloc(1, sizeof *reads))) goto done;
-    *reads = (Reads){.mods = mods, .data = data, .size = size, .json = json, .njson = njson, .stems = stems};
+    *reads = (Reads){.mods = mods, .data = data, .size = size, .json = json, .njson = njson};
     parallel_for(n, read_mod, reads);
     for (int k = 0; k < n; k++) {
         if (reads->full_bad[k]) {
@@ -689,10 +742,10 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
             goto done;
         }
         if (reads->oom[k]) goto done;
-        for (int x = 0; x < mods[k].njson && x < 64; x++)
+        for (int x = 0; x < mods[k].njson; x++)
             if (reads->json_bad[k][x]) {
                 char line[400];
-                snprintf(line, sizeof line, "left out: %s: its table %s.json can't be read", label[k], stems[k][x]);
+                snprintf(line, sizeof line, "left out: %s: its table %s.json can't be read", label[k], reads->stems[k][x]);
                 on_note(&notes, line);
             }
     }
@@ -724,7 +777,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     snprintf(file, sizeof file, "%s/%s", pr.dir, name);
     snprintf(report, sizeof report, "%s.txt", file);
     if (strlen(file) >= cap) goto done;
-    if (plat_file_size(file) > 0) {
+    if (cached_ok(file)) {
         snprintf(out, cap, "%s", file);
         ok = 1;
         reuse(key, file, "found by its inputs' contents", mods, label, n);
@@ -738,7 +791,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     bdat_merge_set_parallel(parallel_for);
     if (!(merged = bdat_merge(&base, in, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
     plat_file_mkdir_p(pr.dir);
-    if (!plat_file_write_atomic(file, merged, merged_n)) {
+    if (!plat_file_write_atomic(file, merged, merged_n) || !write_sum(file, merged, merged_n)) {
         snprintf(why, sizeof why, "%s can't be written", file);
         goto done;
     }
@@ -778,6 +831,11 @@ done:
         free(data[k]);
         for (int x = 0; x < njson[k]; x++) free((void *)json[k][x].data);
         free(json[k]);
+        if (reads) {
+            free(reads->stems[k]);
+            free(reads->d_json[k]);
+            free(reads->json_bad[k]);
+        }
     }
     free(reads);
     free(stored);

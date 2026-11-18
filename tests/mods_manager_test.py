@@ -32,7 +32,7 @@ NOT_MODS = ('Readme Only/readme.txt', 'Two/a/romfs/x', 'Two/b/romfs/y', 'Other/0
 
 
 def clang():
-    found = shutil.which('clang') or ('C:/msys64/ucrt64/bin/clang.exe' if os.name == 'nt' else None)
+    found = os.environ.get('XCX_CLANG') or shutil.which('clang') or ('C:/msys64/ucrt64/bin/clang.exe' if os.name == 'nt' else None)
     return found if found and Path(found).is_file() else None
 
 
@@ -149,11 +149,21 @@ class ModsTest(unittest.TestCase):
         # same places, the same folders are named, and romfs_mods.c finds a moved mod's file once it is on
         exe = Path(self.tmp.name) / 'mod_library_scan.exe'
         plat = 'win32' if os.name == 'nt' else 'linux'
-        libs = ['-lwinmm', '-lbcrypt'] if os.name == 'nt' else ['-lpthread', '-lm']
+        libs = ['-lwinmm', '-lbcrypt'] if os.name == 'nt' else ['-lpthread', '-lm', '-ldl']
         rt = ROOT / 'runtime'
-        subprocess.run([clang(), '-O1', '-w', f'-I{rt}', f'-I{rt / "platform"}', str(ROOT / 'tests/mod_library_scan.c'),
-                        str(rt / 'romfs_mods.c'), str(rt / f'platform/{plat}.c'), str(rt / 'platform/common.c'),
-                        str(rt / 'sha256.c'), *libs, '-o', str(exe)], check=True)
+        stub = []
+        if os.name != 'nt':
+            # linux.c's one SDL call (the clipboard), declared and defined here: the test needs no SDL3 package
+            sdl = Path(self.tmp.name) / 'sdl'
+            (sdl / 'SDL3').mkdir(parents=True)
+            (sdl / 'SDL3' / 'SDL_clipboard.h').write_text(
+                '#include <stdbool.h>\nbool SDL_SetClipboardText(const char *t);\n')
+            (sdl / 'sdl_stub.c').write_text(
+                '#include <SDL3/SDL_clipboard.h>\nbool SDL_SetClipboardText(const char *t) { (void)t; return false; }\n')
+            stub = [f'-I{sdl}', str(sdl / 'sdl_stub.c')]
+        subprocess.run([clang(), '-O1', '-w', '-std=gnu11', f'-I{rt}', f'-I{rt / "platform"}', *stub,
+                        str(ROOT / 'tests/mod_library_scan.c'), str(rt / 'romfs_mods.c'), str(rt / f'platform/{plat}.c'),
+                        str(rt / 'platform/common.c'), str(rt / 'sha256.c'), *libs, '-o', str(exe)], check=True)
         self.put(*HAND_PLACED, *NOT_MODS)
         game = Path(self.tmp.name) / 'game'
         shutil.copytree(self.dest / 'mods', game)

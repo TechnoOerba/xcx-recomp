@@ -351,5 +351,163 @@ class RarTest(unittest.TestCase):
             self.assertEqual(e.exception.id, error)
 
 
+def rar5_renamed(src, old, new, out):
+    """A copy of the RAR5 archive src with the entry name old (bytes) replaced by new, of the same length, and every
+    header's CRC32 made right again: an archive as a crafted one would come, which no RAR tool writes."""
+    import zlib
+    assert len(old) == len(new)
+    data = bytearray(Path(src).read_bytes())
+    at = data.index(old)
+    data[at:at + len(old)] = new
+
+    def vint(pos):
+        value = shift = 0
+        while True:
+            b = data[pos]
+            value |= (b & 0x7F) << shift
+            pos += 1
+            shift += 7
+            if not b & 0x80:
+                return value, pos
+    pos = 8   # after the signature
+    while pos + 4 < len(data):
+        size, start = vint(pos + 4)
+        end = start + size
+        data[pos:pos + 4] = struct.pack('<I', zlib.crc32(data[pos + 4:end]))
+        _type, q = vint(start)
+        flags, q = vint(q)
+        if flags & 1:
+            _extra, q = vint(q)
+        body = 0
+        if flags & 2:
+            body, q = vint(q)
+        pos = end + body
+    Path(out).write_bytes(data)
+    return Path(out)
+
+
+class NameTest(unittest.TestCase):
+    """The names an archive may write (installer/archive.py, safe_name; installer/unpack.c, safe_name is the same)."""
+
+    def test_names(self):
+        for name in ('romfs/bdat/common.bdat', 'a\\b.txt', 'com.bdat', 'console.txt', 'COM.x/a', '.hidden', 'dir/'):
+            self.assertIsNotNone(archive.safe_name(name), name)
+        for name in ('', '/abs', 'C:/x', 'a/../b', '..', './a', 'a/./b', 'a\x01', 'CON', 'aux.bdat', 'x/com1.txt',
+                     'LPT9', 'Nul .txt', 'prn/a', 'a./b', 'a /b', 'end.', 'end '):
+            self.assertIsNone(archive.safe_name(name), name)
+
+    def test_ids(self):
+        self.assertTrue(mods.valid_id('tweaks.all'))
+        for mid in ('tweaks.', 'Tweaks', '1mod', 'a' * 65, 'a b', ''):
+            self.assertFalse(mods.valid_id(mid), mid)
+
+
+class IndexTest(unittest.TestCase):
+    """The two lists the library publishes (index.json, format 2; index-3.json, format 3) and what --mods-index
+    takes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.entry = {'id': 'plain', 'kind': 'romfs', 'name': 'Plain', 'url': 'https://example.invalid/a.zip',
+                      'sha256': '0' * 64, 'size': 1}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def index(self, data):
+        path = self.dir / 'index.json'
+        path.write_text(json.dumps(data))
+        return str(path)
+
+    def test_both_formats_and_the_default(self):
+        self.assertEqual(mods.INDEX_FILE, 'index-3.json')
+        for fmt in (2, 3):
+            self.assertEqual([e['id'] for e in mods.fetch_index(self.index({'format': fmt, 'mods': [self.entry]}))],
+                             ['plain'])
+        for data in ({'format': 4, 'mods': []}, {'format': 3},
+                     {'format': 3, 'mods': [self.entry] * (mods.INDEX_MAX_ENTRIES + 1)}):
+            with self.assertRaises(mods.ModError) as e:
+                mods.fetch_index(self.index(data))
+            self.assertEqual(e.exception.id, 'mods.index_format')
+
+    def test_plain_links_are_refused(self):
+        for url in ('http://example.invalid/index.json', 'ftp://example.invalid/i.json'):
+            with self.assertRaises(mods.ModError) as e:
+                mods.fetch_index(url)
+            self.assertEqual((e.exception.id, e.exception.params['url']), ('mods.index_https', url))
+
+    def test_an_empty_part_id_is_refused(self):
+        entry = {'id': 'tweaks', 'kind': 'romfs', 'download': 'manual', 'name': 'T',
+                 'parts': [{'id': '', 'name': 'Empty', 'page': 'https://example.invalid', 'sha256': '1' * 64,
+                            'size': 1}]}
+        self.assertEqual(mods.fetch_index(self.index({'format': 3, 'mods': [entry]})), [])
+
+
+class CopyFirstTest(unittest.TestCase):
+    """A manual install unpacks a copy of the player's file, checked again, never the file itself."""
+
+    def test_a_file_that_changes_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            dest = t / 'XCX'
+            (dest / 'mods').mkdir(parents=True)
+            zpath = t / 'mod.zip'
+            with zipfile.ZipFile(zpath, 'w') as z:
+                z.writestr('romfs/bdat/common.bdat', b'one')
+            data = zpath.read_bytes()
+            entry = {'id': 'm', 'kind': 'romfs', 'download': 'manual', 'name': 'M', 'page': 'https://example.invalid',
+                     'file': zpath.name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+            part = mods.parts_of(entry)[0]
+            # matched by hash, then changed before the install reads it
+            with zipfile.ZipFile(zpath, 'w') as z:
+                z.writestr('romfs/bdat/common.bdat', b'two')
+            with self.assertRaises(mods.ModError) as e:
+                mods.install_part(dest, entry, part, zpath)
+            self.assertEqual((e.exception.id, e.exception.params['picked']), ('mods.file_changed', 'mod.zip'))
+            self.assertFalse((dest / 'mods' / 'm').exists())
+
+
+@unittest.skipUnless(clang(), 'needs clang (XCX_CLANG, PATH or MSYS2 UCRT64)')
+class RarNamesTest(unittest.TestCase):
+    """xcx-unpack with paths outside the system code page, and crafted entry names it must refuse."""
+
+    @classmethod
+    def setUpClass(cls):
+        import build_unpack
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        build_unpack.build(clang(), cls.root / 'bin' / archive.UNPACK)
+        cls.layout = SimpleNamespace(dev=False, root=cls.root)
+        cls.exe = cls.root / 'bin' / archive.UNPACK
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_cyrillic_folders(self):
+        folder = self.root / 'Иван' / 'Загрузки'
+        folder.mkdir(parents=True)
+        path = fixture('test_read_format_rar5_stored.rar', folder)
+        self.assertEqual([m.name for m in archive.members(path, self.layout)], ['helloworld.txt'])
+        out = self.root / 'Иван' / 'мод'
+        self.assertEqual(archive.extract(path, self.layout, {'helloworld.txt': 'bdat/привет.txt'}, out, 1 << 20), 1)
+        self.assertEqual((out / 'bdat' / 'привет.txt').stat().st_size, 29)
+
+    def test_crafted_names_are_refused(self):
+        src = fixture('test_read_format_rar5_stored.rar', self.root)
+        for new in (b'../loworld.txt', b'aux.oworld.txt', b'helloworld.tx.', b'\\\\?\\oworld.txt', b'C:hloworld.txt'):
+            path = rar5_renamed(src, b'helloworld.txt', new, self.root / 'crafted.rar')
+            listed = archive.members(path, self.layout)
+            self.assertEqual([m.safe for m in listed], [False], new)
+            out = self.root / ('out-' + new.hex())
+            out.mkdir()
+            with self.assertRaises(archive.ArchiveError) as e:
+                archive.run_tool(self.exe, 'extract', path, out, 1 << 20)
+            self.assertEqual(e.exception.id, 'mods.zip_unsafe', new)
+            self.assertEqual(list(out.iterdir()), [], new)
+            self.assertFalse((self.root / 'loworld.txt').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -6,7 +6,7 @@
     python -m installer.mods --dest DIR add FILE [--id ID] [--top FOLDER] [--yes]   a mod archive downloaded by hand
     python -m installer.mods --dest DIR remove|enable|disable ID
 
-Two kinds of mod, as the library's index.json lists them:
+Two kinds of mod, as the library's index-3.json lists them (INDEX_FILE):
   lua    mods/<id>/ with mod.ini and main.lua, run by runtime/mods.c. On when listed in mods/enabled.txt; installed
          ones are also listed in mods/catalog.txt so the game's Mods page shows them while off. Read at start-up.
   romfs  mods/<id>/romfs/<game path>, files in place of the game's own (runtime/romfs_mods.c). On when listed in
@@ -46,7 +46,15 @@ from . import archive, mod_layout
 from .game_paths import GamePaths
 
 LIBRARY = 'https://raw.githubusercontent.com/jmars125/xcx-recomp-mods/main/'
-INDEX_FORMAT = 2
+# The library publishes two lists. index.json (format 2) holds only what every released manager installs: Lua mods and
+# game-file mods downloaded as one zip; releases up to 0.1.21 and the game's own library list (runtime/mod_library.c)
+# read it. index-3.json (format 3) holds every entry, also those downloaded from their own page ("download":
+# "manual"), in parts, or as RAR ("archive": "rar"); this manager reads it. An index given by --mods-index may be
+# either format.
+INDEX_FILE = 'index-3.json'
+INDEX_FORMAT = 3
+INDEX_FORMATS = (2, 3)
+INDEX_MAX_ENTRIES = 5000
 AGENT = 'XCX-Setup-mods'
 UNPACK_LIMIT = 16 << 30          # bytes a game-file mod may unpack to
 LUA_FILES = {'mod.ini', 'main.lua', 'info.ini', 'README.md', 'LICENSE', 'LICENSE.txt'}
@@ -62,7 +70,9 @@ class ModError(Exception):
 
 
 def valid_id(mid):
-    return (isinstance(mid, str) and 0 < len(mid) <= 64 and 'a' <= mid[0] <= 'z'
+    """A mod id: a lowercase letter, then letters, digits and . _ -, at most 64, and no dot at the end (Windows drops
+    it, so 'a.' would be the folder of mod 'a'). runtime/mod_library.c, valid_id, is the same."""
+    return (isinstance(mid, str) and 0 < len(mid) <= 64 and 'a' <= mid[0] <= 'z' and not mid.endswith('.')
             and all('a' <= ch <= 'z' or '0' <= ch <= '9' or ch in '._-' for ch in mid))
 
 
@@ -303,16 +313,20 @@ def opener(url):
 
 
 def fetch_index(source=None):
-    """The library's entries. source: a URL or a local index.json (tests); default the library on GitHub."""
+    """The library's entries. source: an https URL or a local index file (--mods-index, tests); default the library
+    on GitHub. An http:// or other link is refused (a plain link could be changed on the way)."""
+    if source and '://' in source and not source.startswith('https://'):
+        raise ModError('mods.index_https', url=source)
     try:
         if source and not source.startswith('https://'):
             data = json.loads(Path(source).read_text(encoding='utf-8'))
         else:
-            with opener(source or LIBRARY + 'index.json') as r:
+            with opener(source or LIBRARY + INDEX_FILE) as r:
                 data = json.loads(r.read(8 << 20).decode('utf-8'))
     except (OSError, ValueError) as e:
         raise ModError('mods.index_failed', detail=str(e)) from e
-    if not isinstance(data, dict) or data.get('format') != INDEX_FORMAT or not isinstance(data.get('mods'), list):
+    if (not isinstance(data, dict) or data.get('format') not in INDEX_FORMATS or not isinstance(data.get('mods'), list)
+            or len(data['mods']) > INDEX_MAX_ENTRIES):
         raise ModError('mods.index_format')
     return [m for m in data['mods'] if isinstance(m, dict) and valid_id(m.get('id')) and m.get('kind') in LISTS
             and usable_parts(m)]
@@ -532,9 +546,19 @@ def install_part(dest, entry, part, path=None, progress=None, layout=None, plan=
     with tempfile.TemporaryDirectory(dir=root, prefix='.install-') as tmp:
         staged = Path(tmp) / mid
         staged.mkdir()
+        copy = Path(tmp) / 'mod.download'
         if path is None:
-            path = Path(tmp) / 'mod.download'
-            download(part['url'], int(part['size']), part['sha256'], path, progress)
+            download(part['url'], int(part['size']), part['sha256'], copy, progress)
+        else:
+            # the player's file, copied first and checked again: what is unpacked is what was checked, even if the
+            # file in Downloads changes meanwhile
+            try:
+                shutil.copyfile(path, copy)
+            except OSError as e:
+                raise ModError('mods.failed', detail=str(e)) from e
+            if file_hash(copy) != (int(part['size']), part['sha256']):
+                raise ModError('mods.file_changed', picked=Path(path).name)
+        path = copy
         unpack_romfs(path, staged, dest, plan, layout)
         name = part_name(entry, part)
         source = entry.get('homepage') or 'library'

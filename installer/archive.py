@@ -22,6 +22,8 @@ CHUNK = 1 << 20
 MAGIC = {b'PK\x03\x04': 'zip', b'PK\x05\x06': 'zip', b'Rar!\x1a\x07\x00': 'rar', b'Rar!\x1a\x07\x01\x00': 'rar',
          b"7z\xbc\xaf'\x1c": '7z'}
 UNPACK = 'xcx-unpack' + ('.exe' if os.name == 'nt' else '')
+MAX_ENTRIES = 100000   # far above any mod (installer/unpack.c, MAX_ENTRIES)
+DEVICES = {'CON', 'PRN', 'AUX', 'NUL', *(f'{d}{n}' for d in ('COM', 'LPT') for n in '0123456789')}
 
 
 class ArchiveError(Exception):
@@ -51,12 +53,15 @@ def kind_of(path):
 
 
 def safe_name(name):
-    """name with '/' separators when the manager may write it, else None (the rule of installer/unpack.c, safe_name)."""
+    """name with '/' separators when the manager may write it, else None (the rule of installer/unpack.c, safe_name):
+    no absolute path, drive letter, control character or '.'/'..' part, no Windows device name (CON, aux.bdat) and no
+    part ending in a dot or space (Windows drops that end, so two names could become one)."""
     name = name.replace('\\', '/').rstrip('/')
     if not name or name.startswith('/') or any(ord(c) < 0x20 or c == ':' for c in name):
         return None
-    if any(part in ('', '.', '..') for part in name.split('/')):
-        return None
+    for part in name.split('/'):
+        if not part or part[-1] in '. ' or part.split('.')[0].rstrip(' ').upper() in DEVICES:
+            return None
     return name
 
 
@@ -117,6 +122,8 @@ def members(path, layout=None):
     if kind == 'zip':
         try:
             with zipfile.ZipFile(path) as z:
+                if len(z.infolist()) > MAX_ENTRIES:
+                    raise ArchiveError('archive.too_many')
                 out = []
                 for info in z.infolist():
                     mode = (info.external_attr >> 16) & 0o170000

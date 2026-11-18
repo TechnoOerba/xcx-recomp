@@ -37,6 +37,8 @@ typedef struct { char name[32]; char sha256[65]; uint64_t size; } LuaFile;
 typedef struct {
     ModLibRow row;
     char url[400], sha256[65], path[128];
+    char download[16], archive[16];   // "manual" / "zip", "rar": entries of index format 3 this list can't install
+    int has_parts;
     int nfiles;
     LuaFile files[LUA_FILES];
 } Entry;
@@ -59,7 +61,8 @@ static void set_message(int error, const char *fmt, const char *a, const char *b
 
 static int valid_id(const char *id) {
     size_t n = strlen(id);
-    if (!n || n > 64 || !islower((unsigned char)id[0])) return 0;
+    // no dot at the end: Windows drops it, so "a." would be the folder of mod "a"
+    if (!n || n > 64 || !islower((unsigned char)id[0]) || id[n - 1] == '.') return 0;
     for (size_t i = 0; i < n; i++)
         if (!islower((unsigned char)id[i]) && !isdigit((unsigned char)id[i]) && !strchr("._-", id[i])) return 0;
     return 1;
@@ -218,6 +221,8 @@ static void entry(Json *j, Entry *e) {
         STR("id", r->id) STR("kind", r->kind) STR("name", r->name) STR("author", r->author)
         STR("description", r->description) STR("notes", r->notes) STR("homepage", r->homepage)
         STR("version", r->version) STR("url", e->url) STR("sha256", e->sha256) STR("path", e->path)
+        STR("download", e->download) STR("archive", e->archive)
+        else if (!strcmp(key, "parts")) { e->has_parts = 1; skip(j, 2); }
         else if (!strcmp(key, "size")) { if (!number(j, &r->size)) skip(j, 2); }
         else if (!strcmp(key, "files")) lua_files(j, e);
         else skip(j, 2);
@@ -226,12 +231,17 @@ static void entry(Json *j, Entry *e) {
     if (!eat(j, '}')) j->bad = 1;
 }
 
-// Whether an entry is complete enough to install, by the rules of installer/mods.py.
+// Whether an entry is complete enough to install, by the rules of installer/mods.py. This list downloads one zip per
+// mod and unpacks it itself (mod_zip.c), so it refuses what only XCX Setup installs: a mod downloaded from its own
+// page ("download": "manual"), a mod in parts, and an archive other than zip. The library keeps those out of
+// index.json (format 2) and lists them in index-3.json, which this list doesn't read; the check is for an index
+// given by hand (XCX_MOD_INDEX) or a mistake in the library.
 static int usable(const Entry *e) {
     const ModLibRow *r = &e->row;
     if (!valid_id(r->id)) return 0;
     if (!strcmp(r->kind, "romfs"))
-        return valid_sha(e->sha256) && r->size && (!strncmp(e->url, "https://", 8) ||
+        return !e->download[0] && !e->has_parts && (!e->archive[0] || !strcmp(e->archive, "zip")) &&
+               valid_sha(e->sha256) && r->size && (!strncmp(e->url, "https://", 8) ||
                (!strncmp(e->url, "file:", 5) && getenv("XCX_MOD_TEST_FILES")));
     if (!strcmp(r->kind, "lua")) {
         if (!e->nfiles || e->nfiles > LUA_FILES || !e->path[0] || strstr(e->path, "..")) return 0;

@@ -40,6 +40,9 @@ class ModsWindow:
         f = ttk.Frame(w, padding=PAD)
         f.pack(fill='both', expand=True)
         ttk.Label(f, text=cat('mods.intro', dest=str(self.dest)), wraplength=700, justify='left').pack(anchor='w')
+        if index:   # --mods-index: entries no one has checked, so say so above the list the whole time
+            ttk.Label(f, text=cat('mods.custom_index', source=index), wraplength=700, justify='left',
+                      foreground=theme.WARN).pack(anchor='w', pady=(6, 0))
 
         bar = ttk.Frame(f)   # packed before the list so the list shrinks, never the buttons
         bar.pack(side='bottom', fill='x', pady=(10, 0))

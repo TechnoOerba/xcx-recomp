@@ -21,7 +21,11 @@ python3 tests/mods_archive_test.py
 Why libarchive: it reads RAR 4 and 5 under a BSD licence. The RAR reader of 7-Zip and the UnRAR source carry
 RarLab's licence, which forbids using the code to recreate the RAR compression algorithm and is not open source.
 
-To move to a newer libarchive: copy the same files from its release archive, rewrite `pins.json` with their hashes and
-the archive's, then rebuild and run the tests above. Do not edit pristine files; anything the build needs changed goes
+`tools/check_libarchive_pins.py` downloads the release archive, checks it against `archive_sha256`, and compares every
+pinned file with it byte for byte (`--archive FILE` for one on disk).
+
+To move to a newer libarchive: `python tools/check_libarchive_pins.py --update VERSION --sha256 HASH` (the hash from the
+release page) copies the same files from its release archive and rewrites `pins.json`; then rebuild and run the tests
+above. Do not edit pristine files; anything the build needs changed goes
 in `config.h` or `installer/unpack.c`. libarchive's RAR readers have had security fixes in most releases, so keep the
 pin current.

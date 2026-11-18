@@ -48,13 +48,28 @@ def check_pins():
     return pins
 
 
-def command(cc, out, extra=()):
+def for_linux(extra):
+    return any('linux' in str(e) for e in extra) or (os.name != 'nt' and sys.platform.startswith('linux'))
+
+
+def commands(cc, out, objs, extra=()):
+    """The compiler runs: our unpack.c with every warning as an error, libarchive's files as they are (their warnings
+    are upstream's, and the files stay unmodified), then the link. On Linux all of it with the stack protector and
+    _FORTIFY_SOURCE, as distributions build."""
     lib = DEP / 'pristine' / 'libarchive'
-    cmd = [str(cc), '-O2', '-w', '-DHAVE_CONFIG_H', '-I', str(DEP), '-I', str(lib), *map(str, extra),
-           str(SOURCE), *(str(lib / u) for u in UNITS), '-o', str(out)]
-    if os.name == 'nt' and not any('linux' in str(e) for e in extra):
-        cmd.append('-lbcrypt')   # archive_random.c: BCryptGenRandom
-    return cmd + ['-Wl,-s']
+    base = [str(cc), '-O2', '-DHAVE_CONFIG_H', '-I', str(DEP), '-I', str(lib), *map(str, extra)]
+    if for_linux(extra):
+        base += ['-fstack-protector-strong', '-D_FORTIFY_SOURCE=2']
+    # (a link flag among extra, such as -fuse-ld=lld, is unused while compiling)
+    runs = [base + ['-Wall', '-Wextra', '-Werror', '-Wno-unused-command-line-argument', '-c', str(SOURCE),
+                    '-o', str(objs / 'unpack.o')]]
+    runs += [base + ['-w', '-c', str(lib / u), '-o', str(objs / (u[:-2] + '.o'))] for u in UNITS]
+    link = [str(cc), *map(str, extra), str(objs / 'unpack.o'), *(str(objs / (u[:-2] + '.o')) for u in UNITS),
+            '-o', str(out)]
+    if os.name == 'nt' and not for_linux(extra):
+        link.append('-lbcrypt')   # archive_random.c: BCryptGenRandom
+        link.append('-municode')   # unpack.c's wmain
+    return runs + [link + ['-Wl,-s']]
 
 
 def build(cc, out, extra=(), env=None):
@@ -64,10 +79,12 @@ def build(cc, out, extra=(), env=None):
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + '.part')
-    r = subprocess.run(command(cc, tmp, extra), capture_output=True, text=True, errors='replace', env=env)
-    if r.returncode:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError((r.stdout + r.stderr).strip()[-4000:])
+    with tempfile.TemporaryDirectory(dir=out.parent, prefix='.unpack-obj-') as objs:
+        for cmd in commands(cc, tmp, Path(objs), extra):
+            r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=env)
+            if r.returncode:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError((r.stdout + r.stderr).strip()[-4000:])
     os.replace(tmp, out)
     return out
 

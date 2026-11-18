@@ -162,7 +162,9 @@ class ModsTest(unittest.TestCase):
                 '#include <stdbool.h>\nbool SDL_SetClipboardText(const char *t);\n')
             (sdl / 'sdl_stub.c').write_text(
                 '#include <SDL3/SDL_clipboard.h>\nbool SDL_SetClipboardText(const char *t) { (void)t; return false; }\n')
-            stub = [f'-I{sdl}', str(sdl / 'sdl_stub.c')]
+            # sha256.c asks __builtin_cpu_supports("sha"), which Ubuntu 24.04's clang 18 doesn't know ("invalid cpu
+            # feature string"); the release builds with its own newer clang. The scan needs no SHA instructions, so it takes the C path.
+            stub = [f'-I{sdl}', str(sdl / 'sdl_stub.c'), '-D__builtin_cpu_supports(feature)=0']
         subprocess.run([clang(), '-O1', '-w', '-std=gnu11', f'-I{rt}', f'-I{rt / "platform"}', *stub,
                         str(ROOT / 'tests/mod_library_scan.c'), str(rt / 'romfs_mods.c'), str(rt / f'platform/{plat}.c'),
                         str(rt / 'platform/common.c'), str(rt / 'sha256.c'), *libs, '-o', str(exe)], check=True)

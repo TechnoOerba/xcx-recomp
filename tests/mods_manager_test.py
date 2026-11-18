@@ -32,7 +32,9 @@ NOT_MODS = ('Readme Only/readme.txt', 'Two/a/romfs/x', 'Two/b/romfs/y', 'Other/0
 
 
 def clang():
-    found = os.environ.get('XCX_CLANG') or shutil.which('clang') or ('C:/msys64/ucrt64/bin/clang.exe' if os.name == 'nt' else None)
+    # XCX_CLANG may be a path or a name on PATH (CI's Linux job gives just 'clang')
+    found = shutil.which(os.environ.get('XCX_CLANG', '')) or os.environ.get('XCX_CLANG') or shutil.which('clang') or \
+        ('C:/msys64/ucrt64/bin/clang.exe' if os.name == 'nt' else None)
     return found if found and Path(found).is_file() else None
 
 

@@ -75,7 +75,10 @@ static void mod_priority(const ModLibView &v,bool idle) {
     static uint64_t seen=~0ull;static double next;static bool stale,listchg,restart_failed;static int ahead;
     static char open_id[65],dl[64][320];static int dk[64],dn;   // the row whose lines are open, and its lines
     double now=ImGui::GetTime();
-    if(v.generation!=seen||now>=next){
+    // a new library view at once while it is idle; during a download or install (which publishes one per chunk) once
+    // a second, like the timer: each refresh looks at every mod file of the merged tables (romfs_mods_check_files)
+    if((v.generation!=seen&&idle)||now>=next){
+        romfs_mods_check_files();   // one look at the files for all rows; the calls below compare what it saw
         listchg=romfs_mods_list_changed()!=0;
         n=romfs_mods_priority(ids,32);stale=romfs_mods_tables_changed()!=0;seen=v.generation;next=now+1.0;
         ahead=stale?romfs_mods_premerge_state():0;
@@ -290,7 +293,7 @@ static bool library(float scale,bool focus_first) {
         ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(strcmp(r.kind,"lua")?UI_MODS_KIND_ROMFS:UI_MODS_KIND_LUA));ImGui::PopTextWrapPos();
         if(r.installed&&r.enabled&&!strcmp(r.kind,"romfs")){   // its place in the Mod priority list below
             static char rank_id[65];static int rank,ranks;static double rank_next;static uint64_t rank_gen=~0ull;
-            if(strcmp(rank_id,r.id)||v.generation!=rank_gen||ImGui::GetTime()>=rank_next){
+            if(strcmp(rank_id,r.id)||(v.generation!=rank_gen&&idle)||ImGui::GetTime()>=rank_next){   // as mod_priority
                 rank_gen=v.generation;
                 char ids[32][65];ranks=romfs_mods_priority(ids,32);rank=0;
                 for(int k=0;k<ranks;++k)if(!strcmp(ids[k],r.id))rank=k+1;

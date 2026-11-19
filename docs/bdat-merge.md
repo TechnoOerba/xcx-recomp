@@ -65,8 +65,10 @@ Per table:
 - **Row numbers.** Rows that end up at another number than in a mod's own copy are reported for that mod: its other
   tables may point at them by number (text ids, for one).
 
-A mod whose file has another list of tables, or that can't be read, is not merged: if it is the top mod its whole
-file is used (with the other mods' changes to that file left out), otherwise its changes to that file are left out.
+A mod whose file has another list of tables, or isn't a data table file at all, is left out of that file's merge and
+reported, wherever it is in the list. A mod file that can't be read from disk (a read error, not its contents) stops
+that file's merge: the top mod's whole file is used, with the other mods' changes to it left out, as when the merge
+can't be made at all.
 
 ## Tables as JSON
 
@@ -113,11 +115,20 @@ turned on, whichever does it (the Mod priority list, the library, a mod manager 
 the list ("Priority 2 of 8").
 
 The game reads its data tables only at start-up, so once the mods change while it runs (another order, a mod
-turned on or off, or a mod's files updated: their sizes and times count) the Mods tab says the change applies after a restart and offers **Merge now**: the new list is
-merged in the background (half the logical processors, at most 4, below normal priority), its lines and tags are
-shown as the next start's, and the files land in the cache with their quick note, so the next start uses them as
-they are. **Merge automatically when the mods change** (xcx.ini `bdat_merge_auto`) does the same by itself 1.5 s after
-the last change. **Revert to the start-up list** writes the list back as the game started with it, so no restart is
-needed, and **Restart now** starts a new copy of the game that waits for this one to close, then closes it; in the world
-(a save loaded or a new game started, not at the title screen) it asks first, since anything since the last save would
-be lost.
+turned on or off, or a mod's files updated: their sizes and last-write times count) the Mods tab says the change
+applies after a restart and offers **Merge now**: the new list is merged in the background (half the logical
+processors, at most 4, below normal priority), its lines and tags are shown as the next start's, and the files land in
+the cache with their quick note, so the next start uses them as they are. **Merge automatically when the mods change**
+(xcx.ini `bdat_merge_auto`) does the same by itself 1.5 s after the last change. **Revert to the start-up list**
+writes the list back as the game started with it, and **Restart now** starts a new copy of the game that waits for
+this one to close, then closes it; in the world (a save loaded or a new game started, not at the title screen) it asks
+first, since anything since the last save would be lost.
+
+Mod files are looked at only when the list changes, when the library updates a mod, and while the Mods tab is open
+(once a second, one look for all its rows); with the menu closed the game touches no mod file to find changes. A mod
+updated on disk by another program while the menu is closed is seen the next time the Mods tab opens, or else at the
+next start, which merges whatever it finds. This look uses sizes and last-write times only. A start that finds the
+cache uses more: each mod file's change time and its identity on its volume, which a copy tool can't carry over, on
+the file systems known to keep them (NTFS and ReFS on Windows; ext4, btrfs, xfs, f2fs, zfs, bcachefs, tmpfs and
+overlayfs on Linux), and otherwise reads and hashes the mod files. So a copy tool that keeps a file's size and dates
+can update a mod without the Mods tab noticing, and the next start still merges it again.

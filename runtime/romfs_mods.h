@@ -25,6 +25,11 @@ void romfs_mods_reload(void);
 // where it was; any other goes last in romfs-enabled.txt, at the lowest priority. The game picks the change up within
 // CHECK_MS of romfs_mods.c.
 int romfs_mods_set(const char *id, int on);
+// Looks at every mod file of the data tables the game read, once for all of them, for romfs_mods_tables_changed,
+// romfs_mod_changed and romfs_mods_premerge_state, which compare what was looked at last. The Mods tab calls it at each
+// refresh; nothing else looks at mod files except after a list change or an update, so with the menu closed none is
+// touched.
+void romfs_mods_check_files(void);
 // 1 when romfs-enabled.txt is no longer as it was when the game read its data tables (romfs_mods_tables_changed can
 // also be 1 for an updated mod with the list unchanged).
 int romfs_mods_list_changed(void);
@@ -34,13 +39,14 @@ int romfs_mods_list_changed(void);
 // guess from file names is ever wrong, it asks once too often rather than skipping the question in the world.
 int romfs_game_in_world(void);
 // How mod id's data tables differ from what the game read at start-up: 1 its files were updated since (sizes or
-// times), 2 it was turned on since, 0 neither (or it has none). For the mark on its Mod priority row.
+// times, as last looked at: romfs_mods_check_files), 2 it was turned on since, 0 neither (or it has none). For the mark
+// on its Mod priority row.
 int romfs_mod_changed(const char *id);
 // Writes romfs-enabled.txt back as it was when the game read its data tables; 1 when written.
 int romfs_mods_restore_list(void);
 // 1 when the mods that data tables the game read at start-up would be made from (which mods, in which order, and
-// their files' sizes and times) are no longer the ones they were made from: the game reads those tables only at
-// start-up, so it needs a restart.
+// their files' sizes and times, as last looked at: romfs_mods_check_files) are no longer the ones they were made from:
+// the game reads those tables only at start-up, so it needs a restart.
 int romfs_mods_tables_changed(void);
 // Merges the data tables the game read at start-up from the mods as they are now, on a thread of its own, so the next
 // start finds them made (bdat_merge_prepare; the F1 Mods tab's Merge now). 1 when it started; 0 when one is running

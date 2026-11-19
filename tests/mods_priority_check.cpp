@@ -41,6 +41,8 @@ __attribute__((weak)) int romfs_mods_move(const char *id, int up) {
     return 1;
 }
 __attribute__((weak)) int romfs_mods_tables_changed(void) { return test_changed; }
+static int test_file_checks;   // romfs_mods_check_files calls: one per refresh, never one per row
+__attribute__((weak)) void romfs_mods_check_files(void) { test_file_checks++; }
 static int test_ahead, premerges;   // romfs_mods_premerge_state; calls of romfs_mods_premerge
 static const char *test_next[4];
 static int test_nnext;
@@ -339,6 +341,23 @@ int main() {
     test_restarted = 1;
     click(prio_yes_low, prio_yes_high);
     verify(restarts == 2, "the question's Restart does nothing once a restart is under way");
+
+    // the mod files are looked at once per refresh, not once per row; and a download, which publishes a new library
+    // view with every chunk, doesn't make the page look at them every frame
+    test_changed = 0;   // nothing stale: the page's own timer waits a full second
+    test_file_checks = 0;
+    refresh();
+    verify(test_file_checks == 1, "one look at the mod files per refresh, for all three rows");
+    test_view.state = MODLIB_WORKING;
+    test_file_checks = 0;
+    for (int i = 0; i < 30; i++) {   // half a second of frames, each with a new view
+        test_view.generation++;
+        frame();
+    }
+    verify(test_file_checks == 0, "a download's new views don't make the page look at the mod files every frame");
+    test_view.state = MODLIB_IDLE;
+    refresh();
+    verify(test_file_checks == 1, "once the library is idle again, its new view is looked at at once");
 
     ImGui::DestroyContext();
     if (!failures) printf("ok %d\n", checks);

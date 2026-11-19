@@ -68,11 +68,12 @@ static char start_mount[64];               // the mount the game read them from
 // The merges made ahead (romfs_mods_premerge): each data table of started and its mods then, as in started.
 static Merged ahead[STARTED_CAP];
 static int nahead, ahead_busy;
-static uint64_t changed_at;                // when the list last changed (rebuild); under check_lock
+static uint64_t changed_at;                // when the list or a mod's files last changed (rebuild, refresh_sigs); atomic
 static char cur_list[LIST_CAP + 1];        // the list text the map was built from; under lock
 static char *start_list;                   // the list text when the game read its first data table; under lock
 static int stale_now(void);
 static int ahead_state(void);
+static void refresh_sigs(void);
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -287,13 +288,15 @@ static void maybe_reload(void) {
             memcpy(list_seen, buf, (size_t)(len > 0 ? len : 0) + 1);
             list_len_seen = len;
             if (len >= 0 || nfiles) rebuild(buf);
-            changed_at = now;
+            __atomic_store_n(&changed_at, now, __ATOMIC_RELAXED);
+            refresh_sigs();   // the files of the list as it is now (a list change is rare: this is no timer)
         }
     }
-    // bdat_merge_auto: once a changed list has stayed put a moment (a few Up/Down clicks are one change), the data
-    // tables are merged ahead whenever the game read them otherwise than they'd be made now (another list, or a mod's
-    // files updated) and no merge for this list is made or running.
-    if (now - changed_at >= AUTO_MS && !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE) &&
+    // bdat_merge_auto: once the mods have stayed put a moment (a few Up/Down clicks are one change, a file being copied
+    // is still changing), the data tables are merged ahead whenever the game read them otherwise than they'd be made
+    // now (another list, or a mod's files updated) and no merge for this list is made or running. stale_now and
+    // ahead_state compare what was last looked at (refresh_sigs): no file is touched here.
+    if (now - __atomic_load_n(&changed_at, __ATOMIC_RELAXED) >= AUTO_MS && !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE) &&
         cfg_bool("XCX_BDAT_MERGE_AUTO") && stale_now() && ahead_state() == 0 && romfs_mods_premerge())
         rt_log("romfs mods: the mods changed; merging their data tables ahead for the next start");
     plat_mutex_unlock(&check_lock);
@@ -353,37 +356,98 @@ static uint32_t fnv(uint32_t h, const void *p, size_t n) {
     return h;
 }
 
-// A file's path, size and last-write time into h: an updated copy (same mod, same place) changes it.
+// A file's path, size and last-write time into h: an updated copy (same mod, same place) changes it. Less than the
+// start-up check uses (bdat_merge_serve.c's quick key adds the change time and the file's identity, which takes a
+// handle per file): a copy tool that keeps a file's size and dates gives no restart line here, and the next start still
+// merges it again. One cheap stat per file is what the Mods tab can afford once a second.
 static uint32_t stamp(uint32_t h, const char *path) {
     int64_t v[2] = {0, 0};
     plat_file_stat(path, &v[0], &v[1]);
     return fnv(fnv(h, path, strlen(path)), v, sizeof v);
 }
 
-// The enabled mods that have a copy of data table key or JSON tables of it, highest priority first, each with a stamp
-// of those files ("a#1f2e3d4c,b#...,") into sig: what the table would be made from now. Under the map's lock.
-static void table_inputs(const char *key, char *sig, size_t cap) {
-    size_t lo = 0, hi = 0, pre = strlen(key) - 4, n = 0;
-    ModFile *f = find(key);
-    json_range(key, &lo, &hi);
+static int gather(const char *key, BdatModFiles *in, int *ok, int *merge);
+static void free_gathered(BdatModFiles *in, int nin);
+
+// The mods of a table as gather gave them, each with a stamp of its files ("a#1f2e3d4c,b#...,") into sig. Reads only
+// the copies of the paths, so it runs without the map's lock.
+static void sig_of(const BdatModFiles *in, int nin, char *sig, size_t cap) {
+    size_t n = 0;
     sig[0] = 0;
-    for (int m = 0; m < norder; m++) {
+    for (int m = 0; m < nin; m++) {
         uint32_t h = 2166136261u;
-        int has = 0;
-        const char *full = f ? copy_of(f, order[m]) : NULL;
-        if (full) {
-            has = 1;
-            h = stamp(h, full);
-        }
-        for (size_t i = lo; i < hi; i++) {
-            const char *p = is_json_of(files[i].key, pre) ? copy_of(&files[i], order[m]) : NULL;
-            if (p) {
-                has = 1;
-                h = stamp(h, p);
-            }
-        }
-        if (has && n + strlen(order[m]) + 11 <= cap) n += (size_t)snprintf(sig + n, cap - n, "%s#%08x,", order[m], h);
+        if (in[m].full) h = stamp(h, in[m].full);
+        for (int x = 0; x < in[m].njson; x++) h = stamp(h, in[m].json[x]);
+        if (n + strlen(in[m].id) + 11 <= cap) n += (size_t)snprintf(sig + n, cap - n, "%s#%08x,", in[m].id, h);
     }
+}
+
+// The enabled mods that have a copy of data table key or JSON tables of it, highest priority first, each with a stamp
+// of those files: what the table would be made from now. Under the map's lock (it looks at every file: boot, and the
+// merge made ahead; the menu's checks go through refresh_sigs, which looks at them without the lock).
+static void table_inputs(const char *key, char *sig, size_t cap) {
+    BdatModFiles in[MOD_CAP];
+    int ok = 1, merge = 0;
+    int nin = gather(key, in, &ok, &merge);
+    sig_of(in, nin, sig, cap);
+    free_gathered(in, nin);
+}
+
+// What each data table the game read would be made from now, as last looked at: indexed as started[], NULL while
+// nothing was looked at since start-up (then: as at start-up). Mod files are looked at only after the list changes
+// (maybe_reload's rebuild), after an update (romfs_mods_reload, which rebuilds too) and when the Mods tab asks
+// (romfs_mods_check_files), never on a timer: with the menu closed, nothing here touches a mod file.
+static char *cur_sig[STARTED_CAP];
+static PlatMutex sig_lock = PLAT_MUTEX_INIT;   // guards cur_sig
+
+// Table i's signature as last looked at into out; under the map's lock (for started[]).
+static void sig_now(int i, char *out, size_t cap) {
+    plat_mutex_lock(&sig_lock);
+    snprintf(out, cap, "%s", cur_sig[i] ? cur_sig[i] : started[i].path ? started[i].path : "");
+    plat_mutex_unlock(&sig_lock);
+}
+
+// Sets table key's signature as last looked at (a merge made ahead from it, for one); 1 when it differs from before.
+// Under the map's lock.
+static int set_sig(const char *key, const char *sig) {
+    for (int i = 0; i < nstarted; i++)
+        if (!strcmp(started[i].key, key)) {
+            char *copy = strdup(sig);
+            if (!copy) return 0;
+            plat_mutex_lock(&sig_lock);
+            const char *was = cur_sig[i] ? cur_sig[i] : started[i].path ? started[i].path : "";
+            int differs = strcmp(was, sig) != 0;
+            free(cur_sig[i]);
+            cur_sig[i] = copy;
+            plat_mutex_unlock(&sig_lock);
+            return differs;
+        }
+    return 0;
+}
+
+// Looks at every mod file of every data table the game read, once for all of them: the paths copied under the map's
+// lock, the files looked at after it is released, so a slow disk never holds up the game's lookups. A change from
+// what was seen last restarts bdat_merge_auto's wait, so a file still being written isn't merged half done.
+static void refresh_sigs(void) {
+    plat_mutex_lock_shared(&lock);
+    int n = nstarted;
+    plat_mutex_unlock_shared(&lock);
+    int changed = 0;
+    for (int i = 0; i < n; i++) {
+        BdatModFiles in[MOD_CAP];
+        int ok = 1, merge = 0;
+        plat_mutex_lock_shared(&lock);
+        const char *key = started[i].key;   // started[] entries stay for the run
+        int nin = gather(key, in, &ok, &merge);
+        plat_mutex_unlock_shared(&lock);
+        char sig[SIG_CAP];
+        sig_of(in, nin, sig, sizeof sig);
+        free_gathered(in, nin);
+        plat_mutex_lock_shared(&lock);
+        changed |= set_sig(key, sig);
+        plat_mutex_unlock_shared(&lock);
+    }
+    if (changed) __atomic_store_n(&changed_at, plat_now_ms(), __ATOMIC_RELAXED);
 }
 
 // Per enabled mod with a copy of data table key or JSON tables of it, in priority order: those files as in[] (the
@@ -772,7 +836,7 @@ int romfs_mod_changed(const char *id) {
     plat_mutex_lock_shared(&lock);
     for (int i = 0; i < nstarted && how != 1; i++) {
         char now[SIG_CAP], a[96], b[96];
-        table_inputs(started[i].key, now, sizeof now);
+        sig_now(i, now, sizeof now);
         sig_entry(started[i].path ? started[i].path : "", id, a, sizeof a);
         sig_entry(now, id, b, sizeof b);
         if (b[0] && !a[0]) how = 2;
@@ -813,12 +877,20 @@ int romfs_mods_tables_changed(void) {
     return stale_now();
 }
 
+void romfs_mods_check_files(void) {
+    if (!mods_root()) return;
+    maybe_reload();
+    plat_mutex_lock(&check_lock);   // one look at a time, and not inside a rebuild
+    refresh_sigs();
+    plat_mutex_unlock(&check_lock);
+}
+
 static int stale_now(void) {
     plat_mutex_lock_shared(&lock);
     int changed = 0;
     for (int i = 0; !changed && i < nstarted; i++) {
         char sig[SIG_CAP];
-        table_inputs(started[i].key, sig, sizeof sig);
+        sig_now(i, sig, sizeof sig);
         changed = !started[i].path || strcmp(sig, started[i].path) != 0;
     }
     plat_mutex_unlock_shared(&lock);
@@ -848,6 +920,9 @@ static void premerge_run(void *arg) {
         int ok = 1, merge = 0;
         plat_mutex_lock_shared(&lock);
         table_inputs(keys[k], sig, sizeof sig);
+        // what this merge is made from is the newest look at the files: ahead_state compares it with this, so a look
+        // older than the merge can't make it look out of date (and bdat_merge_auto merge again and again)
+        set_sig(keys[k], sig);
         int nin = gather(keys[k], in, &ok, &merge);
         plat_mutex_unlock_shared(&lock);
         // as the next start would: merged where there is something to merge; else one mod's copy or the game's own
@@ -905,8 +980,9 @@ static int ahead_state(void) {
     plat_mutex_lock_shared(&lock);
     int same = nahead > 0 && nahead >= nstarted;
     for (int i = 0; same && i < nahead; i++) {
-        char sig[SIG_CAP];
-        table_inputs(ahead[i].key, sig, sizeof sig);
+        char sig[SIG_CAP] = "";
+        for (int j = 0; j < nstarted; j++)
+            if (ahead[i].key && !strcmp(started[j].key, ahead[i].key)) sig_now(j, sig, sizeof sig);
         same = ahead[i].path && !strcmp(sig, ahead[i].path);
     }
     plat_mutex_unlock_shared(&lock);

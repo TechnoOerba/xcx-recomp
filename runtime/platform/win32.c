@@ -590,9 +590,13 @@ int plat_file_identity(const char *path, uint64_t id[4]) {
     BY_HANDLE_FILE_INFORMATION bh;
     // Only NTFS and ReFS are known to keep a change time and a file id a copy tool can't carry over; FAT and exFAT
     // (USB sticks, SD cards) may report the last-write time as the change time and an id from the directory entry,
-    // so there a file overwritten in place with its size and dates kept would look the same.
+    // so there a file overwritten in place with its size and dates kept would look the same. A network share reports
+    // the server's name for its file system (Samba says NTFS) and may give the write time as the change time, so a
+    // handle with a remote protocol (FileRemoteProtocolInfo, class 13, answers only for those) is never trusted.
     wchar_t fs[16] = L"";
-    int ok = GetVolumeInformationByHandleW(h, NULL, 0, NULL, NULL, NULL, fs, 16) &&
+    union { BYTE b[512]; ULONGLONG align; } remote;
+    int ok = !GetFileInformationByHandleEx(h, (FILE_INFO_BY_HANDLE_CLASS)13, &remote, sizeof remote) &&
+             GetVolumeInformationByHandleW(h, NULL, 0, NULL, NULL, NULL, fs, 16) &&
              (!_wcsicmp(fs, L"NTFS") || !_wcsicmp(fs, L"ReFS")) &&
              GetFileInformationByHandleEx(h, FileBasicInfo, &b, sizeof b) && b.ChangeTime.QuadPart != 0;
     if (ok) {

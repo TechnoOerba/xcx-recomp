@@ -375,9 +375,12 @@ typedef struct { const char *suffix; const char *keep; char dir[2100]; } Prune;
 
 // One of this game file's merges: "<32 hex digits>-<flat>" with nothing after it, ".txt" (its report), ".sum" (its
 // check) or a temporary file a write left (".<...>.tmp", from a process ended in the middle of a merge); or a
-// temporary file of the quick note. Only the exact form: another file's key that ends like this one never matches.
+// temporary file of the quick note; or "game-<flat>", the copy of the game's own file earlier builds served when a
+// merge of JSON tables failed (now the archive serves it). Only the exact form: another file's key that ends like this
+// one never matches.
 static int merge_file_of(const char *name, const char *flat) {
     size_t f = strlen(flat);
+    if (!strncmp(name, "game-", 5) && !strcmp(name + 5, flat)) return 1;
     if (!strncmp(name, flat, f) && !strncmp(name + f, ".quick.", 7)) return strlen(name) > 4 && !strcmp(name + strlen(name) - 4, ".tmp");
     for (int i = 0; i < 32; i++)
         if (!isxdigit((unsigned char)name[i])) return 0;
@@ -825,7 +828,8 @@ done:
     } else if (!ok) {
         // only JSON tables, and they can't be put in: nothing served, so romfs_mods.c's romfs_mod_declines doesn't
         // claim the file and the game reads its own copy from the archive
-        rt_log("bdat merge: %s: not merged (%s); the game's own copy is used", key, why[0] ? why : "no room for the path");
+        rt_log("bdat merge: %s: not merged (%s); the game's own copy is used", key,
+               why[0] ? why : "no room for the path");
         add_status(1, "%s: not merged (%s); the game's own copy is used", key, why);
     }
     plat_mutex_unlock(&lock);
@@ -895,7 +899,13 @@ int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds,
             }
             p = e ? e + 1 : NULL;
         }
-        if (!nl && first)   // a report from before the "mod:" lines: the labels from the first line
+        // this mod's label in this merge: by its id where the report names the mods by id (a mod not among them took no
+        // part, and another mod of the same name must not lend it its lines); in a report from before the "mod:" lines,
+        // by its name, with the labels taken from the first line
+        const char *me = NULL;
+        for (int l = 0; l < nl; l++)
+            if (!strcmp(ids[l], id)) me = labels[l];
+        if (!nl && first) {
             for (const char *p = first + strlen(" merged from, highest priority first: "); *p && nl < 64;) {
                 const char *e = strstr(p, "; ");
                 size_t len = e ? (size_t)(e - p) : strcspn(p, "\r");
@@ -904,9 +914,12 @@ int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds,
                 if (!e) break;
                 p = e + 2;
             }
-        const char *me = mine;   // this mod's label in this merge, found by its id
-        for (int l = 0; l < nl; l++)
-            if (!strcmp(ids[l], id)) me = labels[l];
+            me = mine;
+        }
+        if (!me) {
+            free(text);
+            continue;
+        }
         for (char *p = nl1 ? nl1 + 1 : NULL; p && *p && got < cap;) {
             char *e = strchr(p, '\n');
             if (e) *e = 0;

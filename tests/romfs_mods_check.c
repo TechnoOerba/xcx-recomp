@@ -59,6 +59,15 @@ int main(void) {
     verify(nstarted == 1, "the table the game read is followed");
     verify(!romfs_mods_tables_changed() && !romfs_mod_changed("a"), "nothing changed at start-up");
 
+    // a list change (by hand, Setup or the library, the menu closed) is looked at by the game's own check at once, and
+    // so is putting it back
+    put("romfs-enabled.txt", "b\na\n");
+    game_reads();
+    verify(romfs_mods_tables_changed() == 1, "another order is a change, seen without the Mods tab");
+    put("romfs-enabled.txt", "a\nb\n");
+    game_reads();
+    verify(romfs_mods_tables_changed() == 0, "and the order put back is none");
+
     // a's copy updated on disk: the game's own checks don't look at mod files, only the Mods tab does
     put("a/romfs/bdat/x.bdat", "a's copy, updated and longer");
     game_reads();
@@ -101,23 +110,17 @@ int main(void) {
     put("a/romfs/bdat/x.bdat", "a's copy, being written");
     romfs_mods_check_files();
     verify(romfs_mods_premerge_state() == 0, "the merge made ahead no longer matches");
-    plat_sleep_ms(AUTO_MS / 2);
+    plat_sleep_ms(AUTO_MS - 500);
     put("a/romfs/bdat/x.bdat", "a's copy, being written, more of it");
     romfs_mods_check_files();
-    plat_sleep_ms(AUTO_MS / 2 + 200);
+    plat_sleep_ms(AUTO_MS / 2 - 50);   // 1.7 s since the first change, 0.7 s since the second: 0.8 s spare each way
     game_reads();
     wait_merge();
     verify(prepared == 2, "no merge while the file was still changing a moment ago");
-    plat_sleep_ms(AUTO_MS / 2 + 100);
+    plat_sleep_ms(AUTO_MS);
     game_reads();
     wait_merge();
     verify(prepared == 3, "merged once it stayed put");
-
-    // a list change is seen by the game's own check: that is when the files are looked at, without the Mods tab
-    auto_on = 0;
-    put("romfs-enabled.txt", "b\na\n");
-    game_reads();
-    verify(romfs_mods_tables_changed() == 1 && romfs_mods_list_changed() == 1, "another order is a change at once");
 
     if (!failures) printf("ok %d\n", checks);
     return failures;

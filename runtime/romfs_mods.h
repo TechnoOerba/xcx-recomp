@@ -27,8 +27,8 @@ void romfs_mods_reload(void);
 int romfs_mods_set(const char *id, int on);
 // Looks at every mod file of the data tables the game read, once for all of them, for romfs_mods_tables_changed,
 // romfs_mod_changed and romfs_mods_premerge_state, which compare what was looked at last. The Mods tab calls it at each
-// refresh; nothing else looks at mod files except after a list change or an update, so with the menu closed none is
-// touched.
+// refresh; otherwise mod files are looked at only at start-up, after a list change or an update, and by a merge made
+// ahead, so with the menu closed and nothing changing none is touched.
 void romfs_mods_check_files(void);
 // 1 when romfs-enabled.txt is no longer as it was when the game read its data tables (romfs_mods_tables_changed can
 // also be 1 for an updated mod with the list unchanged).

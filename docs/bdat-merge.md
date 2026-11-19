@@ -65,10 +65,11 @@ Per table:
 - **Row numbers.** Rows that end up at another number than in a mod's own copy are reported for that mod: its other
   tables may point at them by number (text ids, for one).
 
-A mod whose file has another list of tables, or isn't a data table file at all, is left out of that file's merge and
-reported, wherever it is in the list. A mod file that can't be read from disk (a read error, not its contents) stops
-that file's merge: the top mod's whole file is used, with the other mods' changes to it left out, as when the merge
-can't be made at all.
+A mod whose file has another list of tables is not merged: if it is the top mod its whole file is used (with the
+other mods' changes to that file left out), otherwise its changes to that file are left out. A file that isn't a data
+table file at all is left out wherever it is, and reported. A mod file that can't be read from disk (a read error, not
+its contents) stops that file's merge: the top mod's whole file is used, with the other mods' changes to it left out,
+or the game's own copy when the mods have only JSON tables of it, as when the merge can't be made at all.
 
 ## Tables as JSON
 
@@ -110,9 +111,10 @@ left-out changes of this run. In its Mod priority list each mod's row also carri
 ("adds nothing", "2 left out", "13/22 tables alike", per file when it has lines in several); selecting that note shows
 the mod's own lines from the reports under its row. Every row has a **Turn off** button beside its Up and Down. A mod
 turned off and on again (here or in the library) while the game runs goes back where it was; any other mod turned on
-goes last, at the lowest priority, and is moved up from here if it should win. That is the one rule for a mod
-turned on, whichever does it (the Mod priority list, the library, a mod manager writing `romfs-enabled.txt`): last. The library's picked mod says where it is in
-the list ("Priority 2 of 8").
+goes last, at the lowest priority, and is moved up from here if it should win. That is the rule for a mod turned on
+in the game, from the Mod priority list or the library, and the one for any mod manager writing `romfs-enabled.txt`
+(XCX Setup still puts a mod it turns on first, until #194). The library's picked mod says where it is in the list
+("Priority 2 of 8").
 
 The game reads its data tables only at start-up, so once the mods change while it runs (another order, a mod
 turned on or off, or a mod's files updated: their sizes and last-write times count) the Mods tab says the change
@@ -124,8 +126,9 @@ writes the list back as the game started with it, and **Restart now** starts a n
 this one to close, then closes it; in the world (a save loaded or a new game started, not at the title screen) it asks
 first, since anything since the last save would be lost.
 
-Mod files are looked at only when the list changes, when the library updates a mod, and while the Mods tab is open
-(once a second, one look for all its rows); with the menu closed the game touches no mod file to find changes. A mod
+To find these changes, mod files are looked at only when the list changes, when the library updates a mod, when a
+merge is made ahead, and while the Mods tab is open (one look for all its rows, once a second, four times a second while
+a merge runs or is about to); with the menu closed, nothing else touches a mod file after the start-up merges. A mod
 updated on disk by another program while the menu is closed is seen the next time the Mods tab opens, or else at the
 next start, which merges whatever it finds. This look uses sizes and last-write times only. A start that finds the
 cache uses more: each mod file's change time and its identity on its volume, which a copy tool can't carry over, on

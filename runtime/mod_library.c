@@ -317,11 +317,13 @@ static int write_list(const char *file, const char *id, int on) {
     char path[4200];
     join(path, sizeof path, root(), file);
     // The most its reader takes: romfs_mods.c's maybe_reload reads LIST_CAP (4096) bytes of romfs-enabled.txt, and
-    // mod_package.c refuses an enabled.txt or catalog.txt over 2048. A list that would be longer is left as it is.
-    size_t cap = !strcmp(file, "romfs-enabled.txt") ? 4096 : 2048;
+    // mod_package.c refuses an enabled.txt or catalog.txt over 2048. A mod turned on that would make the list longer
+    // is refused and the list left as it is; taking one out only shortens it, so that is refused only when the list
+    // doesn't fit here at all.
+    char text[4096];
+    size_t cap = !on ? sizeof text : !strcmp(file, "romfs-enabled.txt") ? 4096 : 2048;
     uint64_t size = 0;
     char *old = (char *)plat_file_read(path, &size);
-    char text[4096];
     size_t len = 0;
     int fits = 1;
     for (char *p = old, *e; fits && p && *p; p = e ? e + 1 : NULL) {
@@ -1078,6 +1080,9 @@ static void set_enabled_now(const char *id, int on) {
     plat_mutex_unlock(&lock);
     if (!kind[0]) return;
     int ok = !strcmp(kind, "romfs") ? romfs_mods_set(id, on) : write_list("enabled.txt", id, on);
+    if (!ok)
+        set_message(1, "%s could not be turned %s: its list of mods could not be written (the log says why).", id,
+                    on ? "on" : "off");
     plat_mutex_lock(&lock);
     for (int i = 0; i < view.count; i++)
         if (!strcmp(view.rows[i].id, id) && ok) view.rows[i].enabled = on;

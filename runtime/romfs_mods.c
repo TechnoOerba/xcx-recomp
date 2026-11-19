@@ -68,7 +68,8 @@ static char start_mount[64];               // the mount the game read them from
 // The merges made ahead (romfs_mods_premerge): each data table of started and its mods then, as in started.
 static Merged ahead[STARTED_CAP];
 static int nahead, ahead_busy;
-static uint64_t changed_at;                // when the list or a mod's files last changed (rebuild, refresh_sigs); atomic
+static uint64_t changed_at;                // when the list or a mod's files last changed; under check_lock (atomic
+                                           // all the same: cheap, and safe if a reader without it is ever added)
 static char cur_list[LIST_CAP + 1];        // the list text the map was built from; under lock
 static char *start_list;                   // the list text when the game read its first data table; under lock
 static int stale_now(void);
@@ -296,7 +297,8 @@ static void maybe_reload(void) {
     // is still changing), the data tables are merged ahead whenever the game read them otherwise than they'd be made
     // now (another list, or a mod's files updated) and no merge for this list is made or running. stale_now and
     // ahead_state compare what was last looked at (refresh_sigs): no file is touched here.
-    if (now - __atomic_load_n(&changed_at, __ATOMIC_RELAXED) >= AUTO_MS && !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE) &&
+    if (now - __atomic_load_n(&changed_at, __ATOMIC_RELAXED) >= AUTO_MS &&
+        !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE) &&
         cfg_bool("XCX_BDAT_MERGE_AUTO") && stale_now() && ahead_state() == 0 && romfs_mods_premerge())
         rt_log("romfs mods: the mods changed; merging their data tables ahead for the next start");
     plat_mutex_unlock(&check_lock);
@@ -376,8 +378,10 @@ static void sig_of(const BdatModFiles *in, int nin, char *sig, size_t cap) {
     sig[0] = 0;
     for (int m = 0; m < nin; m++) {
         uint32_t h = 2166136261u;
+        if (!in[m].id) continue;   // gather ran out of memory for it (its *ok 0): left out, so it reads as a change
         if (in[m].full) h = stamp(h, in[m].full);
-        for (int x = 0; x < in[m].njson; x++) h = stamp(h, in[m].json[x]);
+        for (int x = 0; x < in[m].njson; x++)
+            if (in[m].json[x]) h = stamp(h, in[m].json[x]);
         if (n + strlen(in[m].id) + 11 <= cap) n += (size_t)snprintf(sig + n, cap - n, "%s#%08x,", in[m].id, h);
     }
 }
@@ -398,7 +402,9 @@ static void table_inputs(const char *key, char *sig, size_t cap) {
 // (maybe_reload's rebuild), after an update (romfs_mods_reload, which rebuilds too) and when the Mods tab asks
 // (romfs_mods_check_files), never on a timer: with the menu closed, nothing here touches a mod file.
 static char *cur_sig[STARTED_CAP];
-static PlatMutex sig_lock = PLAT_MUTEX_INIT;   // guards cur_sig
+static uint64_t sig_at[STARTED_CAP];           // when that look began: an older one never replaces a newer one
+static __thread int looked_here;               // refresh_sigs ran on this thread (romfs_mods_check_files clears it)
+static PlatMutex sig_lock = PLAT_MUTEX_INIT;   // guards cur_sig and sig_at
 
 // Table i's signature as last looked at into out; under the map's lock (for started[]).
 static void sig_now(int i, char *out, size_t cap) {
@@ -407,19 +413,26 @@ static void sig_now(int i, char *out, size_t cap) {
     plat_mutex_unlock(&sig_lock);
 }
 
-// Sets table key's signature as last looked at (a merge made ahead from it, for one); 1 when it differs from before.
-// Under the map's lock.
-static int set_sig(const char *key, const char *sig) {
+// Sets table key's signature from a look that began at ns (plat_now_ns; a merge made ahead is one look too); 1 when it
+// differs from before. A look that began before the stored one is dropped: the Mods tab's look and a merge made ahead
+// can finish in either order. Under the map's lock.
+static int set_sig(const char *key, const char *sig, uint64_t ns) {
     for (int i = 0; i < nstarted; i++)
         if (!strcmp(started[i].key, key)) {
             char *copy = strdup(sig);
             if (!copy) return 0;
             plat_mutex_lock(&sig_lock);
-            const char *was = cur_sig[i] ? cur_sig[i] : started[i].path ? started[i].path : "";
-            int differs = strcmp(was, sig) != 0;
-            free(cur_sig[i]);
-            cur_sig[i] = copy;
+            int differs = 0;
+            if (ns >= sig_at[i]) {
+                const char *was = cur_sig[i] ? cur_sig[i] : started[i].path ? started[i].path : "";
+                differs = strcmp(was, sig) != 0;
+                free(cur_sig[i]);
+                cur_sig[i] = copy;
+                sig_at[i] = ns;
+                copy = NULL;
+            }
             plat_mutex_unlock(&sig_lock);
+            free(copy);
             return differs;
         }
     return 0;
@@ -436,6 +449,7 @@ static void refresh_sigs(void) {
     for (int i = 0; i < n; i++) {
         BdatModFiles in[MOD_CAP];
         int ok = 1, merge = 0;
+        uint64_t t = plat_now_ns();
         plat_mutex_lock_shared(&lock);
         const char *key = started[i].key;   // started[] entries stay for the run
         int nin = gather(key, in, &ok, &merge);
@@ -444,10 +458,11 @@ static void refresh_sigs(void) {
         sig_of(in, nin, sig, sizeof sig);
         free_gathered(in, nin);
         plat_mutex_lock_shared(&lock);
-        changed |= set_sig(key, sig);
+        changed |= set_sig(key, sig, t);
         plat_mutex_unlock_shared(&lock);
     }
     if (changed) __atomic_store_n(&changed_at, plat_now_ms(), __ATOMIC_RELAXED);
+    looked_here = 1;
 }
 
 // Per enabled mod with a copy of data table key or JSON tables of it, in priority order: those files as in[] (the
@@ -573,8 +588,10 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     int nin = gather(key, in, &ok, &many);
     (void)many;   // decided above, from the map as the game reads it
     plat_mutex_unlock_shared(&lock);
-    char path[4096];
-    ok = ok && bdat_merge_serve(mount, key, in, nin, path, sizeof path);
+    // the merge gets the caller's room for the path: one that doesn't fit is "not merged (no room for the path)" in
+    // serve, which then leaves the top mod's whole copy below, instead of a merge made and then not served
+    char path[ROMFS_MOD_PATH_CAP];
+    ok = ok && bdat_merge_serve(mount, key, in, nin, path, cap < sizeof path ? cap : sizeof path);
     const char *served = ok ? path : NULL;
     for (int i = 0; !served && i < nin; i++) served = in[i].full;   // not merged: the top mod's whole copy
     if (served && strlen(served) < cap) strcpy(out, served);
@@ -738,10 +755,12 @@ static int read_lines(char (*lines)[LINE_LEN], int cap) {
 static int write_lines(char (*lines)[LINE_LEN], int n) {
     char text[LIST_CAP], path[4200];
     size_t len = 0;
-    for (int i = 0; i < n; i++) {   // the whole list or nothing: a list that doesn't fit is left as it is, as read_lines does
+    // the whole list or nothing: a list that doesn't fit is left as it is, as read_lines does
+    for (int i = 0; i < n; i++) {
         size_t l = strlen(lines[i]);
         if (len + l + 1 > sizeof text) {
-            rt_log("romfs mods: romfs-enabled.txt would be longer than %d bytes; the menu leaves it as it is", LIST_CAP);
+            rt_log("romfs mods: romfs-enabled.txt would be longer than %d bytes; the menu leaves it as it is",
+                   LIST_CAP);
             return 0;
         }
         memcpy(text + len, lines[i], l);
@@ -879,8 +898,12 @@ int romfs_mods_tables_changed(void) {
 
 void romfs_mods_check_files(void) {
     if (!mods_root()) return;
-    maybe_reload();
-    plat_mutex_lock(&check_lock);   // one look at a time, and not inside a rebuild
+    looked_here = 0;
+    maybe_reload();   // after a list change it rebuilds and looks itself: then that look is this refresh's
+    if (looked_here) return;
+    // one look at a time, and not inside a rebuild: a game thread holding check_lock is rebuilding or looking right
+    // now, so the menu keeps what it has rather than wait for it (the next refresh looks)
+    if (!plat_mutex_trylock(&check_lock)) return;
     refresh_sigs();
     plat_mutex_unlock(&check_lock);
 }
@@ -918,12 +941,17 @@ static void premerge_run(void *arg) {
         BdatModFiles in[MOD_CAP];
         char sig[SIG_CAP];
         int ok = 1, merge = 0;
+        uint64_t t = plat_now_ns();
         plat_mutex_lock_shared(&lock);
-        table_inputs(keys[k], sig, sizeof sig);
-        // what this merge is made from is the newest look at the files: ahead_state compares it with this, so a look
-        // older than the merge can't make it look out of date (and bdat_merge_auto merge again and again)
-        set_sig(keys[k], sig);
         int nin = gather(keys[k], in, &ok, &merge);
+        plat_mutex_unlock_shared(&lock);
+        // what this merge is made from is a look at the files too, taken from the copies of the paths without the
+        // map's lock (this thread runs below normal priority); ahead_state compares it with the newest look, and a
+        // look that began earlier doesn't replace it (set_sig), so the merge can't seem out of date and bdat_merge_auto
+        // merge again and again
+        sig_of(in, nin, sig, sizeof sig);
+        plat_mutex_lock_shared(&lock);
+        set_sig(keys[k], sig, t);
         plat_mutex_unlock_shared(&lock);
         // as the next start would: merged where there is something to merge; else one mod's copy or the game's own
         if (ok && merge && mount[0]) bdat_merge_prepare(mount, keys[k], in, nin);

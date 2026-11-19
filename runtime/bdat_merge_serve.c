@@ -472,21 +472,6 @@ static void stem_of(const char *path, char *out, size_t cap) {
     out[n] = 0;
 }
 
-// The game's own copy as <profile>/bdat-merge/game-<key with / as _>, its path in out; 0 when it can't be written.
-static int serve_game_copy(const char *profile, const char *key, const uint8_t *game, size_t n, char *out, size_t cap) {
-    char dir[2100], file[2400];
-    if (!game) return 0;
-    snprintf(dir, sizeof dir, "%s/bdat-merge", profile);
-    int len = snprintf(file, sizeof file, "%s/game-", dir);
-    for (const char *c = key; *c && len < (int)sizeof file - 1; c++) file[len++] = *c == '/' || *c == '\\' ? '_' : *c;
-    file[len] = 0;
-    if ((size_t)len >= cap) return 0;
-    plat_file_mkdir_p(dir);
-    if (plat_file_size(file) != (int64_t)n && !plat_file_write_atomic(file, game, n)) return 0;
-    snprintf(out, cap, "%s", file);
-    return 1;
-}
-
 // A merge made before (file, its report next to it) served again: its report's last line is the summary, the lines
 // before it the events, which go to the status lines and the per-mod tags as when it was made.
 // The report file of a merge served (or made ahead) into the report of the merge in progress; under lock.
@@ -698,6 +683,14 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     int njson[64] = {0};
     char label[64][160];
     for (int k = 0; k < n; k++) label_of(mods[k].id, label[k], sizeof label[k]);
+    for (int k = 1; k < n; k++)   // two mods of the same name: the later one also named by its id, so lines stay apart
+        for (int j = 0; j < k; j++)
+            if (!strcmp(label[k], label[j])) {
+                char t[160];
+                snprintf(t, sizeof t, "%.*s (%s)", (int)(sizeof t - 70), label[k], mods[k].id);
+                snprintf(label[k], sizeof label[k], "%s", t);
+                break;
+            }
     size_t game_n = 0, merged_n = 0, stored_n = 0;
     Notes notes = {.key = key};
     uint64_t t0 = plat_now_ms();
@@ -726,11 +719,20 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
         free(q);
         if (ok) goto done;
     }
-    char head[600];
-    size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
-    for (int k = 0; k < n && hn < sizeof head - 70; k++)
-        hn += (size_t)snprintf(head + hn, sizeof head - hn, "%s %s", k ? ";" : "", label[k]);
+    // the first line names every mod for the reader; then one "mod: <id> <label>" line each, by which
+    // bdat_merge_mod_lines finds a mod's lines (a name may hold "; ", and two mods may share one)
+    size_t hcap = strlen(key) + 64 + (size_t)n * (sizeof label[0] + 2);
+    char *head = malloc(hcap);
+    if (!head) goto done;
+    size_t hn = (size_t)snprintf(head, hcap, "%s merged from, highest priority first:", key);
+    for (int k = 0; k < n; k++) hn += (size_t)snprintf(head + hn, hcap - hn, "%s %s", k ? ";" : "", label[k]);
     add_line(&notes, head);
+    free(head);
+    for (int k = 0; k < n; k++) {
+        char line[260];
+        snprintf(line, sizeof line, "mod: %s %s", mods[k].id, label[k]);
+        add_line(&notes, line);
+    }
     // every mod's copies read and hashed (at the same time when there are threads), then taken in priority order as
     // if one after another: a copy that can't be read ends it, and its notes come in order
     if (!(reads = calloc(1, sizeof *reads))) goto done;
@@ -820,11 +822,10 @@ done:
                label[full]);
         add_status(1, "%s: not merged (%s); %s's whole file is used", key, why, label[full]);
     } else if (!ok) {
-        // only JSON tables, and they can't be put in: the game's own copy, so the game still finds the file
-        ok = serve_game_copy(cfg->profile, key, game, game_n, out, cap);
-        rt_log("bdat merge: %s: not merged (%s); %s", key, why[0] ? why : "no room for the path",
-               ok ? "the game's own copy is used" : "the game's own copy can't be served either");
-        add_status(1, "%s: not merged (%s); %s", key, why, ok ? "the game's own copy is used" : "nothing can be served");
+        // only JSON tables, and they can't be put in: nothing served, so romfs_mods.c's romfs_mod_declines doesn't
+        // claim the file and the game reads its own copy from the archive
+        rt_log("bdat merge: %s: not merged (%s); the game's own copy is used", key, why[0] ? why : "no room for the path");
+        add_status(1, "%s: not merged (%s); the game's own copy is used", key, why);
     }
     plat_mutex_unlock(&lock);
     for (int k = 0; k < n; k++) {
@@ -876,22 +877,35 @@ int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds,
         }
         text = t;
         text[n] = 0;
-        // the first line names the merge's mods: "<key> merged from, highest priority first: <a>; <b>; ..."
-        char key[256] = "", labels[64][160];
+        // the first line: "<key> merged from, highest priority first: ..."; then "mod: <id> <label>" per mod (serve)
+        char key[256] = "", labels[64][160], ids[64][65];
         int nl = 0;
         char *nl1 = strchr(text, '\n');
         if (nl1) *nl1 = 0;
         const char *first = strstr(text, " merged from, highest priority first: ");
-        if (first) {
-            snprintf(key, sizeof key, "%.*s", (int)(first - text), text);
+        if (first) snprintf(key, sizeof key, "%.*s", (int)(first - text), text);
+        for (const char *p = nl1 ? nl1 + 1 : NULL; p && !strncmp(p, "mod: ", 5) && nl < 64;) {
+            const char *e = strchr(p, '\n'), *sp = strchr(p + 5, ' ');
+            size_t len = e ? (size_t)(e - p) : strlen(p);
+            if (sp && sp < p + len && (size_t)(sp - p - 5) < sizeof ids[0]) {
+                snprintf(ids[nl], sizeof ids[0], "%.*s", (int)(sp - p - 5), p + 5);
+                snprintf(labels[nl], sizeof labels[0], "%.*s", (int)strcspn(sp + 1, "\r\n"), sp + 1);
+                nl++;
+            }
+            p = e ? e + 1 : NULL;
+        }
+        if (!nl && first)   // a report from before the "mod:" lines: the labels from the first line
             for (const char *p = first + strlen(" merged from, highest priority first: "); *p && nl < 64;) {
                 const char *e = strstr(p, "; ");
                 size_t len = e ? (size_t)(e - p) : strcspn(p, "\r");
+                ids[nl][0] = 0;
                 snprintf(labels[nl++], sizeof labels[0], "%.*s", (int)len, p);
                 if (!e) break;
                 p = e + 2;
             }
-        }
+        const char *me = mine;   // this mod's label in this merge, found by its id
+        for (int l = 0; l < nl; l++)
+            if (!strcmp(ids[l], id)) me = labels[l];
         for (char *p = nl1 ? nl1 + 1 : NULL; p && *p && got < cap;) {
             char *e = strchr(p, '\n');
             if (e) *e = 0;
@@ -909,7 +923,7 @@ int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds,
                         best = ll;
                     }
                 }
-                if (who && !strcmp(who, mine)) {
+                if (who && !strcmp(who, me)) {
                     snprintf(out[got], 320, "%s: %s", key, p);
                     if (kinds) kinds[got] = kind_of[k];
                     got++;

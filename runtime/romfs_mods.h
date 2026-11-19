@@ -9,8 +9,12 @@
 // enabled mod has a file for it, so the game opens rom:/<path> instead; else list unchanged.
 uint64_t romfs_mod_declines(uint64_t list, uint64_t path);
 
+// The room fs_host.c's open_file gives romfs_mod_file's path (its PATH_CAP): a data table is claimed only when the
+// file served for it fits, so a claimed path is always one the open can take.
+#define ROMFS_MOD_PATH_CAP 1100
+
 // The host path of an enabled mod's file for a RomFS path ("rom:/chr/..." or "chr/..."), copied to out (may be NULL);
-// 0 when none.
+// 0 when none, or when the path doesn't fit in cap.
 int romfs_mod_file(const char *path, char *out, size_t cap);
 
 // The mods folder (XCX_MOD_DIR, else "mods" beside xcx.exe); NULL when there is none.

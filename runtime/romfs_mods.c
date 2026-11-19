@@ -487,9 +487,12 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
         if (merge && out && !mount && !__atomic_exchange_n(&premount_logged, 1, __ATOMIC_RELAXED))
             rt_log("romfs mods: %s opened before the RomFS is mounted; %s", key,
                    f ? "the top mod's whole copy is used, unmerged" : "the game's own copy is used");
-        if (out && f && strlen(f->host) < cap) strcpy(out, f->host);
+        // asked only whether a mod has the file: yes. Asked for its path: only when it fits, so a caller never opens a
+        // buffer nothing was copied into
+        int ok = !out || (f && strlen(f->host) < cap);
+        if (out && ok) strcpy(out, f->host);
         plat_mutex_unlock_shared(&lock);
-        return f || !out;
+        return ok;
     }
     for (int i = 0; i < nmerged; i++)
         if (!strcmp(merged[i].key, key)) {
@@ -572,7 +575,9 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
         // before) runs here, before the game is told to open its rom:/ path. When nothing can be served (the profile
         // can't be written, a path too long, out of memory, JSON tables before the RomFS is mounted), the game reads
         // its own copy from the archive instead of finding no file at all.
-        char host[4096];
+        // the same room the open takes the path in (fs_host.c's open_file, PATH_CAP): a path that fits here but not
+        // there would be claimed and then not opened
+        char host[ROMFS_MOD_PATH_CAP];
         const char *mount = romfs_mount_name();
         if (!lookup(one, host, sizeof host, mount && *mount ? mount : NULL)) return list;
     } else if (!lookup(one, NULL, 0, NULL)) {

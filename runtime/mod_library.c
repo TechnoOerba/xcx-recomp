@@ -316,20 +316,41 @@ static int read_list(const char *file, char (*ids)[65], int cap) {
 static int write_list(const char *file, const char *id, int on) {
     char path[4200];
     join(path, sizeof path, root(), file);
+    // The most its reader takes: romfs_mods.c's maybe_reload reads LIST_CAP (4096) bytes of romfs-enabled.txt, and
+    // mod_package.c refuses an enabled.txt or catalog.txt over 2048. A list that would be longer is left as it is.
+    size_t cap = !strcmp(file, "romfs-enabled.txt") ? 4096 : 2048;
     uint64_t size = 0;
     char *old = (char *)plat_file_read(path, &size);
-    char text[8192];
+    char text[4096];
     size_t len = 0;
-    for (char *p = old, *e; p && *p; p = e ? e + 1 : NULL) {
+    int fits = 1;
+    for (char *p = old, *e; fits && p && *p; p = e ? e + 1 : NULL) {
         e = strchr(p, '\n');
         if (e) *e = 0;
         size_t n = strlen(p);
         while (n && (p[n - 1] == '\r' || p[n - 1] == ' ')) p[--n] = 0;
-        int mine = !strcmp(p, id);
-        if (n && !mine && len + n + 2 < sizeof text) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", p);
+        if (!n || !strcmp(p, id)) continue;
+        if (len + n + 1 > cap) fits = 0;
+        else {
+            memcpy(text + len, p, n);
+            text[len + n] = '\n';
+            len += n + 1;
+        }
     }
     free(old);
-    if (on && len + strlen(id) + 2 < sizeof text) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", id);
+    size_t il = strlen(id);
+    if (fits && on) {
+        if (len + il + 1 > cap) fits = 0;
+        else {
+            memcpy(text + len, id, il);
+            text[len + il] = '\n';
+            len += il + 1;
+        }
+    }
+    if (!fits) {   // the whole list or nothing, as romfs_mods.c's write_lines
+        rt_log("mod library: %s would be longer than its reader takes (%zu bytes); left as it is", file, cap);
+        return 0;
+    }
     plat_file_mkdir_p(root());
     return plat_file_write_atomic(path, text, len);
 }

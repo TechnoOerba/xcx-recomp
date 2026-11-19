@@ -57,6 +57,24 @@ static int save_loaded(uint64_t b) {
     return plat_mem_read(b + GAMEDATA_PTR, &p, sizeof p) && p && p < RT_ADDRESS_LIMIT;
 }
 
+static int clock_consistent(uint64_t b);
+static int clock_ready(uint64_t b, int64_t wu);
+
+// The time of day now in hours [0, 24) from the clock's float, or -1 without the clock (another game build, no save
+// loaded yet, or a clock that doesn't read as one yet: clock_ready, the same check Day length makes before its first
+// write, so both settings trust the clock from the same moment and give up on it together). For other settings that
+// follow the time (dawn_dusk.c).
+double rt_day_length_hours(void) {
+    uint64_t b = main_base();
+    int64_t wu = frame_step_world_us();
+    float f = 0;
+    if (rt_day_length_state() != 1 || wu < 0 || !b || !save_loaded(b) || !clock_ready(b, wu) ||
+        !plat_mem_read(b + CLOCK + C_FLOAT, &f, 4) || !isfinite(f))
+        return -1;
+    double h = fmod(f / 1800.0, 24.0);
+    return h < 0 ? h + 24.0 : h;
+}
+
 // The float follows the packed time: from the minute's start to the next one's (a little slack for the frame between
 // the two writes, and midnight's wrap). A few misses in a row: this isn't the clock, leave it alone.
 static int clock_consistent(uint64_t b) {
@@ -109,8 +127,9 @@ static void run_slow(uint64_t b) {
 }
 
 // The clock can be used: it runs (the float is 0 while the save loads, then ticks) and has read as a clock once,
-// checked once a second of world clock; three misses in a row and it is left alone for the session (state 2: the
-// row is greyed out).
+// checked once a second of world clock; three misses in a row and it is left alone for the session (state 2: the Day
+// and night rows are greyed out). Both settings ask here (rt_day_length_update, rt_day_length_hours), so the clock is
+// checked by one rule, at most once a second, whichever of them is on.
 static int clock_ready(uint64_t b, int64_t wu) {
     if (trusted) return 1;
     if (broken) return 0;
@@ -126,7 +145,7 @@ static int clock_ready(uint64_t b, int64_t wu) {
     if (clock_consistent(b)) return trusted = 1;
     if (++bad_checks >= 3) {
         broken = 1;
-        rt_log("day length: the game's clock doesn't read as expected; left alone for this session");
+        rt_log("day length: the game's clock doesn't read as expected; Day and night settings left alone for this session");
     }
     return 0;
 }

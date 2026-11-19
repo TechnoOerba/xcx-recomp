@@ -1,7 +1,8 @@
 # The Day length setting's tests on Linux and Windows: its clock arithmetic on a simulated game clock
 # (tests/day_length_test.py, through tests/day_length_check.c built from runtime/day_length.h), and every settings
 # description in every menu language fitting the menu's description pane with its notes (tests/menu_text_test.py).
-# Then a compile of the game side (runtime/day_length.c), which only the whole game build links. No game files.
+# Then a compile of the game side (runtime/day_length.c and runtime/dawn_dusk.c, Dawn and dusk and Night darkness),
+# which only the whole game build links. No game files.
 # Windows builds with MSYS2 UCRT64 clang, the mingw target the release's llvm-mingw has; Linux with the runner's clang.
 name: Day length tests
 
@@ -55,4 +56,4 @@ jobs:
           export PATH="/c/msys64/ucrt64/bin:$PATH"
           # -Wno-bitwise-instead-of-logical: Ubuntu's clang 18 warns on master's runtime/simd_fp.h (macro FOK, through
           # host.h); not code of this workflow's files
-          "$CLANG" -std=gnu11 -fsyntax-only -Wall -Wextra -Werror -Wno-bitwise-instead-of-logical -Iruntime runtime/day_length.c
+          "$CLANG" -std=gnu11 -fsyntax-only -Wall -Wextra -Werror -Wno-bitwise-instead-of-logical -Iruntime runtime/day_length.c runtime/dawn_dusk.c

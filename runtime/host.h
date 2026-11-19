@@ -338,6 +338,8 @@ void frame_step_present(uint64_t display_ns, int interval); // nvnQueuePresentTe
 // ---- day length (day_length.c): XCX_DAY_LENGTH, the game clock's speed
 void rt_day_length_update(void);                           // every present
 int rt_day_length_state(void);                             // 0 not this game build, 2 the clock didn't read as one, 1 on
+double rt_day_length_hours(void);                          // the time of day in hours [0, 24), -1 without the clock
+void rt_dawn_dusk_update(void);                            // every present: Dawn and dusk, Night darkness (dawn_dusk.c)
 
 // ---- boot (boot.c, main.c)
 typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; const char *shot, *gpu; } RtConfig;

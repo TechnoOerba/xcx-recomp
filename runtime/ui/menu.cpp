@@ -716,6 +716,22 @@ static void row_day_length(void) {
     opt_choice_list("XCX_DAY_LENGTH", UI_MENU_DAY_LENGTH, values, names, n, UI_MENU_DAY_LENGTH_DESC, cur);
 }
 
+// Dawn and dusk and Night darkness (dawn_dusk.c), under Day length; like it, greyed out with its note off the game
+// build the addresses are from or when the clock didn't read as one (dawn_dusk.c then gives everything back).
+static void row_dawn_dusk(void) {
+    static const char *const dd_values[] = {"original", "smoothed", "extended"};
+    const char *dd_names[] = {menu_text(UI_MENU_DAY_ORIGINAL), menu_text(UI_MENU_DAWN_DUSK_SMOOTHED),
+                              menu_text(UI_MENU_DAWN_DUSK_EXTENDED)};
+    int state = rt_day_length_state();
+    if (state != 1) opt_disable_next(state ? UI_MENU_DAY_NO_CLOCK : UI_MENU_DAY_UNSUPPORTED);
+    opt_choice_list("XCX_DAWN_DUSK", UI_MENU_DAWN_DUSK, dd_values, dd_names, 3, UI_MENU_DAWN_DUSK_DESC);
+    static const char *const dn_values[] = {"original", "darker", "darkest"};
+    const char *dn_names[] = {menu_text(UI_MENU_DAY_ORIGINAL), menu_text(UI_MENU_DARK_NIGHTS_DARKER),
+                              menu_text(UI_MENU_DARK_NIGHTS_DARKEST)};
+    if (state != 1) opt_disable_next(state ? UI_MENU_DAY_NO_CLOCK : UI_MENU_DAY_UNSUPPORTED);
+    opt_choice_list("XCX_DARK_NIGHTS", UI_MENU_DARK_NIGHTS, dn_values, dn_names, 3, UI_MENU_DARK_NIGHTS_DESC);
+}
+
 static void tab_game(float scale) {
     opt_begin("##game", scale);
     row_fps_limit();
@@ -727,8 +743,9 @@ static void tab_game(float scale) {
     static const UiTextId mode[] = {UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD};
     opt_choice("XCX_OPERATION_MODE", UI_MENU_OPERATION_MODE, mode, 2, UI_MENU_OPERATION_MODE_DESC);
     opt_toggle("XCX_CHEATS", UI_MENU_CHEATS, UI_MENU_CHEATS_DESC);
-    opt_group(UI_MENU_DAY_NIGHT_GROUP);   // the in-game clock: Day length (day_length.c); before World detail, which other PRs add
+    opt_group(UI_MENU_DAY_NIGHT_GROUP);   // the in-game clock and its light: Day length, Dawn and dusk, Night darkness
     row_day_length();
+    row_dawn_dusk();
     int grass_ok = rt_grass_available(), crowd_ok = rt_crowd_available(), objlod_ok = rt_objlod_available();   // the 2.0.0 update's (grass.c, crowd.c, objlod.c)
     if (grass_ok || crowd_ok || objlod_ok) opt_group(UI_MENU_WORLD_GROUP);
     if (grass_ok) {

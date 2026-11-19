@@ -204,6 +204,14 @@
 # row in its place. Very short days need a steady frame rate: the clock gains at most a minute a frame on the game's
 # own. Takes effect at once. Game version 2.0.0 only.
 # day_length = 24
+# How the light changes at dawn and dusk (the Game tab's Dawn and dusk). original (default) is the game's own, with
+# quick steps at 05:00 and 18:45; smoothed keeps the game's times without the steps; extended also stretches them:
+# dawn 04:00 to 08:00, dusk 17:00 to 21:00. Takes effect at once. Game version 2.0.0 only.
+# dawn_dusk = original
+# How dark the night is (Night darkness): original (default), darker or darkest dim the night light on the ground,
+# people and things and keep the night sky as it is; it fades in at dusk and out at dawn with the light, with any
+# dawn_dusk. Takes effect at once. Game version 2.0.0 only.
+# dark_nights = original
 
 [cheats]
 # 1 turns cheats on: the F1 menu gets its Cheats tab, and the cheats switched on there run. 0 (default) keeps every

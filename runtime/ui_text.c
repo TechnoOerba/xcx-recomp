@@ -232,6 +232,16 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_DAY_ORIGINAL] = "Original", [UI_MENU_DAY_STOPPED] = "Stopped", [UI_MENU_DAY_STEP] = "%s min (%sx)",
     [UI_MENU_DAY_UNSUPPORTED] = "Needs game version 2.0.0.",
     [UI_MENU_DAY_NO_CLOCK] = "Off for this session: the game's clock was not where expected.",
+    [UI_MENU_DAWN_DUSK] = "Dawn and dusk",
+    [UI_MENU_DAWN_DUSK_DESC] = "How the light changes at dawn and dusk. Original is the game's own, with quick steps at "
+                               "05:00 and 18:45. Smoothed keeps its times without the steps. Smoothed & Extended also "
+                               "stretches them: dawn 04:00 to 08:00, dusk 17:00 to 21:00. Takes effect at once.",
+    [UI_MENU_DAWN_DUSK_SMOOTHED] = "Smoothed", [UI_MENU_DAWN_DUSK_EXTENDED] = "Smoothed & Extended",
+    [UI_MENU_DARK_NIGHTS] = "Night darkness",
+    [UI_MENU_DARK_NIGHTS_DESC] = "How bright the night is. Darker and Darkest dim the night light on the ground, people "
+                                 "and things, and keep the night sky as it is. Both fade in at dusk and out at dawn with "
+                                 "the light. Takes effect at once.",
+    [UI_MENU_DARK_NIGHTS_DARKER] = "Darker", [UI_MENU_DARK_NIGHTS_DARKEST] = "Darkest",
 
     [UI_MENU_VOLUME] = "Volume", [UI_MENU_VOLUME_DESC] = "Master volume of the game.",
 
@@ -637,6 +647,16 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_DAY_STEP] = "%s мин (%sx)",
     [UI_MENU_DAY_UNSUPPORTED] = "Нужна версия игры 2.0.0.",
     [UI_MENU_DAY_NO_CLOCK] = "Выключено до перезапуска: часы игры не найдены.",
+    [UI_MENU_DAWN_DUSK] = "Рассвет и закат",
+    [UI_MENU_DAWN_DUSK_DESC] = "Как меняется свет на рассвете и закате. «Как в игре» — с резкими скачками в 05:00 и "
+                               "18:45. «Плавно» — те же часы без скачков. «Плавно и дольше» — ещё и дольше: рассвет "
+                               "с 04:00 до 08:00, закат с 17:00 до 21:00. Действует сразу.",
+    [UI_MENU_DAWN_DUSK_SMOOTHED] = "Плавно", [UI_MENU_DAWN_DUSK_EXTENDED] = "Плавно и дольше",
+    [UI_MENU_DARK_NIGHTS] = "Темнота ночи",
+    [UI_MENU_DARK_NIGHTS_DESC] = "Насколько светлая ночь. «Темнее» и «Темнее всего» приглушают ночной свет на земле, "
+                                 "людях и предметах, а ночное небо оставляют как есть. Темнота плавно приходит на закате "
+                                 "и уходит на рассвете. Действует сразу.",
+    [UI_MENU_DARK_NIGHTS_DARKER] = "Темнее", [UI_MENU_DARK_NIGHTS_DARKEST] = "Темнее всего",
 
     [UI_MENU_VOLUME] = "Громкость", [UI_MENU_VOLUME_DESC] = "Общая громкость игры.",
 

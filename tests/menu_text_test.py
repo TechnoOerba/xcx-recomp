@@ -94,6 +94,14 @@ class MenuText(unittest.TestCase):
             self.assertEqual(t[name]['UI_MENU_DAY_STEP'].count(b'%s'), 2, f'{name} UI_MENU_DAY_STEP takes two %s')
             self.assertEqual(t[name]['UI_MENU_DAY_STEP'].count(b'%'), 2, f'{name} UI_MENU_DAY_STEP has no other %')
 
+    def test_dawn_dusk_texts(self):
+        t = tables()
+        for name in ('text_en', 'text_ru'):
+            for key in ('UI_MENU_DAWN_DUSK', 'UI_MENU_DAWN_DUSK_DESC', 'UI_MENU_DAWN_DUSK_SMOOTHED', 'UI_MENU_DAWN_DUSK_EXTENDED',
+                        'UI_MENU_DARK_NIGHTS', 'UI_MENU_DARK_NIGHTS_DESC', 'UI_MENU_DARK_NIGHTS_DARKER',
+                        'UI_MENU_DARK_NIGHTS_DARKEST'):
+                self.assertIn(key, t[name], f'{name} lacks {key}')
+
 
 if __name__ == '__main__':
     unittest.main()

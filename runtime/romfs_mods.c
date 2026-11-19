@@ -481,6 +481,12 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     }
     int merge = table && (nj || f->nalts >= 2);
     if (!merge || !mount || !out) {
+        // A table to merge, opened before the RomFS is mounted (no game copy to merge onto): the top mod's whole copy,
+        // or the archive's when only JSON mods change it. Said once, since the merge waits for the mount.
+        static int premount_logged;
+        if (merge && out && !mount && !__atomic_exchange_n(&premount_logged, 1, __ATOMIC_RELAXED))
+            rt_log("romfs mods: %s opened before the RomFS is mounted; %s", key,
+                   f ? "the top mod's whole copy is used, unmerged" : "the game's own copy is used");
         if (out && f && strlen(f->host) < cap) strcpy(out, f->host);
         plat_mutex_unlock_shared(&lock);
         return f || !out;
@@ -663,7 +669,16 @@ static int read_lines(char (*lines)[LINE_LEN], int cap) {
 static int write_lines(char (*lines)[LINE_LEN], int n) {
     char text[LIST_CAP], path[4200];
     size_t len = 0;
-    for (int i = 0; i < n && len + 162 < sizeof text; i++) len += (size_t)snprintf(text + len, sizeof text - len, "%s\n", lines[i]);
+    for (int i = 0; i < n; i++) {   // the whole list or nothing: a list that doesn't fit is left as it is, as read_lines does
+        size_t l = strlen(lines[i]);
+        if (len + l + 1 > sizeof text) {
+            rt_log("romfs mods: romfs-enabled.txt would be longer than %d bytes; the menu leaves it as it is", LIST_CAP);
+            return 0;
+        }
+        memcpy(text + len, lines[i], l);
+        text[len + l] = '\n';
+        len += l + 1;
+    }
     plat_file_mkdir_p(root);
     snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
     int ok = plat_file_write_atomic(path, text, len);

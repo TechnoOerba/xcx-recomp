@@ -223,6 +223,15 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_OPERATION_MODE] = "Console mode",
     [UI_MENU_OPERATION_MODE_DESC] = "Whether the game thinks it runs docked or handheld.",
     [UI_MENU_MODE_DOCKED] = "Docked", [UI_MENU_MODE_HANDHELD] = "Handheld",
+    [UI_MENU_DAY_NIGHT_GROUP] = "Day and night",
+    [UI_MENU_DAY_LENGTH] = "Day length",
+    [UI_MENU_DAY_LENGTH_DESC] = "How many real minutes a whole day takes on the in-game clock. Original is the game's own 24 "
+                                "minutes, a game minute each second. Shorter days run the clock, the light and the sky "
+                                "faster, longer days slower. Stopped holds the time; the game's Change Time still moves "
+                                "it. Takes effect at once.",
+    [UI_MENU_DAY_ORIGINAL] = "Original", [UI_MENU_DAY_STOPPED] = "Stopped", [UI_MENU_DAY_STEP] = "%s min (%sx)",
+    [UI_MENU_DAY_UNSUPPORTED] = "Needs game version 2.0.0.",
+    [UI_MENU_DAY_NO_CLOCK] = "Off for this session: the game's clock was not where expected.",
 
     [UI_MENU_VOLUME] = "Volume", [UI_MENU_VOLUME_DESC] = "Master volume of the game.",
 
@@ -619,6 +628,15 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_OPERATION_MODE] = "Режим консоли",
     [UI_MENU_OPERATION_MODE_DESC] = "Игра считает, что консоль в док-станции или в портативном режиме.",
     [UI_MENU_MODE_DOCKED] = "В док-станции", [UI_MENU_MODE_HANDHELD] = "Портативный",
+    [UI_MENU_DAY_NIGHT_GROUP] = "День и ночь",
+    [UI_MENU_DAY_LENGTH] = "Длина суток",
+    [UI_MENU_DAY_LENGTH_DESC] = "Сколько реальных минут длятся игровые сутки. «Как в игре» — 24 минуты. Короче — часы и "
+                                "свет идут быстрее, длиннее — медленнее. «Время остановлено» держит время, но смена "
+                                "времени в игре работает. Действует сразу.",
+    [UI_MENU_DAY_ORIGINAL] = "Как в игре", [UI_MENU_DAY_STOPPED] = "Время остановлено",
+    [UI_MENU_DAY_STEP] = "%s мин (%sx)",
+    [UI_MENU_DAY_UNSUPPORTED] = "Нужна версия игры 2.0.0.",
+    [UI_MENU_DAY_NO_CLOCK] = "Выключено до перезапуска: часы игры не найдены.",
 
     [UI_MENU_VOLUME] = "Громкость", [UI_MENU_VOLUME_DESC] = "Общая громкость игры.",
 

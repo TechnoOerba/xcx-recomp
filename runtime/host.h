@@ -335,6 +335,10 @@ int rt_knob_n(const char *name, int def);
 #define RT_KNOB_ON(mode) ((mode) == 2 ? rt_ab() : (mode))
 void frame_step_present(uint64_t display_ns, int interval); // nvnQueuePresentTexture: the frame's display time and
                                                            // present interval (60 Hz ticks)
+// ---- day length (day_length.c): XCX_DAY_LENGTH, the game clock's speed
+void rt_day_length_update(void);                           // every present
+int rt_day_length_state(void);                             // 0 not this game build, 2 the clock didn't read as one, 1 on
+
 // ---- boot (boot.c, main.c)
 typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; const char *shot, *gpu; } RtConfig;
                                                            // romfs: directory with romfs.bin and index.json;

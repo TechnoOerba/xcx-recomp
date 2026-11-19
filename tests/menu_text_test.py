@@ -85,6 +85,15 @@ class MenuText(unittest.TestCase):
                     too_long.append(f'{name} {key}: {len(text)} bytes, the pane leaves {PANE - 1 - note}')
         self.assertFalse(too_long, '\n'.join(too_long))
 
+    def test_day_length_texts(self):
+        t = tables()
+        for name in ('text_en', 'text_ru'):
+            for key in ('UI_MENU_DAY_NIGHT_GROUP', 'UI_MENU_DAY_LENGTH', 'UI_MENU_DAY_LENGTH_DESC', 'UI_MENU_DAY_ORIGINAL', 'UI_MENU_DAY_STOPPED',
+                        'UI_MENU_DAY_STEP', 'UI_MENU_DAY_UNSUPPORTED', 'UI_MENU_DAY_NO_CLOCK'):
+                self.assertIn(key, t[name], f'{name} lacks {key}')
+            self.assertEqual(t[name]['UI_MENU_DAY_STEP'].count(b'%s'), 2, f'{name} UI_MENU_DAY_STEP takes two %s')
+            self.assertEqual(t[name]['UI_MENU_DAY_STEP'].count(b'%'), 2, f'{name} UI_MENU_DAY_STEP has no other %')
+
 
 if __name__ == '__main__':
     unittest.main()

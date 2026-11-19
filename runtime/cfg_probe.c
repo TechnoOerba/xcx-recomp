@@ -159,6 +159,8 @@ int probe_cfg(void) {
     CHECK(m && EQ(m->def, "off") && EQ(m->values, "off|fps|full") && m->live, "meta: perf_overlay is live, off by default");
     m = cfg_meta("VOICE_LANG");
     CHECK(m && EQ(m->def, "") && EQ(m->values, "ja|en") && m->live, "meta: voice_lang is automatic (unset) by default, ja|en, live");
+    m = cfg_meta("DAY_LENGTH");   // day_length.c: 24 real minutes is the game's own day
+    CHECK(m && EQ(m->def, "24") && EQ(m->values, "0..1440") && m->live, "meta: day_length is 24 by default, 0..1440, live");
     // the display mode: the menu's Window, Borderless and Fullscreen; 0 and 1 of older files keep their meaning
     m = cfg_meta("FULLSCREEN");
     CHECK(m && EQ(m->def, "0") && EQ(m->values, "0|borderless|1") && m->live, "meta: fullscreen takes 0|borderless|1");

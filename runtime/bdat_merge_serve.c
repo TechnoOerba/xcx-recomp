@@ -516,8 +516,9 @@ static void reuse(const char *key, const char *file, const char *how, const Bdat
 // without reading them (each mod's id, and each of its files' path, size, last-write time, change time and identity
 // on its volume; the game's stored copy, hashed with XXH64 instead of unpacked) and the name of the merged file that
 // key gave. A copy tool can carry a file's size and last-write time over to a changed file, but not its change time
-// or identity (plat_file_identity), so a changed mod file gives another key. A file system that keeps no change time
-// (FAT, exFAT, some network shares) gives no quick key at all. The same key and that file still there, and still the
+// or identity (plat_file_identity), so a changed mod file gives another key. A file on a file system not known to keep
+// both (FAT, exFAT, network shares: plat_file_identity lists the ones that do) gives no quick key at all, so its inputs
+// are read and hashed every start. The same key and that file still there, and still the
 // file that was written (cached_ok): it is served without reading the mods. Anything else (a file replaced, one
 // added, another order, a game update): the inputs are read and hashed as before, and the quick file is written again.
 

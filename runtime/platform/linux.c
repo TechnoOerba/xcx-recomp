@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
@@ -780,8 +781,29 @@ int plat_file_stat(const char *path, int64_t *size, int64_t *mtime_ns) {
     return 1;
 }
 
+// File systems known to keep a change time no copy tool can set and an inode number of the file's own (statfs
+// f_type). Not vfat, exfat, ntfs through FUSE or network file systems: some report the last-write time as the change
+// time, or make inode numbers up per mount.
+static int keeps_identity(long type) {
+    static const unsigned long known[] = {
+        0xEF53,      // ext2, ext3, ext4
+        0x9123683E,  // btrfs
+        0x58465342,  // xfs
+        0xF2F52010,  // f2fs
+        0x2FC12FC1,  // zfs
+        0xCA451A4E,  // bcachefs
+        0x01021994,  // tmpfs
+        0x794C7630,  // overlayfs
+    };
+    for (size_t i = 0; i < sizeof known / sizeof known[0]; i++)
+        if ((unsigned long)(unsigned int)type == known[i]) return 1;
+    return 0;
+}
+
 int plat_file_identity(const char *path, uint64_t id[4]) {
     struct stat st;
+    struct statfs fs;
+    if (statfs(path, &fs) || !keeps_identity((long)fs.f_type)) return 0;
     if (stat(path, &st) || (!st.st_ctim.tv_sec && !st.st_ctim.tv_nsec)) return 0;
     id[0] = (uint64_t)st.st_ctim.tv_sec * 1000000000u + (uint64_t)st.st_ctim.tv_nsec;
     id[1] = (uint64_t)st.st_ino;

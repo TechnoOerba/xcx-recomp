@@ -588,7 +588,13 @@ int plat_file_identity(const char *path, uint64_t id[4]) {
     // FILE_ID_INFO and FileIdInfo (18) by hand: the headers declare them only for a Windows 8 target
     struct { ULONGLONG VolumeSerialNumber; BYTE FileId[16]; } fid;
     BY_HANDLE_FILE_INFORMATION bh;
-    int ok = GetFileInformationByHandleEx(h, FileBasicInfo, &b, sizeof b) && b.ChangeTime.QuadPart != 0;
+    // Only NTFS and ReFS are known to keep a change time and a file id a copy tool can't carry over; FAT and exFAT
+    // (USB sticks, SD cards) may report the last-write time as the change time and an id from the directory entry,
+    // so there a file overwritten in place with its size and dates kept would look the same.
+    wchar_t fs[16] = L"";
+    int ok = GetVolumeInformationByHandleW(h, NULL, 0, NULL, NULL, NULL, fs, 16) &&
+             (!_wcsicmp(fs, L"NTFS") || !_wcsicmp(fs, L"ReFS")) &&
+             GetFileInformationByHandleEx(h, FileBasicInfo, &b, sizeof b) && b.ChangeTime.QuadPart != 0;
     if (ok) {
         id[0] = (uint64_t)b.ChangeTime.QuadPart;
         if (GetFileInformationByHandleEx(h, (FILE_INFO_BY_HANDLE_CLASS)18, &fid, sizeof fid)) {   // 128-bit ids (ReFS)

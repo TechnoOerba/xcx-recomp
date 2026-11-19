@@ -302,8 +302,9 @@ int64_t plat_file_size(const char *path);                 // bytes of a file, -1
 int plat_file_stat(const char *path, int64_t *size, int64_t *mtime_ns);
 // What copy tools can't carry over from another file: id[0] its change time (metadata or contents; Windows ChangeTime,
 // Linux st_ctime), id[1] and id[2] the file's identity on its volume (Windows FileId, Linux st_ino), id[3] the volume
-// (Windows serial number, Linux st_dev). 0 when the file can't be read or the file system doesn't keep a change time
-// (FAT, exFAT, some network shares): then nothing short of reading the file says whether it changed.
+// (Windows serial number, Linux st_dev). 0 when the file can't be read or isn't on a file system known to keep both
+// (Windows: NTFS and ReFS; Linux: ext4, btrfs, xfs, f2fs, zfs, bcachefs, tmpfs, overlayfs; not FAT, exFAT or network
+// shares): then nothing short of reading the file says whether it changed.
 int plat_file_identity(const char *path, uint64_t id[4]);
 int plat_file_set_readonly(const char *path, int on);     // sets or clears the read-only attribute; 1 on success
 // A file that only grows and other processes may read meanwhile: each write lands whole at its end, from any thread,

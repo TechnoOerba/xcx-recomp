@@ -1855,6 +1855,54 @@ static int pipe_memo_on(void) {
 }
 
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
+// Camera rain droplets (XCX_RAIN_DROPLETS, live, on by default). In rain the game draws round droplets (a 32x32
+// six-frame flip book) in a small volume 1 to 4 m in front of the camera. They follow the view and, on screen, land on
+// whatever is behind them, so they read as big blobs on distant ledges, more so at 1440p and 4K. Off skips those draws;
+// the falling rain and the splashes on the ground near the player are other effects and stay.
+// The draws are recognised by their program, from the FNV-1a hash of its guest shader code (not of our translation,
+// which changes with the translator), and by the 32x32x6 flip book in fragment slot 3: another effect in New LA uses
+// the same program in clear weather with a 16x16x8 book and is left alone.
+#define RAIN_DROPLETS_FS_CODE 0x8eaffeb44d1e1319ull   // the droplets' fragment shader, guest code (2.0.0)
+#define RAIN_DROPLETS_FS_LEN 1024u                      // its length in bytes, checked first: most programs differ
+#define RAIN_DROPLETS_VS_CODE 0xbcfbcf458a0c3bfdull   // and their vertex shader
+static uint64_t guest_fnv(const uint8_t *p, uint32_t n) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
+    return h;
+}
+
+static int rain_droplets_program(VkExec *ex) {   // 1 for the droplets' program; kept per program serial
+    static struct { uint64_t serial; int8_t match; } memo[4096];
+    uint64_t serial = ex->prog->serial;
+    typeof(memo[0]) *m = &memo[(serial * 0x9E3779B97F4A7C15ull) >> 52];
+    if (serial && m->serial == serial) return m->match;
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    int match = find_stage(ex->prog, NVN_STAGE_FS, &ctl, &code, &len) && len == RAIN_DROPLETS_FS_LEN &&
+                guest_fnv(code, len) == RAIN_DROPLETS_FS_CODE && find_stage(ex->prog, NVN_STAGE_VS, &ctl, &code, &len) &&
+                guest_fnv(code, len) == RAIN_DROPLETS_VS_CODE;
+    if (serial) m->serial = serial, m->match = (int8_t)match;
+    return match;
+}
+
+// 1 when the draw is the camera rain droplets and the setting hides them.
+static int rain_droplets_hidden(VkExec *ex) {
+    static unsigned ver = ~0u;
+    static int off;
+    if (cfg_version() != ver) {
+        ver = cfg_version();
+        int o = !cfg_bool("XCX_RAIN_DROPLETS");
+        if (o != off) rt_log("rain droplets: %s", o ? "hidden" : "shown");
+        off = o;
+    }
+    if (!off || !rain_droplets_program(ex)) return 0;
+    uint64_t h = ex->tex[NVN_STAGE_FS][3];
+    view_t v;
+    int hv = 0;
+    const VkTexImage *t = h ? vk_texture_by_id(NVN_HANDLE_TEX(h), &v, &hv) : NULL;
+    return t && t->width == 32 && t->height == 32 && t->depth == 6;
+}
+
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (ex->render_disabled) return 0;
     cb_res(ex);
@@ -1900,6 +1948,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
     }
     if (!vs || (has_fs && !fs)) return 0;
+    if (has_fs && rain_droplets_hidden(ex)) return 0;   // the camera rain droplets, when the setting hides them
     if (vk_dlss_skip_draw(ex)) return 0;   // the game's FXAA scaling, whose target DLSS wrote (vk_dlss.c)
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;

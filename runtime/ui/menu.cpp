@@ -689,6 +689,10 @@ static void tab_game(float scale) {
     }
     if (objlod_ok) row_object_lod();
     if (crowd_ok) row_crowd();
+    if (grass_ok || crowd_ok || objlod_ok) {   // the 2.0.0 update's effects (vk_exec_draw.c)
+        opt_group(UI_MENU_EFFECTS_GROUP);
+        opt_toggle("XCX_RAIN_DROPLETS", UI_MENU_RAIN_DROPLETS, UI_MENU_RAIN_DROPLETS_DESC);
+    }
     opt_end();
 }
 

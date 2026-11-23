@@ -23,9 +23,9 @@
 // The loader does not notice a new range by itself: the per-layer loader (main+0x9953a0) keeps the camera position of
 // its last pass in the layer's entry ([loader+0xc0] + layer x 16: +0 X, +8 Z) and returns at once while the camera is
 // still in the same grid cell, so a standing camera kept the old amount of grass until it moved into the next cell. After
-// a change grass_rescan writes a far-off position there, and each layer's next pass is a full one at the new range, as
-// after a teleport. The loader is [grass object+0xc8], the object the live grass update stores at page +0x110 (set
-// "grassrescan"); its layer count is the first word of [loader].
+// a change grass_rescan_poll writes a far-off position there, and each layer's next pass is a full one at the new range,
+// as after a teleport. The loader is [grass object+0xc8], the object the live grass update stores at page +0x110 (set
+// "grassrescan", on only while a rescan waits); its layer count is the first word of [loader].
 //
 // The cell allocator (main+0x9bb130) stores a 16-bit capacity in entries at cell +0x1a, which wraps for any free block
 // over 1 MiB, the game's own 0x1c0000-byte heap included. It looks unused: the heap code keeps the real size at the
@@ -47,18 +47,49 @@ static int grass_cfg_seen_valid;
 static float grass_logged = -1;
 static float grass_applied = -1;   // the scale of the last update; -1 before the first (nothing is loaded yet then)
 
-static void grass_rescan(const uint8_t *page) {
-    static int set = -2;
-    if (set == -2) set = rt_patch_set("grassrescan");
-    if (!rt_patch_enabled(set)) return;
+// Set "grassrescan" is switched on only while a rescan waits: rt_grass_init switches it off, a change of the distance
+// clears the page slot and switches it on, and the first grass update after that stores the grass object it works on.
+// So the object is always one the game used after the change (never one kept from an earlier map that may be freed
+// since), and at the default nothing is patched or written. Without grass on the map (the title, a loading screen) the
+// rescan waits for the next grass update, where it only forces the full pass a new map gets anyway.
+static int rescan_set = -2;
+static int rescan_allowed;   // XCX_GRASS_RESCAN is not 0 (the set was on at start)
+static int rescan_pending;
+
+static void grass_rescan_end(uint8_t *page) {
+    rescan_pending = 0;
+    rt_patch_switch(rescan_set, 0);
+    __atomic_store_n((uint64_t *)(page + GRASS_OBJECT_PAGE), 0, __ATOMIC_RELEASE);
+}
+
+static void grass_rescan_start(uint8_t *page) {
+    if (!rescan_allowed) return;
+    __atomic_store_n((uint64_t *)(page + GRASS_OBJECT_PAGE), 0, __ATOMIC_RELEASE);
+    rescan_pending = 1;
+    rt_patch_switch(rescan_set, 1);
+}
+
+// At every present while a rescan waits: once the live grass update stored its object, every layer's next pass is a
+// full one. Every pointer is checked as readable; a structure that does not look as expected is logged and left alone.
+static void grass_rescan_poll(uint8_t *page) {
     uint64_t g = __atomic_load_n((const uint64_t *)(page + GRASS_OBJECT_PAGE), __ATOMIC_ACQUIRE);
-    if (!g || !plat_mem_readable(g + 0xc8, 8)) return;   // no grass on this map yet
-    uint64_t loader = *(const uint64_t *)(uintptr_t)(g + 0xc8);
-    if (!loader || !plat_mem_readable(loader, 0xc8)) return;
+    if (!g) return;   // no grass update since the change yet
+    grass_rescan_end(page);
+    uint64_t loader = plat_mem_readable(g + 0xc8, 8) ? *(const uint64_t *)(uintptr_t)(g + 0xc8) : 0;
+    if (!loader || !plat_mem_readable(loader, 0xc8)) {
+        rt_log("grass: no rescan, the grass object %#llx has no readable loader", (unsigned long long)g);
+        return;
+    }
     uint64_t layers = *(const uint64_t *)(uintptr_t)loader, entries = *(const uint64_t *)(uintptr_t)(loader + 0xc0);
-    if (!layers || !entries || !plat_mem_readable(layers, 4)) return;
+    if (!layers || !entries || !plat_mem_readable(layers, 4)) {
+        rt_log("grass: no rescan, the loader %#llx has no readable layer table", (unsigned long long)loader);
+        return;
+    }
     uint32_t n = *(const uint32_t *)(uintptr_t)layers;
-    if (n > 64 || !plat_mem_readable(entries, (size_t)n * 16)) return;
+    if (n > 64 || !plat_mem_readable(entries, (size_t)n * 16)) {   // 15 on the maps measured
+        rt_log("grass: no rescan, %u layers is not a count this code expects", n);
+        return;
+    }
     const float far = -1.0e7f;
     uint32_t word;
     memcpy(&word, &far, sizeof word);
@@ -77,12 +108,14 @@ int rt_grass_available(void) {
 }
 
 void rt_grass_update(void) {
+    uint8_t *page = rt_patch_page();
+    if (rescan_pending && page) grass_rescan_poll(page);
+
     unsigned version = cfg_version();
     if (grass_cfg_seen_valid && version == grass_cfg_seen) return;
     grass_cfg_seen = version;
     grass_cfg_seen_valid = 1;
 
-    uint8_t *page = rt_patch_page();
     if (!rt_grass_available() || !page) return;
 
     const char *v = cfg_get("XCX_GRASS_DISTANCE");
@@ -99,7 +132,7 @@ void rt_grass_update(void) {
     __atomic_store_n((uint32_t *)(page + GRASS_MIN_RANGE_PAGE), mword, __ATOMIC_RELEASE);
     __atomic_store_n((uint32_t *)(page + GRASS_SCALE_PAGE), word, __ATOMIC_RELEASE);
     rt_patch_switch(grass_set, scale != 1.0f);
-    if (grass_applied >= 0 && scale != grass_applied) grass_rescan(page);
+    if (grass_applied >= 0 && scale != grass_applied) grass_rescan_start(page);
     grass_applied = scale;
     if (scale != grass_logged) {
         grass_logged = scale;
@@ -109,6 +142,9 @@ void rt_grass_update(void) {
 }
 
 void rt_grass_init(void) {
+    rescan_set = rt_patch_set("grassrescan");
+    rescan_allowed = rt_patch_enabled(rescan_set);
+    if (rescan_allowed) rt_patch_switch(rescan_set, 0);   // on only while a rescan waits (grass_rescan_start)
     grass_cfg_seen_valid = 0;
     rt_grass_update();
 }

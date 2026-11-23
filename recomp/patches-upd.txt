@@ -306,9 +306,10 @@ site grass main 9966e8 1e27d000 @page:x9 bd410520
 site grass main 999bec bd400920 bd400920 @page:x9 bd410121 1e210800
 site grass main 99aa00 bd400901 bd400901 @page:x8 bd410100 1e200821
 
-# Grass rescan (always on; XCX_GRASS_RESCAN=0 for comparing, read at start): the live grass update main+0x9fd830 stores
-# its grass object (x20) at page+0x110 just before it calls the cell loader, so runtime/grass.c can make every layer
-# rescan after a setting change (see there). w1 is loaded right after, as the game does.
+# Grass rescan (runtime/grass.c switches it on only from a Grass distance change until the next grass update;
+# XCX_GRASS_RESCAN=0 never, read at start): the live grass update main+0x9fd830 stores its grass object (x20) at
+# page+0x110 just before it calls the cell loader, so runtime/grass.c can make every layer rescan after a setting change
+# (see there). w1 is loaded right after, as the game does.
 set grassrescan XCX_GRASS_RESCAN 1
 site grassrescan main 9fd908 395b8aa1 @page:x1 f9008834 395b8aa1
 

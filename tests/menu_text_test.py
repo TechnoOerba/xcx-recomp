@@ -89,7 +89,7 @@ class MenuText(unittest.TestCase):
         t = tables()
         for name in ('text_en', 'text_ru'):
             for key in ('UI_MENU_DAY_NIGHT_GROUP', 'UI_MENU_DAY_LENGTH', 'UI_MENU_DAY_LENGTH_DESC', 'UI_MENU_DAY_ORIGINAL', 'UI_MENU_DAY_STOPPED',
-                        'UI_MENU_DAY_STEP', 'UI_MENU_DAY_UNSUPPORTED', 'UI_MENU_DAY_NO_CLOCK'):
+                        'UI_MENU_DAY_STEP', 'UI_MENU_NEEDS_GAME_200', 'UI_MENU_DAY_NO_CLOCK'):
                 self.assertIn(key, t[name], f'{name} lacks {key}')
             self.assertEqual(t[name]['UI_MENU_DAY_STEP'].count(b'%s'), 2, f'{name} UI_MENU_DAY_STEP takes two %s')
             self.assertEqual(t[name]['UI_MENU_DAY_STEP'].count(b'%'), 2, f'{name} UI_MENU_DAY_STEP has no other %')

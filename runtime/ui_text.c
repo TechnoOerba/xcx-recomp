@@ -234,10 +234,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_DAY_LENGTH] = "Day length",
     [UI_MENU_DAY_LENGTH_DESC] = "How many real minutes a whole day takes on the in-game clock. Original is the game's own 24 "
                                 "minutes, a game minute each second. Shorter days run the clock, the light and the sky "
-                                "faster, longer days slower. Stopped holds the time; the game's Change Time still moves "
-                                "it. Takes effect at once.",
+                                "faster, longer days slower. Stopped holds the time; a time change in the game's own menu "
+                                "still moves it. Takes effect at once.",
     [UI_MENU_DAY_ORIGINAL] = "Original", [UI_MENU_DAY_STOPPED] = "Stopped", [UI_MENU_DAY_STEP] = "%s min (%sx)",
-    [UI_MENU_DAY_UNSUPPORTED] = "Needs game version 2.0.0.",
+    [UI_MENU_NEEDS_GAME_200] = "Needs game version 2.0.0.",
     [UI_MENU_DAY_NO_CLOCK] = "Off for this session: the game's clock was not where expected.",
     [UI_MENU_DAWN_DUSK] = "Dawn and dusk",
     [UI_MENU_DAWN_DUSK_DESC] = "How the light changes at dawn and dusk. Original is the game's own, with quick steps at "
@@ -658,7 +658,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                 "времени в игре работает. Действует сразу.",
     [UI_MENU_DAY_ORIGINAL] = "Как в игре", [UI_MENU_DAY_STOPPED] = "Время остановлено",
     [UI_MENU_DAY_STEP] = "%s мин (%sx)",
-    [UI_MENU_DAY_UNSUPPORTED] = "Нужна версия игры 2.0.0.",
+    [UI_MENU_NEEDS_GAME_200] = "Нужна версия игры 2.0.0.",
     [UI_MENU_DAY_NO_CLOCK] = "Выключено до перезапуска: часы игры не найдены.",
     [UI_MENU_DAWN_DUSK] = "Рассвет и закат",
     [UI_MENU_DAWN_DUSK_DESC] = "Как меняется свет на рассвете и закате. «Как в игре» — с резкими скачками в 05:00 и "

@@ -645,8 +645,9 @@ static void row_object_lod() {
     }
     opt_choice_list("XCX_OBJECT_LOD_RANGE", UI_MENU_OBJECT_LOD, values, names, n, UI_MENU_OBJECT_LOD_DESC);
     // Adjust range to frame rate (objlod.c): Auto or Fixed, a sub-row of the range shown only above Original; under
-    // Auto the value shows the range in effect
-    if (cfg_double("XCX_OBJECT_LOD_RANGE") > 0) {
+    // Auto the value shows the range in effect. Not on a build where the range itself is greyed out (rt_objlod_available):
+    // a sub-row only means something under its parent.
+    if (rt_objlod_available() && cfg_double("XCX_OBJECT_LOD_RANGE") > 0) {
         static const UiTextId mode[] = {UI_MENU_OBJECT_LOD_AUTO, UI_MENU_OBJECT_LOD_FIXED};
         float now = 0, max = 0, busy = 0, budget = 0;
         static char note[32];
@@ -682,10 +683,16 @@ static void day_length_name(char *out, size_t n, double len) {
     double x = 24.0 / len;
     char sp[16], mins[16];
     if (fabs(x * 100 - floor(x * 100 + 0.5)) < 1e-9) snprintf(sp, sizeof sp, "%g", x);   // 24, 0.5, 0.25
-    else if (fabs(len / 24 - floor(len / 24 + 0.5)) < 1e-9) snprintf(sp, sizeof sp, "1/%g", len / 24);   // 1/6
     else snprintf(sp, sizeof sp, "%.2f", x);
     snprintf(mins, sizeof mins, "%g", len);
     snprintf(out, n, menu_text(UI_MENU_DAY_STEP), mins, sp);
+}
+
+// The Day and night rows (Day length, Dawn and dusk, Night darkness) are greyed out with a note off the game build the
+// clock's addresses are from, or when the clock didn't read as one this session (day_length.c rt_day_length_state).
+static void day_night_disable_if_off(void) {
+    int state = rt_day_length_state();
+    if (state != 1) opt_disable_next(state ? UI_MENU_DAY_NO_CLOCK : UI_MENU_NEEDS_GAME_200);
 }
 
 static void row_day_length(void) {
@@ -714,8 +721,7 @@ static void row_day_length(void) {
         if (end && !*end && steps[i] == v) cur = n;   // "24.0" is Original
         values[n] = vals[n], names[n] = text[n], n++;
     }
-    int state = rt_day_length_state();
-    if (state != 1) opt_disable_next(state ? UI_MENU_DAY_NO_CLOCK : UI_MENU_DAY_UNSUPPORTED);
+    day_night_disable_if_off();
     opt_choice_list("XCX_DAY_LENGTH", UI_MENU_DAY_LENGTH, values, names, n, UI_MENU_DAY_LENGTH_DESC, cur);
 }
 
@@ -725,13 +731,12 @@ static void row_dawn_dusk(void) {
     static const char *const dd_values[] = {"original", "smoothed", "extended"};
     const char *dd_names[] = {menu_text(UI_MENU_DAY_ORIGINAL), menu_text(UI_MENU_DAWN_DUSK_SMOOTHED),
                               menu_text(UI_MENU_DAWN_DUSK_EXTENDED)};
-    int state = rt_day_length_state();
-    if (state != 1) opt_disable_next(state ? UI_MENU_DAY_NO_CLOCK : UI_MENU_DAY_UNSUPPORTED);
+    day_night_disable_if_off();
     opt_choice_list("XCX_DAWN_DUSK", UI_MENU_DAWN_DUSK, dd_values, dd_names, 3, UI_MENU_DAWN_DUSK_DESC);
     static const char *const dn_values[] = {"original", "darker", "darkest"};
     const char *dn_names[] = {menu_text(UI_MENU_DAY_ORIGINAL), menu_text(UI_MENU_DARK_NIGHTS_DARKER),
                               menu_text(UI_MENU_DARK_NIGHTS_DARKEST)};
-    if (state != 1) opt_disable_next(state ? UI_MENU_DAY_NO_CLOCK : UI_MENU_DAY_UNSUPPORTED);
+    day_night_disable_if_off();
     opt_choice_list("XCX_DARK_NIGHTS", UI_MENU_DARK_NIGHTS, dn_values, dn_names, 3, UI_MENU_DARK_NIGHTS_DESC);
 }
 
@@ -750,13 +755,18 @@ static void tab_game(float scale) {
     row_day_length();
     row_dawn_dusk();
     int grass_ok = rt_grass_available(), crowd_ok = rt_crowd_available(), objlod_ok = rt_objlod_available();   // the 2.0.0 update's (grass.c, crowd.c, objlod.c)
-    if (grass_ok || crowd_ok || objlod_ok) opt_group(UI_MENU_WORLD_GROUP);
-    if (grass_ok) {
-        static const UiTextId grass[] = {UI_MENU_GRASS_ORIGINAL, UI_MENU_GRASS_15, UI_MENU_GRASS_2, UI_MENU_GRASS_3};
-        opt_choice("XCX_GRASS_DISTANCE", UI_MENU_GRASS, grass, 4, UI_MENU_GRASS_DESC);
-    }
-    if (objlod_ok) row_object_lod();
-    if (crowd_ok) row_crowd();
+    // A setting that can't apply on this game build stays in the menu, greyed out with its note, like the Day and night
+    // rows: the player sees it exists and why it is off; Object detail range's Auto/Fixed sub-row only shows under it
+    // (row_object_lod). Each row's own file decides: grass.c and crowd.c by their patch set, objlod.c by the game
+    // version and the code at its sites (one that differs on 2.0.0 shows the same note).
+    opt_group(UI_MENU_WORLD_GROUP);
+    static const UiTextId grass[] = {UI_MENU_GRASS_ORIGINAL, UI_MENU_GRASS_15, UI_MENU_GRASS_2, UI_MENU_GRASS_3};
+    if (!grass_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
+    opt_choice("XCX_GRASS_DISTANCE", UI_MENU_GRASS, grass, 4, UI_MENU_GRASS_DESC);
+    if (!objlod_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
+    row_object_lod();
+    if (!crowd_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
+    row_crowd();
     opt_end();
 }
 

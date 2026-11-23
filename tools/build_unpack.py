@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,10 +80,15 @@ def build(cc, out, extra=(), env=None):
     check_pins()
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + '.part')
+    tmp = out.with_name(f'{out.name}.{os.getpid()}.{threading.get_ident()}.part')   # two builds at once don't share it
     with tempfile.TemporaryDirectory(dir=out.parent, prefix='.unpack-obj-') as objs:
-        for cmd in commands(cc, tmp, Path(objs), extra):
-            r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=env)
+        *compiles, link = commands(cc, tmp, Path(objs), extra)
+        # the compiles side by side (each its own clang process), then the link
+        run = lambda cmd: subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=env)
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+            results = list(pool.map(run, compiles))
+        for r in results + [None]:
+            r = r or run(link)   # linked only once every compile worked
             if r.returncode:
                 tmp.unlink(missing_ok=True)
                 raise RuntimeError((r.stdout + r.stderr).strip()[-4000:])
@@ -130,9 +137,10 @@ def copy_license(licenses):
     shutil.copy2(DEP / 'COPYING', Path(licenses) / 'libarchive-COPYING.txt')
 
 
-def stamp():
-    """A hash of everything the tool is built from, so a checkout rebuilds it when one of them changes."""
-    h = hashlib.sha256()
+def stamp(cc=None):
+    """A hash of everything the tool is built from (and the clang it is built with), so a checkout rebuilds it when
+    one of them changes."""
+    h = hashlib.sha256(str(cc or '').encode())
     for p in [SOURCE, DEP / 'config.h', DEP / 'pins.json', Path(__file__)]:
         h.update(p.read_bytes())
     return h.hexdigest()[:16]

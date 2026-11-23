@@ -18,7 +18,8 @@ the .NET 10 SDK and Python 3.12+ with Pillow (.venv). The folder holds:
                runtime headers, romfs.c, patches.c, ov_zstd.c and mod_menu_adapter.c (compiled per install),
                xcx.png (the window icon), deps/ (Vulkan headers 1.4.363, VMA, zstd
                built static; SDL3, Opus and libvpx come from the sysroot)
-    bin/       xcx_xlate (+ .id), hactool, ninja, libSDL3.so.0 (the sysroot's; the game finds it beside itself)
+    bin/       xcx_xlate (+ .id), hactool, ninja, xcx-unpack (tools/build_unpack.py), libSDL3.so.0 (the sysroot's;
+               the game finds it beside itself)
     recomp/, tools/, data/, installer/, licenses/, THIRD_PARTY_NOTICES.md, xcx.ini.example, docs/mods/, public API references and examples/mods/hello/, VERSION
     AppRun, xcx-setup.desktop, xcx-setup.png   the AppImage entry: python/bin/python3 -m installer.gui
 

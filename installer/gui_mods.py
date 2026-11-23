@@ -24,6 +24,13 @@ POLL_MS = 100
 PAD = 14
 
 
+def size_text(cat, n):
+    """A download's size for the texts: MB, or KB under a megabyte (a small option file is not "1 MB")."""
+    if n >= 1 << 20:
+        return cat('mods.size_mb', n=round(n / (1 << 20)))
+    return cat('mods.size_kb', n=max(1, round(n / 1024)))
+
+
 class ModsWindow:
     def __init__(self, parent, cat, dest, ui_font, index=None):
         self.cat, self.dest, self.index_source = cat, Path(dest), index
@@ -107,9 +114,18 @@ class ModsWindow:
                 self.results.put(('failed', (failed, e)) if failed else ('error', e))
             except OSError as e:
                 self.results.put(('error', mods.ModError('mods.failed', detail=str(e))))
+            except Exception as e:   # anything else still ends the job, so the window is never left busy
+                self.results.put(('error', mods.ModError('mods.failed', detail=f'{type(e).__name__}: {e}')))
         threading.Thread(target=body, daemon=True).start()
 
     def poll(self):
+        try:
+            self.take_results()
+        finally:   # whatever a result's handler raised, the window keeps reading results
+            if self.win.winfo_exists():
+                self.win.after(POLL_MS, self.poll)
+
+    def take_results(self):
         try:
             while True:
                 kind, value = self.results.get_nowait()
@@ -135,22 +151,24 @@ class ModsWindow:
                 if kind == 'error':
                     self.set_status(self.cat(value.id, **value.params), error=True)
                 else:
-                    if isinstance(value, list):
-                        self.entries = value
-                        notes, self.notes = self.notes, []
-                        if notes:
-                            self.set_status('\n'.join(self.cat(i, **p) for i, p in notes),
-                                            error=any(i != 'mods.moved' for i, _ in notes))
-                        elif self.status.cget('foreground') != theme.ERROR:
-                            self.set_status('')   # the "reading" or "installing" line is done
-                    elif isinstance(value, str):
-                        self.set_status(value)
-                    self.fill()
+                    self.show(value)
                 self.refresh_selection()
         except queue.Empty:
             pass
-        if self.win.winfo_exists():
-            self.win.after(POLL_MS, self.poll)
+
+    def show(self, value):
+        """A job's result on the window's thread: a new list (with the lines normalise left for it), or a line."""
+        if isinstance(value, list):
+            self.entries = value
+            notes, self.notes = self.notes, []
+            if notes:
+                self.set_status('\n'.join(self.cat(i, **p) for i, p in notes),
+                                error=any(i != 'mods.moved' for i, _ in notes))
+            elif self.status.cget('foreground') != theme.ERROR:
+                self.set_status('')   # the "reading" or "installing" line is done
+        elif isinstance(value, str):
+            self.set_status(value)
+        self.fill()
 
     def progress(self, done, total):
         self.results.put(('progress', (done, total)))
@@ -184,22 +202,34 @@ class ModsWindow:
             if parts:
                 n_on = sum(1 for p in parts if p['enabled'])
                 n_in = sum(1 for p in parts if p['installed'])
-                state = self.cat('mods.state_parts', on=n_on, installed=n_in, total=len(parts)) if n_in else state
+                # of the parts installed, as the game's Mods tab counts them (it knows only the installed ones)
+                state = self.cat('mods.state_parts', on=n_on, installed=n_in, total=n_in) if n_in else state
             # an entry with parts starts shut, so one with many optional pieces takes a row; the player's opening or
             # shutting it lasts while the window is open
-            self.tree.insert('', 'end', iid=e['id'], open=e['id'] in self.opened, values=(
+            # a row's id is its mod id, made unique when two rows have one (mods/<entry> left from before the entry
+            # came in parts lists beside it): Tk refuses an id twice
+            iid = self.free_iid(e['id'])
+            self.tree.insert('', 'end', iid=iid, open=iid in self.opened, values=(
                 e.get('name') or e['id'], self.cat('mods.kind_' + e['kind']), e.get('author', ''), state))
-            self.rows[e['id']] = e
+            self.rows[iid] = e
             for part in parts:
-                self.tree.insert(e['id'], 'end', iid=part['mid'],
+                pid = self.free_iid(part['mid'])
+                self.tree.insert(iid, 'end', iid=pid,
                                  values=('    ' + part['name'], '', '', self.state_text(part)))   # indented under the entry
-                self.rows[part['mid']] = ('part', e, part)
+                self.rows[pid] = ('part', e, part)
         if keep and self.tree.exists(keep):
             parent = self.tree.parent(keep)
             if parent:   # a picked part keeps its entry open
                 self.tree.item(parent, open=True)
                 self.opened.add(parent)
             self.tree.selection_set(keep)
+
+    def free_iid(self, mid):
+        iid, n = mid, 1
+        while self.tree.exists(iid):
+            n += 1
+            iid = f'{mid}#{n}'   # '#' is in no mod id
+        return iid
 
     def selected_id(self):
         sel = self.tree.selection()
@@ -292,7 +322,7 @@ class ModsWindow:
         size = sum(int(p['size']) for p in mods.parts_of(entry) if parts is None or p['id'] in parts)
         if e['kind'] == 'romfs' and not messagebox.askokcancel(
                 self.cat('mods.title'), self.cat('mods.confirm_download', name=e['name'], url=e['homepage'],
-                                                 size=max(1, size >> 20)), parent=self.win):
+                                                 size=size_text(self.cat, size)), parent=self.win):
             return
         self.run(self.cat('mods.installing', name=e['name']),
                  lambda: (mods.install(self.dest, entry, self.progress, parts=parts), self.reload_now())[1])
@@ -304,7 +334,7 @@ class ModsWindow:
         def work():
             matched, unknown = mods.match_files(entry, paths)
             if not matched:
-                mods.check_file(paths[0], entry)   # raises with the files the entry lists
+                raise mods.mismatch(paths[0], entry)
             plans = {mid: mods.preview(self.dest, path) for mid, (_, path) in matched.items()}
             return matched, unknown, plans
 
@@ -317,11 +347,11 @@ class ModsWindow:
             names = ', '.join(part['name'] for part, _ in matched.values())
 
             def install():
-                mods.install(self.dest, entry, files=files, plans=plans)
+                mods.install(self.dest, entry, files=files, plans=plans, matched=matched)
                 return self.reload_now()
 
             def done(listing):
-                self.results.put(('ok', listing))
+                self.show(listing)
                 if unknown and messagebox.askyesno(
                         self.cat('mods.title'), self.cat('mods.unknown_files', name=entry['name'],
                                                          files=', '.join(p.name for p in unknown)), parent=self.win):
@@ -347,9 +377,9 @@ class ModsWindow:
         note = self.cat('mods.overlap_note', name=part['name'], others=', '.join(both)) if both else ''
 
         def done(listing):
-            self.results.put(('ok', listing))
+            self.show(listing)
             if note:
-                self.results.put(('ok', note))
+                self.show(note)
         self.run('', lambda: (mods.set_enabled(self.dest, mid, on), self.reload_now())[1], done)
 
     def on_remove(self):
@@ -375,7 +405,7 @@ class ModsWindow:
                 return after and after()
 
             def done(listing):
-                self.results.put(('ok', listing))
+                self.show(listing)
                 if after:
                     after()
             self.run(self.cat('mods.installing', name=Path(path).name),
@@ -408,6 +438,10 @@ class ModsWindow:
             webbrowser.open(e['homepage'])
 
     def on_close(self):
+        if self.busy:   # an install or removal running on would race a new window's in the mods folder
+            self.win.bell()
+            self.set_status(self.cat('mods.busy_close'), error=True)
+            return
         self.win.destroy()
 
     def reload_now(self):
@@ -469,7 +503,7 @@ class ManualDialog(Dialog):
         self.pages = [p.get('page') for p in parts if str(p.get('page') or '').startswith('https://')]
         site = urlparse(self.pages[0] if self.pages else entry.get('homepage') or '').hostname or ''
         site = site[4:] if site.startswith('www.') else site
-        size = lambda p: max(1, int(p['size']) >> 20)
+        size = lambda p: size_text(cat, int(p['size']))
         if len(parts) == 1:
             text = cat('mods.manual_intro', name=entry['name'], site=site or '?',
                        file=parts[0].get('file') or parts[0]['name'], size=size(parts[0]))

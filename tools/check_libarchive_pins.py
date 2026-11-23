@@ -52,17 +52,18 @@ def member_name(pinned, version):
 
 
 def read_release(archive, version, names):
-    """{pinned path: bytes} for names, from the release archive."""
+    """{pinned path: bytes} for names, from the release archive, in one pass over it (a lookup by name in a tar.xz
+    can decompress it again from the start)."""
+    want = {member_name(pinned, version): pinned for pinned in names}
     out = {}
-    with tarfile.open(archive, 'r:xz') as tar:
-        for pinned in names:
-            try:
-                f = tar.extractfile(member_name(pinned, version))
-            except KeyError:
-                f = None
-            if f is None:
-                raise ValueError(f'{pinned}: not in {Path(archive).name}')
-            out[pinned] = f.read()
+    with tarfile.open(archive, 'r|xz') as tar:
+        for m in tar:
+            pinned = want.get(m.name)
+            if pinned is not None and m.isfile():
+                out[pinned] = tar.extractfile(m).read()
+    missing = [p for p in names if p not in out]
+    if missing:
+        raise ValueError(f'{missing[0]}: not in {Path(archive).name}')
     return out
 
 

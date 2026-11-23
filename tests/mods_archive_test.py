@@ -6,6 +6,7 @@ deps/libarchive; its test archives come from libarchive's own test suite).
 """
 import binascii
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -90,6 +91,19 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(mod_layout.needs_confirm(p))
         p = mod_layout.plan(members('My Mod/romfs/mod/bdat/common.bdat'), self.G)
         self.assertEqual((p.how, list(p.files.values())), ('loader', ['bdat/common.bdat']))
+
+    def test_a_large_archive_is_planned_in_one_pass(self):
+        # 4000 files in 800 folders without a romfs folder: every folder is a candidate top, and reading all files
+        # for each of them took about 14 s; one pass over the files and their folders takes milliseconds
+        import time
+        files = [f'My Mod v2/chr/pc/pc{i:04d}/tex{j}.wismt' for i in range(800) for j in range(5)]
+        g = game(*(f.split('/', 1)[1] for f in files[::3]))
+        start = time.perf_counter()
+        p = mod_layout.plan(members(*files), g)
+        q = mod_layout.plan(members(*files), None)
+        self.assertLess(time.perf_counter() - start, 1.0)
+        self.assertEqual((p.how, p.top, p.matched, len(p.files)), ('matched', 'My Mod v2', 1334, 4000))
+        self.assertEqual((q.how, q.top, len(q.files)), ('guessed', 'My Mod v2', 4000))
 
     def test_folder_named_after_the_mod(self):
         # the Nexus Mods "Tweaks mod" layout: no romfs folder, the game's folders inside one named after the mod
@@ -313,6 +327,26 @@ class RarTest(unittest.TestCase):
             self.assertEqual(archive.extract(path, self.layout, {file: 'bdat/' + file}, out, 1 << 20), 1)
             self.assertEqual((out / 'bdat' / file).stat().st_size, size)
 
+    def test_only_picked_entries_are_written_and_counted(self):
+        # an entry left out of the names (another version of the mod, a read-me) is skipped: not written, and its
+        # bytes don't count toward the limit, which the preview checked against the picked files only
+        path = fixture('test_read_format_rar5_stored.rar', self.root)
+        exe = self.root / 'bin' / archive.UNPACK
+        names = self.root / 'names.txt'
+        names.write_text('other/file.txt\n', encoding='utf-8')
+        out = self.root / 'picked-none'
+        out.mkdir()
+        self.assertEqual(archive.run_tool(exe, 'extract', path, out, 1, names), {'files': 0, 'bytes': 0})
+        self.assertEqual(list(out.iterdir()), [])
+        (self.root / 'picked-all').mkdir()
+        with self.assertRaises(archive.ArchiveError) as e:   # without the names, everything counts
+            archive.run_tool(exe, 'extract', path, self.root / 'picked-all', 1)
+        self.assertEqual(e.exception.id, 'mods.zip_too_big')
+        names.write_text('helloworld.txt\n', encoding='utf-8')
+        out = self.root / 'picked-one'
+        out.mkdir()
+        self.assertEqual(archive.run_tool(exe, 'extract', path, out, 1 << 20, names), {'files': 1, 'bytes': 29})
+
     def test_refuses_links_and_passwords(self):
         for name, error in (('test_read_format_rar5_symlink.rar', 'mods.zip_unsafe'),
                             ('test_read_format_rar5_hardlink.rar', 'mods.zip_unsafe'),
@@ -395,8 +429,74 @@ class NameTest(unittest.TestCase):
             self.assertIsNotNone(archive.safe_name(name), name)
         for name in ('', '/abs', 'C:/x', 'a/../b', '..', './a', 'a/./b', 'a\x01', 'CON', 'aux.bdat', 'x/com1.txt',
                      'LPT9', 'Nul .txt', 'prn/a', 'a./b', 'a /b', 'end.', 'end ', 'COM¹', 'lpt³.txt',
-                     'x/Com² .bdat'):
+                     'x/Com² .bdat', 'a<b', 'a>b', 'a"b', 'a|b', 'a?b', 'a*b'):
             self.assertIsNone(archive.safe_name(name), name)
+
+    def test_library_ini_values_fit_the_game(self):
+        # the game drops a value that doesn't fit its field (mod_library.c, ini_value): long Cyrillic names are cut
+        with tempfile.TemporaryDirectory() as t:
+            mods.write_info(Path(t), 'romfs', 'Твики: ' + 'длинное название ' * 6, group='tweaks',
+                            group_name='Я' * 60, part='probe')
+            values = dict(line.split(' = ', 1) for line in
+                          (Path(t) / 'library.ini').read_text(encoding='utf-8').splitlines())
+        self.assertEqual(len(values['name'].encode()), 95)
+        self.assertEqual(values['group_name'], 'Я' * 47)   # 94 bytes: a whole letter more would be 96
+
+    def test_a_name_twice_is_refused(self):
+        for names in (('a/b.bdat', 'a/b.bdat'), ('a\\b.bdat', 'a/b.bdat')):
+            listed = [Member(n.replace('\\', '/'), 'file', 1, True) for n in names]
+            with self.assertRaises(mod_layout.LayoutError) as e:
+                mod_layout.check_members(listed)
+            self.assertEqual(e.exception.id, 'mods.zip_duplicate', names)
+
+
+class ZipExtractTest(unittest.TestCase):
+    """Writing a zip's picked members: checked again in the open that writes them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.zip = self.dir / 'mod.zip'
+        with zipfile.ZipFile(self.zip, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('romfs/bdat/common.bdat', b'x' * 5000)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def extract(self, picks, limit=1 << 20):
+        out = self.dir / 'out'
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+        return archive.extract(self.zip, None, picks, out, limit)
+
+    def test_writes_the_picks(self):
+        self.assertEqual(self.extract({'romfs/bdat/common.bdat': 'bdat/common.bdat'}), 1)
+        self.assertEqual((self.dir / 'out' / 'bdat' / 'common.bdat').stat().st_size, 5000)
+
+    def test_the_limit_is_checked_where_the_files_are_written(self):
+        with self.assertRaises(archive.ArchiveError) as e:
+            self.extract({'romfs/bdat/common.bdat': 'bdat/common.bdat'}, limit=4999)
+        self.assertEqual(e.exception.id, 'mods.zip_too_big')
+
+    def test_a_pick_the_archive_no_longer_has_is_refused(self):
+        with self.assertRaises(archive.ArchiveError) as e:
+            self.extract({'romfs/bdat/common.bdat': 'bdat/common.bdat', 'romfs/gone.bin': 'gone.bin'})
+        self.assertEqual(e.exception.id, 'archive.bad')
+
+    def test_a_damaged_member_is_an_archive_error(self):
+        data = bytearray(self.zip.read_bytes())
+        at = data.index(b'romfs/bdat/common.bdat') + len('romfs/bdat/common.bdat') + 3   # into the compressed data
+        data[at] ^= 0xFF
+        self.zip.write_bytes(data)
+        with self.assertRaises(archive.ArchiveError) as e:
+            self.extract({'romfs/bdat/common.bdat': 'bdat/common.bdat'})
+        self.assertEqual(e.exception.id, 'archive.bad')
+
+    def test_a_copy_is_held_to_the_size_it_was_matched_by(self):
+        big = self.dir / 'big.bin'
+        big.write_bytes(b'y' * (3 << 20))
+        size, _ = mods.copy_hashed(big, self.dir / 'copy.bin', 1000)
+        self.assertEqual((size, (self.dir / 'copy.bin').stat().st_size), (1001, 1001))
 
     def test_ids(self):
         self.assertTrue(mods.valid_id('tweaks.all'))
@@ -445,9 +545,87 @@ class IndexTest(unittest.TestCase):
                             'size': 1}]}
         self.assertEqual(mods.fetch_index(self.index({'format': 3, 'mods': [entry]})), [])
 
+    def test_malformed_entries_are_left_out(self):
+        part = {'id': 'one', 'name': 'One', 'page': 'https://example.invalid', 'sha256': 'A' * 64, 'size': 1}
+        good = {'id': 'good', 'kind': 'romfs', 'download': 'manual', 'name': 'G', 'parts': [part]}
+        bad = [dict(good, parts=5), dict(good, parts=[]), dict(good, parts=['x']), dict(good, download='auto'),
+               dict(good, parts=[dict(part, size='1')]), dict(good, parts=[dict(part, size=True)]),
+               dict(good, parts=[dict(part, size=0)]), dict(good, parts=[{k: v for k, v in part.items() if k != 'name'}]),
+               dict(good, parts=[dict(part, sha256='x' * 64)]), dict(good, parts=[dict(part, includes='one')]),
+               dict(good, parts=[dict(part, id='One')]), dict(good, parts=[dict(part, id='a' * 33)]),
+               dict(self.entry, size='big')]
+        for i, entry in enumerate(bad):
+            entry = dict(entry, id=f'bad{i}')
+            self.assertEqual(mods.fetch_index(self.index({'format': 3, 'mods': [entry]})), [], entry)
+        got = mods.fetch_index(self.index({'format': 3, 'mods': [good]}))
+        self.assertEqual(mods.parts_of(got[0])[0]['sha256'], 'a' * 64, 'a hash in capitals is matched as hashlib writes it')
+
+    def test_an_id_two_entries_would_share_keeps_the_first(self):
+        # entry foo's part bar installs as foo.bar, which is also another entry's id: one folder can't be two mods
+        part = {'id': 'bar', 'name': 'Bar', 'page': 'https://example.invalid', 'sha256': '1' * 64, 'size': 1}
+        foo = {'id': 'foo', 'kind': 'romfs', 'download': 'manual', 'name': 'Foo', 'parts': [part]}
+        other = dict(self.entry, id='foo.bar')
+        again = dict(self.entry)
+        got = mods.fetch_index(self.index({'format': 3, 'mods': [foo, other, self.entry, again]}))
+        self.assertEqual([e['id'] for e in got], ['foo', 'plain'])
+
+    def test_the_default_library_falls_back_to_index_json(self):
+        # a library that has no index-3.json yet: Setup reads index.json, which every library has
+        import urllib.error
+        asked = []
+
+        def read(url):
+            asked.append(url.rsplit('/', 1)[1])
+            if url.endswith(mods.INDEX_FILE):
+                raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            return io.BytesIO(json.dumps({'format': 2, 'mods': [self.entry]}).encode())
+        real = mods.opener
+        mods.opener = read
+        try:
+            got = mods.fetch_index()
+        finally:
+            mods.opener = real
+        self.assertEqual((asked, [e['id'] for e in got]), (['index-3.json', 'index.json'], ['plain']))
+
+    def test_a_redirect_to_plain_http_is_refused(self):
+        class Answer(io.BytesIO):
+            def geturl(self):
+                return 'http://example.invalid/index-3.json'
+        real = mods.urllib.request.urlopen
+        mods.urllib.request.urlopen = lambda *a, **k: Answer(b'{}')
+        try:
+            with self.assertRaises(mods.ModError) as e:
+                mods.opener('https://example.invalid/index-3.json')
+        finally:
+            mods.urllib.request.urlopen = real
+        self.assertEqual(e.exception.id, 'mods.bad_link')
+
 
 class CopyFirstTest(unittest.TestCase):
     """A manual install unpacks a copy of the player's file, checked again, never the file itself."""
+
+    def test_files_the_window_matched_are_read_once_more_only(self):
+        # the window matched the picks (one read each); the install copies and hashes in the same read, and hashes
+        # nothing else
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            dest = t / 'XCX'
+            (dest / 'mods').mkdir(parents=True)
+            zpath = t / 'mod.zip'
+            with zipfile.ZipFile(zpath, 'w') as z:
+                z.writestr('romfs/bdat/common.bdat', b'one')
+            data = zpath.read_bytes()
+            entry = {'id': 'm', 'kind': 'romfs', 'download': 'manual', 'name': 'M', 'page': 'https://example.invalid',
+                     'file': zpath.name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+            matched, unknown = mods.match_files(entry, [zpath])
+            hashed, real = [], mods.file_hash
+            mods.file_hash = lambda *a, **k: hashed.append(a) or real(*a, **k)
+            try:
+                result = mods.install(dest, entry, files=[zpath], matched=matched)
+            finally:
+                mods.file_hash = real
+            self.assertEqual((result['installed'], hashed), (['m'], []))
+            self.assertEqual((dest / 'mods' / 'm' / 'romfs' / 'bdat' / 'common.bdat').read_bytes(), b'one')
 
     def test_a_file_that_changes_is_not_installed(self):
         with tempfile.TemporaryDirectory() as t:
@@ -471,13 +649,13 @@ class CopyFirstTest(unittest.TestCase):
             # replaced by a file of another size: refused before anything is copied
             zpath.write_bytes(data + b'\0' * 4096)
             copied = []
-            real = mods.shutil.copyfile
-            mods.shutil.copyfile = lambda *a, **k: copied.append(a) or real(*a, **k)
+            real = mods.copy_hashed
+            mods.copy_hashed = lambda *a, **k: copied.append(a) or real(*a, **k)
             try:
                 with self.assertRaises(mods.ModError) as e:
                     mods.install_part(dest, entry, part, zpath)
             finally:
-                mods.shutil.copyfile = real
+                mods.copy_hashed = real
             self.assertEqual(e.exception.id, 'mods.file_changed')
             self.assertEqual(copied, [], 'a file of the wrong size is not copied')
 
@@ -511,7 +689,7 @@ class RarNamesTest(unittest.TestCase):
     def test_crafted_names_are_refused(self):
         src = fixture('test_read_format_rar5_stored.rar', self.root)
         for new in (b'../loworld.txt', b'aux.oworld.txt', b'helloworld.tx.', b'\\\\?\\oworld.txt', b'C:hloworld.txt',
-                    b'COM\xc2\xb9.orld.txt'):
+                    b'COM\xc2\xb9.orld.txt', b'a<lloworld.txt'):
             path = rar5_renamed(src, b'helloworld.txt', new, self.root / 'crafted.rar')
             listed = archive.members(path, self.layout)
             self.assertEqual([m.safe for m in listed], [False], new)

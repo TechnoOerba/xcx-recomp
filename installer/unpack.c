@@ -2,7 +2,10 @@
 // Compiled with the bundled clang the first time it is needed, against the part of libarchive in deps/libarchive.
 //
 //     unpack list ARCHIVE              one JSON object: {"format": ..., "entries": [{"name", "type", "size"}]}
-//     unpack extract ARCHIVE DIR LIMIT writes the regular files under DIR; {"files": N, "bytes": N}
+//     unpack extract ARCHIVE DIR LIMIT [NAMES]
+//                                      writes the regular files under DIR; {"files": N, "bytes": N}. NAMES: a file of
+//                                      entry names, one per line (UTF-8, '/' separators): only those are written and
+//                                      count toward LIMIT; the others are checked and skipped
 //
 // On failure both print {"error": ID, "detail": TEXT} and exit 1. The ids are the manager's: archive.unsafe_name,
 // archive.encrypted, archive.too_big, archive.bad (libarchive could not read it), archive.write (DIR could not be
@@ -106,7 +109,8 @@ static int device_name(const char *part, size_t len) {
 }
 
 // The entry's name with '\' as '/', or NULL when it is not one the manager may write: not UTF-8, empty, absolute, a
-// drive letter, a '..' or '.' part, a control character, a device name, a part ending in a dot or space (Windows
+// drive letter, a '..' or '.' part, a control character or one of < > " | ? *, a device name, a part ending in a dot
+// or space (Windows
 // drops those, so two names could become one). out holds at least 4096 bytes.
 static const char *safe_name(struct archive_entry *e, char *out) {
     const char *name = archive_entry_pathname_utf8(e);   // no fallback to the raw bytes: those may not be UTF-8
@@ -114,7 +118,7 @@ static const char *safe_name(struct archive_entry *e, char *out) {
     size_t n = 0;
     for (const char *p = name; *p; p++) {
         unsigned char c = (unsigned char)*p;
-        if (c < 0x20 || c == ':') return NULL;
+        if (c < 0x20 || strchr(":<>\"|?*", c)) return NULL;   // c is never 0 here
         out[n++] = c == '\\' ? '/' : (char)c;
     }
     out[n] = 0;
@@ -210,10 +214,81 @@ static FILE *create(const char *path) {
     free(w);
     return f;
 }
+static FILE *open_read(const char *path) {
+    wchar_t *w = wide(path);
+    if (!w) return NULL;
+    FILE *f = _wfopen(w, L"rb");
+    free(w);
+    return f;
+}
 #else
 static int make_dir(const char *path) { return mkdir(path, 0755) == 0 || errno == EEXIST ? 0 : -1; }
 static FILE *create(const char *path) { return fopen(path, "wbx"); }
+static FILE *open_read(const char *path) { return fopen(path, "rb"); }
 #endif
+
+// The names extract writes, from a NAMES file, sorted for bsearch; the names point into text.
+typedef struct {
+    char *text;
+    char **names;
+    size_t count;
+} Wanted;
+
+static int cmp_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+static int read_wanted(const char *path, Wanted *w) {
+    FILE *f = open_read(path);
+    if (!f) return -1;
+    size_t cap = 1 << 16, len = 0, n;
+    char *text = malloc(cap + 1);
+    while (text && (n = fread(text + len, 1, cap - len, f)) > 0) {
+        len += n;
+        if (len < cap) continue;
+        char *more = cap < ((size_t)64 << 20) ? realloc(text, cap * 2 + 1) : NULL;   // 64 MB of names at most
+        if (!more) {
+            free(text);
+            text = NULL;
+            break;
+        }
+        text = more;
+        cap *= 2;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    if (!text || bad) {
+        free(text);
+        return -1;
+    }
+    text[len] = 0;
+    size_t lines = 1;
+    for (size_t i = 0; i < len; i++) lines += text[i] == '\n';
+    char **names = malloc(lines * sizeof *names);
+    if (!names) {
+        free(text);
+        return -1;
+    }
+    size_t k = 0;
+    for (char *line = text; *line;) {
+        char *end = strchr(line, '\n');
+        if (end) {
+            *end = 0;
+            if (end > line && end[-1] == '\r') end[-1] = 0;   // a list written with Windows line ends
+        }
+        if (*line) names[k++] = line;
+        if (!end) break;
+        line = end + 1;
+    }
+    qsort(names, k, sizeof *names, cmp_name);
+    w->text = text;
+    w->names = names;
+    w->count = k;
+    return 0;
+}
+
+// Whether extract writes the entry: every one without a NAMES file.
+static int wanted(const Wanted *w, const char *name) {
+    return !w || bsearch(&name, w->names, w->count, sizeof *w->names, cmp_name) != NULL;
+}
 
 // Makes every folder of rel (a safe name) below dir; with file set the last part is a file and is left out.
 static int make_parents(const char *dir, const char *rel, int file, char *full, size_t cap) {
@@ -231,7 +306,7 @@ static int make_parents(const char *dir, const char *rel, int file, char *full, 
     return file ? 0 : make_dir(full);
 }
 
-static int extract(const char *path, const char *dir, unsigned long long limit) {
+static int extract(const char *path, const char *dir, unsigned long long limit, const Wanted *only) {
     int ok;
     struct archive *a = open_archive(path, &ok);
     if (!ok) {
@@ -261,7 +336,15 @@ static int extract(const char *path, const char *dir, unsigned long long limit) 
             return fail("archive.encrypted", shown);
         }
         if (!strcmp(type, "dir")) {
-            if (make_parents(dir, rel, 0, full, sizeof full)) { archive_read_free(a); return fail("archive.write", rel); }
+            if (!only && make_parents(dir, rel, 0, full, sizeof full)) { archive_read_free(a); return fail("archive.write", rel); }
+            continue;
+        }
+        if (!wanted(only, rel)) {   // not picked: checked above, never written, not counted
+            if (archive_read_data_skip(a) != ARCHIVE_OK) {
+                int ret = fail("archive.bad", archive_error_string(a));
+                archive_read_free(a);
+                return ret;
+            }
             continue;
         }
         if (make_parents(dir, rel, 1, full, sizeof full)) { archive_read_free(a); return fail("archive.write", rel); }
@@ -294,8 +377,15 @@ static int extract(const char *path, const char *dir, unsigned long long limit) 
 
 static int run(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "list")) return list(argv[2]);
-    if (argc == 5 && !strcmp(argv[1], "extract")) return extract(argv[2], argv[3], strtoull(argv[4], NULL, 10));
-    fputs("usage: unpack list ARCHIVE | unpack extract ARCHIVE DIR LIMIT\n", stderr);
+    if ((argc == 5 || argc == 6) && !strcmp(argv[1], "extract")) {
+        Wanted w = {0};
+        if (argc == 6 && read_wanted(argv[5], &w)) return fail("archive.bad", "the list of names could not be read");
+        int r = extract(argv[2], argv[3], strtoull(argv[4], NULL, 10), argc == 6 ? &w : NULL);
+        free(w.names);
+        free(w.text);
+        return r;
+    }
+    fputs("usage: unpack list ARCHIVE | unpack extract ARCHIVE DIR LIMIT [NAMES]\n", stderr);
     return 2;
 }
 

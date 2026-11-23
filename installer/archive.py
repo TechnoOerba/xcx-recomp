@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import zlib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -55,10 +56,11 @@ def kind_of(path):
 
 def safe_name(name):
     """name with '/' separators when the manager may write it, else None (the rule of installer/unpack.c, safe_name):
-    no absolute path, drive letter, control character or '.'/'..' part, no Windows device name (CON, aux.bdat) and no
-    part ending in a dot or space (Windows drops that end, so two names could become one)."""
+    no absolute path, drive letter, control character, character Windows refuses in a name (< > " | ? *) or '.'/'..'
+    part, no Windows device name (CON, aux.bdat) and no part ending in a dot or space (Windows drops that end, so two
+    names could become one)."""
     name = name.replace('\\', '/').rstrip('/')
-    if not name or name.startswith('/') or any(ord(c) < 0x20 or c == ':' for c in name):
+    if not name or name.startswith('/') or any(ord(c) < 0x20 or c in ':<>"|?*' for c in name):
         return None
     for part in name.split('/'):
         if not part or part[-1] in '. ' or part.split('.')[0].rstrip(' ').upper() in DEVICES:
@@ -82,7 +84,7 @@ def unpack_tool(layout):
     spec.loader.exec_module(build_unpack)
     exe = layout.root / 'build' / 'unpack' / UNPACK
     stamp = exe.with_name(UNPACK + '.stamp')
-    want = build_unpack.stamp()
+    want = build_unpack.stamp(layout.clang)
     if exe.is_file() and stamp.is_file() and stamp.read_text().strip() == want:
         return exe
     try:
@@ -99,7 +101,9 @@ def run_tool(exe, *args):
     try:
         r = subprocess.run([str(exe), *map(str, args)], capture_output=True, text=True, encoding='utf-8',
                            errors='replace', creationflags=flags, timeout=3600)
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        raise ArchiveError('archive.bad', detail=str(e)) from e
+    except OSError as e:
         raise ArchiveError('archive.no_rar', detail=str(e)) from e
     try:
         out = json.loads(r.stdout)
@@ -154,25 +158,37 @@ def extract(path, layout, picks, out, limit):
         return 0
     kind = kind_of(path)
     if kind == 'zip':
-        with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
-                game = picks.get(info.filename.replace('\\', '/'))
-                if game is None:
-                    continue
-                target = out / game
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(info) as src, open(target, 'xb') as dst:
-                    shutil.copyfileobj(src, dst, CHUNK)
-        return len(picks)
+        # the sizes checked in this open of the archive (the plan was read in another), each entry's output held to
+        # its size by zipfile, which also checks its CRC; every picked member must be there
+        try:
+            with zipfile.ZipFile(path) as z:
+                todo = [(info, picks[n]) for info in z.infolist()
+                        if (n := info.filename.replace('\\', '/').rstrip('/')) in picks]
+                if sum(info.file_size for info, _ in todo) > limit:
+                    raise ArchiveError('mods.zip_too_big')
+                if len({game for _, game in todo}) != len(picks):
+                    raise ArchiveError('archive.bad', detail='the archive changed since it was read')
+                for info, game in todo:
+                    target = out / game
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(info) as src, open(target, 'xb') as dst:
+                        shutil.copyfileobj(src, dst, CHUNK)
+        except (zipfile.BadZipFile, zlib.error, NotImplementedError, RuntimeError, EOFError) as e:
+            # a bad CRC or truncated data, a method zipfile can't read (Deflate64), an encrypted member
+            raise ArchiveError('archive.bad', detail=str(e)) from e
+        return len(todo)
     if kind != 'rar':
         raise ArchiveError('archive.unknown')
-    # xcx-unpack writes the whole archive below a folder of its own, next to out (the same disk, so the files move
-    # instead of being copied), and only the picked ones move on
+    # xcx-unpack writes the picked entries (named in a file; the rest are skipped and don't count toward limit) below a
+    # folder of its own next to out (the same disk, so the files move instead of being copied), then they move on
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out.parent, prefix='.unpack-') as tmp:
-        run_tool(unpack_tool(layout), 'extract', path, tmp, limit)
+        names, files = Path(tmp) / 'names.txt', Path(tmp) / 'files'
+        names.write_text(''.join(n + '\n' for n in picks), encoding='utf-8', newline='\n')
+        files.mkdir()
+        run_tool(unpack_tool(layout), 'extract', path, files, limit, names)
         for name, game in picks.items():
-            src = Path(tmp).joinpath(*PurePosixPath(name).parts)
+            src = files.joinpath(*PurePosixPath(name).parts)
             target = out / game
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():

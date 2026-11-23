@@ -20,9 +20,8 @@ files, pictures, archives inside the archive. Files under the chosen top that th
 (a mod may add files) but named, since a misplaced file is the usual reason a mod does nothing.
 """
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
 
-TITLE_ID = '0100453019aa8000'   # Xenoblade Chronicles X: Definitive Edition (installer/mods.py)
+TITLE_ID = '0100453019aa8000'   # Xenoblade Chronicles X: Definitive Edition (installer/mods.py uses it too)
 # Top folders of the game's files that mods are known to replace; enough to recognise a layout when the install's
 # game files cannot be read, not a list of the game's folders
 KNOWN_TOP = {'bdat', 'chr', 'sound', 'movie'}
@@ -85,13 +84,18 @@ def is_title_id(name):
 
 
 def doc_like(name):
-    return PurePosixPath(name).suffix.lower() in DOC_SUFFIXES
+    base = name.rsplit('/', 1)[-1]
+    dot = base.rfind('.')
+    return dot > 0 and base[dot:].lower() in DOC_SUFFIXES   # PurePosixPath(name).suffix, without building a path
 
 
 def check_members(members):
     """The member names that are files; raises LayoutError on an unsafe, linked or encrypted entry."""
-    files = []
+    files, seen = [], set()
     for m in members:
+        if m.name in seen:   # the same name twice, or a\b beside a/b: one would be written over the other
+            raise LayoutError('mods.zip_duplicate', name=m.name)
+        seen.add(m.name)
         if not m.safe:
             raise LayoutError('mods.zip_unsafe', name=m.name)
         if m.type == 'dir':
@@ -146,13 +150,30 @@ def under(files, top):
     return picks, left
 
 
-def folders(files):
-    """Every folder of the archive that holds a file somewhere below it, plus '' (the archive itself)."""
-    out = {''}
+def top_scores(files, game):
+    """{folder: how many files under() would pick below it that are the game's}, for every folder that has any, in
+    one pass over the files and their folders (under() for every folder would take files x folders)."""
+    score = {}
     for name in files:
-        parts = name.split('/')[:-1]
-        for i in range(1, len(parts) + 1):
-            out.add('/'.join(parts[:i]))
+        parts = name.split('/')
+        for i in range(len(parts)):   # parts[:i] as the top, the rest as the game path, as under() reads it
+            rest = parts[i:]
+            if len(rest) == 1 and doc_like(rest[0]) or rest[0].lower() == 'exefs':
+                continue
+            if in_game('/'.join(rest), game):
+                top = '/'.join(parts[:i])
+                score[top] = score.get(top, 0) + 1
+    return score
+
+
+def known_tops(files):
+    """The folders under which under() would pick a file inside a folder the game is known to have (KNOWN_TOP)."""
+    out = set()
+    for name in files:
+        parts = name.split('/')
+        for i in range(len(parts) - 1):
+            if parts[i].lower() in KNOWN_TOP:
+                out.add('/'.join(parts[:i]))
     return out
 
 
@@ -175,26 +196,20 @@ def plan(members, game=None, top=None):
         p.added = sorted(g for g in p.files.values() if game and not in_game(g, game))
         return check_duplicates(p)
     if game:
-        scored = []
-        for top in folders(files):
-            picks, left = under(files, top)
-            score = sum(1 for g in picks.values() if in_game(g, game))
-            if score:
-                scored.append((score, top, picks, left))
+        scored = top_scores(files, game)
         if scored:
-            high = max(s[0] for s in scored)
-            best = sorted((s for s in scored if s[0] == high), key=lambda s: (s[1].count('/'), s[1]))
-            rivals = [s[1] for s in best if not any(s[1] == o[1] or s[1].startswith(o[1] + '/') or not o[1]
-                                                    for o in best if o is not s)]
+            high = max(scored.values())
+            best = sorted((t for t, n in scored.items() if n == high), key=lambda t: (t.count('/'), t))
+            rivals = [t for t in best if not any(t.startswith(o + '/') or not o for o in best if o != t)]
             if len(rivals) > 1:
                 raise LayoutError('layout.several', tops=rivals, choices=', '.join(rivals))
-            score, top, picks, left = best[0]
+            top = best[0]
+            picks, left = under(files, top)
             added = sorted(g for g in picks.values() if not in_game(g, game))
-            return check_duplicates(Plan(picks, 'matched', top, score, added, left))
+            return check_duplicates(Plan(picks, 'matched', top, high, added, left))
     # Unknown game files: the first folder (from the top) that holds a known game folder, else the deepest folder
     # reached through folders that hold nothing but one folder and read-me files
-    known = [t for t in sorted(folders(files), key=lambda t: (t.count('/'), t))
-             if any(g.split('/')[0].lower() in KNOWN_TOP for g in under(files, t)[0].values() if '/' in g)]
+    known = sorted(known_tops(files), key=lambda t: (t.count('/'), t))
     if known:
         top = known[0]
         rivals = [t for t in known if t.count('/') == top.count('/')]
@@ -219,7 +234,7 @@ def plan(members, game=None, top=None):
 def check_duplicates(p):
     seen = {}
     for name, g in p.files.items():
-        key = g.lower()
+        key = g.casefold()   # closer to how NTFS folds case than lower()
         if key in seen:
             raise LayoutError('mods.zip_duplicate', name=g)
         seen[key] = name

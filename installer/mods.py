@@ -35,10 +35,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -52,6 +54,7 @@ LIBRARY = 'https://raw.githubusercontent.com/jmars125/xcx-recomp-mods/main/'
 # "manual"), in parts, or as RAR ("archive": "rar"); this manager reads it. An index given by --mods-index may be
 # either format.
 INDEX_FILE = 'index-3.json'
+INDEX_FALLBACK = 'index.json'    # read when the library has no index-3.json yet (it lists Lua and zip entries only)
 INDEX_FORMAT = 3
 INDEX_FORMATS = (2, 3)
 INDEX_MAX_ENTRIES = 5000
@@ -155,13 +158,12 @@ LISTS = {'romfs': 'romfs-enabled.txt', 'lua': 'enabled.txt'}
 # it leaves alone with the reason. runtime/mod_library.c, normalise, does the same when the F1 Mods tab reads the
 # folder; the two follow the same rules, so either one's result looks the same to the other.
 
-TITLE_ID = '0100453019aa8000'     # Xenoblade Chronicles X: Definitive Edition
+TITLE_ID = mod_layout.TITLE_ID   # Xenoblade Chronicles X: Definitive Edition
 SEARCH_DEPTH = 4                  # folders below the top one in which a romfs folder is looked for
 WRAPPERS = {'romfs', 'atmosphere', 'contents'}   # top folder names that say nothing about the mod
 
 
-def is_title_id(name):
-    return len(name) == 16 and all(ch in '0123456789abcdefABCDEF' for ch in name)
+is_title_id = mod_layout.is_title_id
 
 
 def find_romfs(folder, depth=SEARCH_DEPTH):
@@ -318,9 +320,14 @@ def installed(dest, notes=None):
 # ---- library -------------------------------------------------------------------------------------------------------
 
 def opener(url):
+    """An https URL opened; a redirect to anything but https is refused before anything is read from it."""
     if not url.startswith('https://'):
         raise ModError('mods.bad_link', url=url)
-    return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': AGENT}), timeout=60)
+    r = urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': AGENT}), timeout=60)
+    if not r.geturl().startswith('https://'):
+        r.close()
+        raise ModError('mods.bad_link', url=r.geturl())
+    return r
 
 
 def fetch_index(source=None):
@@ -328,43 +335,82 @@ def fetch_index(source=None):
     on GitHub. An http:// or other link is refused (a plain link could be changed on the way)."""
     if source and '://' in source and not source.startswith('https://'):
         raise ModError('mods.index_https', url=source)
+    def read(url):
+        with opener(url) as r:
+            return json.loads(r.read(8 << 20).decode('utf-8'))
     try:
         if source and not source.startswith('https://'):
             data = json.loads(Path(source).read_text(encoding='utf-8'))
+        elif source:
+            data = read(source)
         else:
-            with opener(source or LIBRARY + INDEX_FILE) as r:
-                data = json.loads(r.read(8 << 20).decode('utf-8'))
+            try:
+                data = read(LIBRARY + INDEX_FILE)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+                data = read(LIBRARY + INDEX_FALLBACK)   # a library from before index-3.json
     except (OSError, ValueError) as e:
         raise ModError('mods.index_failed', detail=str(e)) from e
     if (not isinstance(data, dict) or data.get('format') not in INDEX_FORMATS or not isinstance(data.get('mods'), list)
             or len(data['mods']) > INDEX_MAX_ENTRIES):
         raise ModError('mods.index_format')
-    return [m for m in data['mods'] if isinstance(m, dict) and valid_id(m.get('id')) and m.get('kind') in LISTS
-            and usable_parts(m)]
+    out, taken = [], set()
+    for m in data['mods']:
+        if not (isinstance(m, dict) and valid_id(m.get('id')) and m.get('kind') in LISTS and usable_parts(m)):
+            continue
+        ids = {m['id']} | ({p['mid'] for p in parts_of(m)} if m['kind'] == 'romfs' else set())
+        if ids & taken:   # an id an earlier entry or its parts have: one mod folder can't be two entries
+            continue
+        taken |= ids
+        out.append(m)
+    return out
+
+
+PART_ID = re.compile(r'[a-z][a-z0-9-]{0,31}\Z')   # the library's rule for part ids (xcx-recomp-mods, its tools)
+SHA256 = re.compile(r'[0-9a-fA-F]{64}\Z')
 
 
 def usable_parts(entry):
     """Whether every part of an entry names a file the manager can get: a manual part its page, a downloaded one its
-    url, each with SHA-256 and size; part ids make valid mod ids. Lua entries and plain ones pass as before."""
+    url, each with a name, SHA-256 and size of the right types; part ids follow the library's rule and make valid mod
+    ids. An entry whose "parts" is not a non-empty list, or whose "download" is anything but "manual", is refused, as
+    the game's library list refuses them. Lua entries and plain ones pass as before when their size is a number."""
     if entry.get('kind') != 'romfs':
         return True
-    if not entry.get('parts') and not is_manual(entry):
+    size_ok = lambda v: type(v) is int and v > 0
+    if entry.get('download') not in (None, 'manual') or 'size' in entry and not size_ok(entry['size']):
+        return False
+    if 'parts' not in entry and not is_manual(entry):
         return True
+    raw = entry.get('parts')
+    if raw is not None and not (isinstance(raw, list) and raw and all(isinstance(p, dict) for p in raw)):
+        return False
+    if raw is not None and not all(isinstance(p.get('id'), str) and PART_ID.match(p['id']) for p in raw):
+        return False
     parts = parts_of(entry)
     ok = lambda p: (str(p.get('page' if is_manual(entry) else 'url') or '').startswith('https://')
-                    and p.get('sha256') and p.get('size') and valid_id(p['mid']))
-    return bool(parts) and all(ok(p) for p in parts) and len({p['mid'] for p in parts}) == len(parts)
+                    and isinstance(p.get('name'), str) and p['name'].strip() and isinstance(p.get('sha256'), str)
+                    and SHA256.match(p['sha256']) and size_ok(p.get('size')) and valid_id(p['mid'])
+                    and isinstance(p.get('_includes'), list) and all(isinstance(i, str) for i in p['_includes']))
+    return all(ok(p) for p in parts) and len({p['mid'] for p in parts}) == len(parts)
 
 
 def parts_of(entry):
     """The parts of a library entry as dicts with 'mid', the mod id each installs as. An entry without "parts" is one
     part whose mod id is the entry's own."""
+    low = lambda h: h.lower() if isinstance(h, str) else h   # the hash as hashlib writes it
     if entry.get('parts'):
-        return [dict(p, mid=f"{entry['id']}.{p.get('id', '')}", includes=list(p.get('includes') or []))
-                for p in entry['parts'] if isinstance(p, dict)]
+        out = []
+        for p in entry['parts']:
+            if isinstance(p, dict):
+                inc = p.get('includes', [])
+                out.append(dict(p, mid=f"{entry['id']}.{p.get('id', '')}", sha256=low(p.get('sha256')),
+                                includes=list(inc) if isinstance(inc, list) else [], _includes=inc))
+        return out
     return [{'id': '', 'mid': entry['id'], 'name': entry.get('name', entry['id']), 'description': '',
              'file': entry.get('file'), 'page': entry.get('page'), 'url': entry.get('url'),
-             'sha256': entry.get('sha256'), 'size': entry.get('size'), 'includes': []}]
+             'sha256': low(entry.get('sha256')), 'size': entry.get('size'), 'includes': [], '_includes': []}]
 
 
 def is_manual(entry):
@@ -389,6 +435,21 @@ def file_hash(path, sizes=None):
     return size, h.hexdigest()
 
 
+def copy_hashed(src, out, cap):
+    """Copies src to out in one read, at most cap + 1 bytes (a file that grew past the size it was matched by is
+    refused by the size this returns, without copying all of it); (size, SHA-256) of what was written."""
+    h, size = hashlib.sha256(), 0
+    with open(src, 'rb') as f, open(out, 'wb') as o:
+        while size <= cap:
+            block = f.read(min(CHUNK, cap + 1 - size))
+            if not block:
+                break
+            h.update(block)
+            o.write(block)
+            size += len(block)
+    return size, h.hexdigest()
+
+
 def match_files(entry, paths):
     """Which part of a manual entry each picked file is, by size and SHA-256: ({mod id: (part, path)}, [paths that
     are no part of it]). Two picks of one part keep the first."""
@@ -405,16 +466,12 @@ def match_files(entry, paths):
     return matched, unknown
 
 
-def check_file(path, entry):
-    """Raises ModError('mods.file_mismatch') unless the file at path is one of the files a manual entry lists;
-    returns the part it is."""
-    matched, _ = match_files(entry, [path])
-    if not matched:
-        first = parts_of(entry)[0]
-        raise ModError('mods.file_mismatch', picked=Path(path).name,
-                       file=' / '.join(p.get('file') or p['name'] for p in parts_of(entry)),
-                       size=max(1, int(first['size']) >> 20))
-    return next(iter(matched.values()))[0]
+def mismatch(path, entry):
+    """The ModError('mods.file_mismatch') for a picked file that is none of a manual entry's files: it names the
+    files the entry lists. Reads no file (the picks were matched already)."""
+    parts = parts_of(entry)
+    return ModError('mods.file_mismatch', picked=Path(path).name,
+                    file=' / '.join(p.get('file') or p['name'] for p in parts))
 
 
 def download(url, size, sha256, out, progress=None):
@@ -478,11 +535,19 @@ def write_info(staged, kind, name, author='', version='', source='', group='', p
     when it installs a mod (runtime/mod_library.c, write_library_ini), so each manager sees the other's installs.
     A part of a library entry also names the entry (group, and group_name for the game's Mods tab, which lists the
     parts together under it), the part and the parts it contains (includes)."""
-    clean = lambda v: ' '.join(str(v).split())[:90]
+    # the game keeps a value only when it fits its field (runtime/mod_library.c, ini_value; ModLibRow: name 96 bytes,
+    # author 64, version 32, group 65, group_name 96, with the closing 0), so each is cut to fit in UTF-8 bytes, on a
+    # character boundary; a value Cyrillic letters (2 bytes each) make long is cut, not dropped
+    room = {'name': 95, 'author': 63, 'version': 31, 'group': 64, 'group_name': 95}
+
+    def clean(key, v):
+        v = ' '.join(str(v).split())
+        cap = room.get(key, 199)
+        return v.encode('utf-8')[:cap].decode('utf-8', 'ignore') if len(v.encode('utf-8')) > cap else v
     rows = [('name', name), ('author', author), ('version', version), ('kind', kind), ('source', source)]
     if group:
         rows += [('group', group), ('group_name', group_name or group), ('part', part), ('includes', ','.join(includes))]
-    text = ''.join(f'{k} = {clean(v)}\n' for k, v in rows)
+    text = ''.join(f'{k} = {clean(k, v)}\n' for k, v in rows)
     (staged / 'library.ini').write_text(text, encoding='utf-8', newline='\n')
 
 
@@ -519,11 +584,13 @@ def part_name(entry, part):
     return f"{name}: {part['name']}" if part.get('id') else name
 
 
-def install(dest, entry, progress=None, file=None, layout=None, files=None, parts=None, plans=None):
+def install(dest, entry, progress=None, file=None, layout=None, files=None, parts=None, plans=None, matched=None):
     """Installs or updates a library entry. A mod that was on stays on; a new one starts off.
     A manual entry (is_manual) installs from the player's downloads: file, or files, each matched to a part by
     SHA-256 (ModError 'mods.file_mismatch' when none is a part). Other entries download: every part, or the part
-    ids in parts. plans: {mod id: mod_layout.Plan} read before (the window shows them first).
+    ids in parts. plans: {mod id: mod_layout.Plan} read before (the window shows them first). matched: what
+    match_files gave for those files already (the window matched them to show the plans), so they aren't hashed
+    again here; install_part checks its copy of each anyway.
     Returns {'installed': [mod ids], 'unknown': [picked paths that are no part of the entry]}."""
     mid, kind = entry['id'], entry['kind']
     root = mods_dir(dest)
@@ -534,11 +601,12 @@ def install(dest, entry, progress=None, file=None, layout=None, files=None, part
     unknown = []
     if is_manual(entry):
         picked = list(files or ([file] if file else []))
-        if not picked:
+        if not picked and not matched:
             raise ModError('mods.manual_needs_file', name=entry.get('name', mid))
-        matched, unknown = match_files(entry, picked)
+        if matched is None:
+            matched, unknown = match_files(entry, picked)
         if not matched:
-            check_file(picked[0], entry)   # raises with the names of the files the entry lists
+            raise mismatch(picked[0], entry)
         todo = [(part, path) for part, path in matched.values()]
     else:
         todo = [(p, None) for p in parts_of(entry) if parts is None or p['id'] in parts]
@@ -566,10 +634,10 @@ def install_part(dest, entry, part, path=None, progress=None, layout=None, plan=
             try:
                 if os.stat(path).st_size != int(part['size']):
                     raise ModError('mods.file_changed', picked=Path(path).name)
-                shutil.copyfile(path, copy)
+                got = copy_hashed(path, copy, int(part['size']))   # hashed as it is copied: no second read
             except OSError as e:
                 raise ModError('mods.failed', detail=str(e)) from e
-            if file_hash(copy) != (int(part['size']), part['sha256']):
+            if got != (int(part['size']), part['sha256']):
                 raise ModError('mods.file_changed', picked=Path(path).name)
         path = copy
         unpack_romfs(path, staged, dest, plan, layout)
@@ -649,7 +717,6 @@ def add_archive(dest, path, mid=None, name=None, plan=None, layout=None):
     return mid
 
 
-add_zip = add_archive   # its name before RAR support
 
 
 def set_enabled(dest, mid, on):
@@ -658,10 +725,12 @@ def set_enabled(dest, mid, on):
     if not kind or not (root / mid).is_dir():
         raise ModError('mods.not_installed', id=mid)
     path = root / LISTS[kind]
-    ids = [i for i in read_list(path) if i != mid]
+    # read once: the game's Mods tab writes the same list, and the later of two writers wins (each writes it whole)
+    listed = read_list(path)
+    ids = [i for i in listed if i != mid]
     if not on:
         write_list(path, ids)
-    elif mid not in read_list(path):   # a game-file mod goes last; one already on keeps its place
+    elif mid not in listed:   # a game-file mod goes last, a Lua mod first; one already on keeps its place
         write_list(path, ids + [mid] if kind == 'romfs' else [mid] + ids)
 
 
@@ -724,7 +793,8 @@ def english_catalog():
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='python -m installer.mods', description=__doc__.splitlines()[0])
     ap.add_argument('--dest', type=Path, required=True, help='install folder (the one with xcx.exe)')
-    ap.add_argument('--index', help='library index.json, a URL or a file (default: the library on GitHub)')
+    ap.add_argument('--index', help='library index (format 2 or 3), an https URL or a file '
+                                    '(default: the library on GitHub)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('list')
     for c in ('install', 'remove', 'enable', 'disable'):

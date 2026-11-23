@@ -62,7 +62,12 @@ keeps `profile/`. Saves carry over both ways: 1.4.3 converts a 1.2.1 save on loa
 console). It lists the mod library, [jmars125/xcx-recomp-mods](https://github.com/jmars125/xcx-recomp-mods), next to
 what is in `mods/`:
 
-- Lua mods are hosted in the library; each file is checked against the size and SHA-256 in its `index.json`. They
+- The library publishes two lists. `index.json` (format 2) holds only what every released manager can install: Lua
+  mods and zips downloaded from their link; the game's F1 Mods tab and Setup 0.1.21 read it. `index-3.json` (format 3)
+  holds every entry, also those below that only this manager installs (downloaded from their page, in parts, RAR);
+  Setup reads it, and `index.json` when the library has no `index-3.json` yet. An entry or part with a field of the
+  wrong type, or an id another entry already has, is left out.
+- Lua mods are hosted in the library; each file is checked against the size and SHA-256 in the index. They
   are on when listed in `mods/enabled.txt` and apply when the game starts.
 - Game-file mods are listed by link: the manager downloads the archive from the author's page (GameBanana), checks
   its size and SHA-256, and unpacks its `romfs/` (or `romfs/mod/`) folder into `mods/<id>/romfs/`; `exefs/` is left
@@ -77,13 +82,15 @@ what is in `mods/`:
   `"parts"`: each part has its own file, SHA-256 and size, and `includes` names the parts it already contains. The
   window shows the entry with a row per part. **Install** lists the files, and the player picks all their downloads at
   once; each is matched to its part by SHA-256 (names and order do not matter) and installed as a mod of its own,
-  `mods/<entry>.<part>/`, whose `library.ini` adds `group`, `part` and `includes`. Parts switch on and off one by one.
+  `mods/<entry>.<part>/`, whose `library.ini` adds `group`, `group_name`, `part` and `includes`. Parts switch on and
+  off one by one. Setup and the game's Mods tab both show the entry as "N of M parts on", of the parts installed.
   A part that contains, or is contained in, one that is on gets an informational line only: the bdat merge takes a
   value that two mods set alike once. Picked files that are no part of the entry are offered to **Add archive**.
 - A bdat table as bdat-toolset JSON, `bdat/<file>/<Table>.json` (how the Tweaks mod's options come), is installed
   under the archive's own name and merged into `bdat/<file>.bdat` by the game at start-up. The layout check counts
-  such a table as the game's when `bdat/<file>.bdat` is a game file, so a mod of only tables is placed as surely. `python -m installer.mods --dest DIR install ID --file A --file B` does
-  the same from a console.
+  such a table as the game's when `bdat/<file>.bdat` is a game file, so a mod of only tables is placed as surely.
+- `python -m installer.mods --dest DIR install ID --file A --file B` installs a library entry from downloaded files
+  from a console, as the window does.
 - Archives: zip through Python's `zipfile`, RAR 4 and 5 through `bin/xcx-unpack` (`installer/unpack.c` over the RAR
   readers of libarchive, pinned in `deps/libarchive/`, built by `tools/build_unpack.py` in both release scripts; a
   checkout builds it into `build/unpack/` on first use). 7z is recognised and named, not read. Every entry is checked
@@ -111,7 +118,8 @@ start-up (the bdat tables) needs a restart.
 
 The game's F1 menu has the same manager on its **Mods** tab (`runtime/mod_library.c`: WinHTTP downloads on Windows,
 curl on Linux, `runtime/mod_zip.c` unpacks), with the same checks and folder layout. Both write
-`mods/<id>/library.ini` (name, author, version, kind), so each sees the other's installs and updates.
+`mods/<id>/library.ini` (name, author, version, kind; a part also group and group_name), so each sees the other's
+installs and updates. Its list holds 64 mods; past that, the tab says how many are not listed.
 
 Setup's look (`installer/theme.py`) takes the colours of the F1 menu (`runtime/ui/menu.cpp`, `style_init`).
 
@@ -177,7 +185,10 @@ python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR
   finish screen with Open folder. English or Russian, chosen from the Windows display language, switchable in the
   window; every sentence is an id in `installer/text/<en|ru>.json`. A folder with `xcx-install.json` needs only the
   folder. An extracted game folder as the base game (`Form.extracted_game`, `installer/extracted.py` find) goes to the
-  CLI as `--base FOLDER` without `--update`; a folder that is no extracted game is refused in the form. `--selftest [--shots DIR]` builds every screen in both languages and closes itself.
+  CLI as `--base FOLDER` without `--update`; a folder that is no extracted game is refused in the form.
+  `--selftest [--shots DIR]` builds every screen in both languages and closes itself. `--mods-index FILE|URL` gives
+  the Mods window another library index (format 2 or 3; an `https://` link or a file), to try entries before they are
+  published; the window says so in the warning colour while one is in use.
 - `tests/installer_gui_test.py`: event model, form, catalogs, cancel, the self-closing window and one end-to-end run
   of the CLI in `--verify` mode (needs `build/install-test` and `build/extracted/v121`; see its docstring).
 - `tests/installer_test.py`: bookkeeping with fake steps. `tests/installer_e2e.py`: a dev-mode run with the files of

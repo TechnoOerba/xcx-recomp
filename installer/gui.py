@@ -53,7 +53,7 @@ class App:
         self.model = Model()
         self.process = None
         self.closing = False
-        self.run_args = run_args or {}   # extra CLI options for tests: temp, verify
+        self.run_args = run_args or {}   # extra options: temp and verify for tests, mods_index (--mods-index)
         self.log_entries = []            # events and raw lines of the run, rendered by render_log
         self.bound = []                  # (widget, option, id, params) retranslated on a language switch
         self.vars = {n: tk.StringVar() for n in ('base', 'update', 'dlc', 'keys', 'dest')}
@@ -664,7 +664,8 @@ def main(argv=None):
     ap.add_argument('--shots', type=Path)
     ap.add_argument('--lang', choices=UI_LANGUAGES)
     ap.add_argument('--root', type=Path)
-    ap.add_argument('--mods-index', help='mod library index.json, a URL or a file (default: the library on GitHub); '
+    ap.add_argument('--mods-index', help='mod library index (format 2 or 3), an https URL or a file '
+                                         '(default: the library on GitHub); '
                                          'for trying library entries before they are published')
     args = ap.parse_args(argv)
     layout = layouts.find(args.root)

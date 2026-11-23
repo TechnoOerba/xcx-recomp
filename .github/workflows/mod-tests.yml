@@ -49,11 +49,14 @@ jobs:
           XCX_CLANG: ${{ matrix.clang }}
         run: |
           export PATH="/c/msys64/ucrt64/bin:$PATH"
-          # The clang tests skip themselves without clang; here that would be a pass that tested nothing.
+          # The clang tests skip themselves without clang; here that would be a pass that tested nothing, so any skip
+          # fails the job.
           "$XCX_CLANG" --version
-          python tests/mods_archive_test.py -v
-          python tests/mods_library_test.py -v
-          python tests/mods_manager_test.py -v
+          for t in tests/mods_archive_test.py tests/mods_library_test.py tests/mods_manager_test.py; do
+            python "$t" -v 2>&1 | tee test.log
+            test "${PIPESTATUS[0]}" -eq 0
+            if grep -E "\.\.\. skipped|skipped=" test.log; then echo "::error::$t skipped tests"; exit 1; fi
+          done
       # deps/libarchive against libarchive's own release archive, file by file
       - name: libarchive pins
         if: runner.os == 'Linux'

@@ -81,6 +81,15 @@ int main(void) {
     auto_on = 1;
     game_reads();
     verify(prepared == 0, "no merge ahead right after a change");
+    // a list change seen by the game's own check: its look stores a changed_at newer than that check's start, which
+    // must not count as a wait long passed (a few Up/Down clicks are one change)
+    put("romfs-enabled.txt", "b\na\n");
+    game_reads();
+    wait_merge();
+    put("romfs-enabled.txt", "a\nb\n");
+    game_reads();
+    wait_merge();
+    verify(prepared == 0, "no merge ahead right after a list change");
     plat_sleep_ms(AUTO_MS + 100);
     game_reads();
     wait_merge();

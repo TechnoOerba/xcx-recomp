@@ -593,11 +593,13 @@ int plat_file_identity(const char *path, uint64_t id[4]) {
     // so there a file overwritten in place with its size and dates kept would look the same. A network share reports
     // the server's name for its file system (Samba says NTFS) and may give the write time as the change time, so a
     // handle with a remote protocol (FileRemoteProtocolInfo, class 13, answers only for those) is never trusted, nor
-    // a volume Windows itself calls remote or a disc (GetDriveTypeW), for third-party redirectors that answer neither.
-    wchar_t fs[16] = L"", vol[WPATH];
+    // one the handle's own NT path puts under the multiple UNC provider (\Device\Mup\, where every network redirector
+    // registers), for third-party redirectors that answer no remote protocol. The handle, not the path string, so a
+    // mods folder linked to a share is caught too.
+    wchar_t fs[16] = L"", nt[WPATH];
     union { BYTE b[512]; ULONGLONG align; } remote;
-    UINT drive = GetVolumePathNameW(w, vol, WPATH) ? GetDriveTypeW(vol) : DRIVE_UNKNOWN;
-    int ok = (drive == DRIVE_FIXED || drive == DRIVE_REMOVABLE || drive == DRIVE_RAMDISK) &&
+    DWORD ntlen = GetFinalPathNameByHandleW(h, nt, WPATH, VOLUME_NAME_NT);
+    int ok = ntlen > 0 && ntlen < WPATH && _wcsnicmp(nt, L"\\Device\\Mup\\", 12) &&
              !GetFileInformationByHandleEx(h, (FILE_INFO_BY_HANDLE_CLASS)13, &remote, sizeof remote) &&
              GetVolumeInformationByHandleW(h, NULL, 0, NULL, NULL, NULL, fs, 16) &&
              (!_wcsicmp(fs, L"NTFS") || !_wcsicmp(fs, L"ReFS")) &&

@@ -1033,7 +1033,7 @@ int romfs_mods_move(const char *id, int up) {
     while (i < n && strcmp(lines[i], id)) i++;
     int j = i;   // the next mod that is on above or below; comment lines (and turned-off places) stay where they are
     do j += up ? -1 : 1; while (j >= 0 && j < n && !is_mod_line(lines[j]));
-    if (i == n || j < 0 || j >= n) return 0;
+    if (i == n || j < 0 || j >= n) return -1;   // not listed any more, or already at that end: nothing written
     memcpy(tmp, lines[i], sizeof tmp);
     memcpy(lines[i], lines[j], sizeof tmp);
     memcpy(lines[j], tmp, sizeof tmp);

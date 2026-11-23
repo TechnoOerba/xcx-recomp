@@ -216,7 +216,7 @@ int main() {
     io.AddMouseButtonEvent(0, false);
     frame();
     verify(!strcmp(moved, "other") && moved_up == 1, "Up moves that mod up");
-    verify(find('W', nullptr) < 0, "a list written: no failure line");
+    verify(find('F', nullptr) < 0, "a list written: no failure line");
 
     // a list that can't be written says so under the list, until a change works
     test_write_ok = 0;
@@ -226,7 +226,7 @@ int main() {
     io.AddMouseButtonEvent(0, false);
     frame();
     frame();
-    verify(find('W', "could not be written") > find('P', "Other mod"), "a move that can't be written says so under the list");
+    verify(find('F', "could not be written") > find('P', "Other mod"), "a move that can't be written says so under the list");
     test_write_ok = 1;
     io.AddMousePosEvent((prio_up_low[2].x + prio_up_high[2].x) / 2, (prio_up_low[2].y + prio_up_high[2].y) / 2);
     io.AddMouseButtonEvent(0, true);
@@ -234,7 +234,37 @@ int main() {
     io.AddMouseButtonEvent(0, false);
     frame();
     frame();
-    verify(find('W', nullptr) < 0, "the next change that works clears the failure line");
+    verify(find('F', nullptr) < 0, "the next change that works clears the failure line");
+    test_write_ok = -1;   // the mod went from the list before the press: nothing to move, nothing failed
+    io.AddMousePosEvent((prio_up_low[2].x + prio_up_high[2].x) / 2, (prio_up_low[2].y + prio_up_high[2].y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    frame();
+    verify(find('F', nullptr) < 0, "nothing to move is no failure");
+
+    // a mod the library doesn't list, turned off straight in the list file, which can't be written; then the list
+    // changes some other way (another program, Revert): the line goes, since it would say the list is as it was
+    strcpy(test_ids[3], "loose");
+    test_n = 4;
+    refresh();
+    test_write_ok = 0;
+    io.AddMousePosEvent((prio_off_low[3].x + prio_off_high[3].x) / 2, (prio_off_low[3].y + prio_off_high[3].y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    frame();
+    verify(!strcmp(turned_off, "loose") && find('F', "could not be written") >= 0,
+           "a Turn off that can't be written says so too");
+    test_write_ok = 1;
+    turned_off[0] = 0;
+    refresh();
+    verify(find('F', nullptr) >= 0, "the line stays while the list is as it was");
+    test_n = 3;
+    refresh();
+    verify(find('F', nullptr) < 0, "a list changed some other way clears the line");
 
     // the list differs from what was merged at start-up: the restart line, Merge now, and this run's lines out of
     // the way under their own (shut) heading

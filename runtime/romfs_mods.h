@@ -61,7 +61,9 @@ int romfs_mods_auto_merge(void);
 void romfs_mods_set_auto_merge(int on);
 // The ids of romfs-enabled.txt in order, the top (winning) mod first, into ids; the count.
 int romfs_mods_priority(char (*ids)[65], int cap);
-// Swaps the mod with the one above it (up) or below it in romfs-enabled.txt; 1 when the list was written. Files follow
+// Swaps the mod with the one above it (up) or below it in romfs-enabled.txt; 1 when the list was written, 0 when it
+// could not be (the log says why), -1 when there was nothing to move (the mod is no longer listed, or no mod is on
+// beyond it). Files follow
 // the new order the next time the game loads them, as with romfs_mods_set; the game reads its data tables at
 // start-up, so a new order for those applies at the next start.
 int romfs_mods_move(const char *id, int up);

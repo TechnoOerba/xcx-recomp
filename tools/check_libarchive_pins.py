@@ -8,6 +8,10 @@
 The release archive is checked against the SHA-256 in pins.json (with --update, against --sha256, which the release
 page gives) before anything is read from it. A pinned path maps to the archive as deps/libarchive/COPYING ->
 libarchive-<version>/COPYING and deps/libarchive/pristine/libarchive/<file> -> libarchive-<version>/libarchive/<file>.
+
+That archive hash is the one thing this script trusts and cannot check itself. At each --update, take --sha256 from
+what libarchive publishes for the release (its release page, or the archive's signed .asc), never from a hash of the
+file just downloaded, and have the reviewer compare the new pins.json value with libarchive's.
 """
 import argparse
 import hashlib

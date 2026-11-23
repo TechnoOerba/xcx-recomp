@@ -89,16 +89,20 @@ static int utf8_ok(const char *s) {
 }
 
 // Whether a path part (len bytes) is a Windows device name, which no file may have, with any extension: CON, PRN, AUX,
-// NUL, COM0-9, LPT0-9 ("aux.bdat" too), compared without case.
+// NUL, COM0-9, LPT0-9 and COM/LPT with a superscript 1-3 (Windows 11 takes those too; 2 bytes each in UTF-8: C2 B9,
+// C2 B2, C2 B3) ("aux.bdat" too), compared without case.
 static int device_name(const char *part, size_t len) {
     size_t stem = 0;
     while (stem < len && part[stem] != '.') stem++;
     while (stem && part[stem - 1] == ' ') stem--;   // "CON .txt" is CON as well
-    char up[5] = {0};
-    if (stem < 3 || stem > 4) return 0;
+    char up[6] = {0};
+    if (stem < 3 || stem > 5) return 0;
     for (size_t i = 0; i < stem; i++) up[i] = (char)toupper((unsigned char)part[i]);
     if (stem == 3) return !strcmp(up, "CON") || !strcmp(up, "PRN") || !strcmp(up, "AUX") || !strcmp(up, "NUL");
-    return (!strncmp(up, "COM", 3) || !strncmp(up, "LPT", 3)) && up[3] >= '0' && up[3] <= '9';
+    if (strncmp(up, "COM", 3) && strncmp(up, "LPT", 3)) return 0;
+    if (stem == 4) return up[3] >= '0' && up[3] <= '9';
+    unsigned char a = (unsigned char)part[3], b = (unsigned char)part[4];
+    return a == 0xC2 && (b == 0xB9 || b == 0xB2 || b == 0xB3);
 }
 
 // The entry's name with '\' as '/', or NULL when it is not one the manager may write: not UTF-8, empty, absolute, a

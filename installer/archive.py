@@ -23,7 +23,8 @@ MAGIC = {b'PK\x03\x04': 'zip', b'PK\x05\x06': 'zip', b'Rar!\x1a\x07\x00': 'rar',
          b"7z\xbc\xaf'\x1c": '7z'}
 UNPACK = 'xcx-unpack' + ('.exe' if os.name == 'nt' else '')
 MAX_ENTRIES = 100000   # far above any mod (installer/unpack.c, MAX_ENTRIES)
-DEVICES = {'CON', 'PRN', 'AUX', 'NUL', *(f'{d}{n}' for d in ('COM', 'LPT') for n in '0123456789')}
+# COM and LPT with a superscript 1-3 too, which Windows 11 also takes for devices
+DEVICES = {'CON', 'PRN', 'AUX', 'NUL', *(f'{d}{n}' for d in ('COM', 'LPT') for n in '0123456789¹²³')}
 
 
 class ArchiveError(Exception):

@@ -551,8 +551,10 @@ def install_part(dest, entry, part, path=None, progress=None, layout=None, plan=
             download(part['url'], int(part['size']), part['sha256'], copy, progress)
         else:
             # the player's file, copied first and checked again: what is unpacked is what was checked, even if the
-            # file in Downloads changes meanwhile
+            # file in Downloads changes meanwhile; its size first, so a file replaced by a big other one isn't copied
             try:
+                if os.stat(path).st_size != int(part['size']):
+                    raise ModError('mods.file_changed', picked=Path(path).name)
                 shutil.copyfile(path, copy)
             except OSError as e:
                 raise ModError('mods.failed', detail=str(e)) from e

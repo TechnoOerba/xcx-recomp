@@ -390,10 +390,12 @@ class NameTest(unittest.TestCase):
     """The names an archive may write (installer/archive.py, safe_name; installer/unpack.c, safe_name is the same)."""
 
     def test_names(self):
-        for name in ('romfs/bdat/common.bdat', 'a\\b.txt', 'com.bdat', 'console.txt', 'COM.x/a', '.hidden', 'dir/'):
+        for name in ('romfs/bdat/common.bdat', 'a\\b.txt', 'com.bdat', 'console.txt', 'COM.x/a', '.hidden', 'dir/',
+                     'COM⁴.txt'):
             self.assertIsNotNone(archive.safe_name(name), name)
         for name in ('', '/abs', 'C:/x', 'a/../b', '..', './a', 'a/./b', 'a\x01', 'CON', 'aux.bdat', 'x/com1.txt',
-                     'LPT9', 'Nul .txt', 'prn/a', 'a./b', 'a /b', 'end.', 'end '):
+                     'LPT9', 'Nul .txt', 'prn/a', 'a./b', 'a /b', 'end.', 'end ', 'COM¹', 'lpt³.txt',
+                     'x/Com² .bdat'):
             self.assertIsNone(archive.safe_name(name), name)
 
     def test_ids(self):
@@ -466,6 +468,18 @@ class CopyFirstTest(unittest.TestCase):
                 mods.install_part(dest, entry, part, zpath)
             self.assertEqual((e.exception.id, e.exception.params['picked']), ('mods.file_changed', 'mod.zip'))
             self.assertFalse((dest / 'mods' / 'm').exists())
+            # replaced by a file of another size: refused before anything is copied
+            zpath.write_bytes(data + b'\0' * 4096)
+            copied = []
+            real = mods.shutil.copyfile
+            mods.shutil.copyfile = lambda *a, **k: copied.append(a) or real(*a, **k)
+            try:
+                with self.assertRaises(mods.ModError) as e:
+                    mods.install_part(dest, entry, part, zpath)
+            finally:
+                mods.shutil.copyfile = real
+            self.assertEqual(e.exception.id, 'mods.file_changed')
+            self.assertEqual(copied, [], 'a file of the wrong size is not copied')
 
 
 @unittest.skipUnless(clang(), 'needs clang (XCX_CLANG, PATH or MSYS2 UCRT64)')
@@ -496,7 +510,8 @@ class RarNamesTest(unittest.TestCase):
 
     def test_crafted_names_are_refused(self):
         src = fixture('test_read_format_rar5_stored.rar', self.root)
-        for new in (b'../loworld.txt', b'aux.oworld.txt', b'helloworld.tx.', b'\\\\?\\oworld.txt', b'C:hloworld.txt'):
+        for new in (b'../loworld.txt', b'aux.oworld.txt', b'helloworld.tx.', b'\\\\?\\oworld.txt', b'C:hloworld.txt',
+                    b'COM\xc2\xb9.orld.txt'):
             path = rar5_renamed(src, b'helloworld.txt', new, self.root / 'crafted.rar')
             listed = archive.members(path, self.layout)
             self.assertEqual([m.safe for m in listed], [False], new)

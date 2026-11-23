@@ -1,26 +1,22 @@
 // Day length (XCX_DAY_LENGTH, the Game tab's Day length row): how many real minutes a game day lasts. 24 is the game's
 // own, a game minute each real second; 12 runs the clock twice as fast, 48 half as fast, 0 stops it. It applies at
 // once and can be changed while playing. The light, the sky, enemies and crowds follow the clock as they do for the
-// game's own Change Time, which keeps working on top.
+// game's own time change in its menu, which keeps working on top.
 //
 // The game's clock object (2.0.0) is at main + 0x1FEFC38. Its update, main + 0x1e7640, runs every frame:
-//   +0x18 u64  the real time of its last tick (the system clock, packed: day_length.h)
+//   +0x18 u64  the real time at its last update (the system's calendar time, packed: day_length.h)
 //   +0x2C u32  the game time, packed: minute in bits 6-11, hour in bits 12-16, a day count from bit 17
-//   +0x30 f32  the time of day, hour * 1800 + minute * 30, moved smoothly between ticks
-// On a frame where whole real seconds have passed since +0x18, the update adds that many game minutes to +0x2C, stores
-// the new real time and recomputes +0x30 and the time period from it. The rate is fixed in its code, so this file
-// changes the clock from outside, once a frame from the present (boot.c rt_frame_presented): faster by winding the
-// stamp back a second whenever an extra minute is due, slower by rescaling each tick's minutes (day_length.h).
+//   +0x30 f32  the time of day, hour * 1800 + minute * 30, moved smoothly between minutes
+// It stores the time now at +0x18 and counts whole real seconds from the stamp it replaced. One or more: it adds that
+// many game minutes to +0x2C and sets +0x30 and the time period from them; less: it moves +0x30 on by the milliseconds
+// between the two stamps. The rate is fixed in its code, so this file changes the clock from outside, once a frame from
+// the present (boot.c rt_frame_presented), by moving the stamp the game's next update counts from: a second back when
+// an extra minute is due (faster), or ahead while no minute is due (slower and Stopped), so the game adds every minute
+// its own way and none is ever taken back (day_length.h).
 //
 // Only for 2.0.0, the build the addresses are from. Before it first writes, it also checks that the clock reads as one
 // (the float follows the packed time), and leaves it alone for the session if three checks in a row say no; the row
 // then says so (rt_day_length_state).
-//
-// Not traced, accepted: on each of the game's ticks at Stopped or a slower day, the game first computes everything that
-// follows from its new minute (the time period, last frame's float at +0x34) before the time is put back; at Stopped on
-// a minute 59, it sees the hour change once a real second. Whether any hourly game logic acts on that is not known;
-// nothing was seen in the tests. Between ticks the game moves the float a little and Stopped puts it back each frame,
-// so the light could move by up to a game minute's worth before it is put back.
 #include "cfg.h"
 #include "day_length.h"
 #include "host.h"
@@ -33,6 +29,7 @@ extern const char rt_game_name[];
 #define GAMEDATA_PTR 0x1DC1408ull   // the game data object's pointer, set once a save has loaded
 #define CLOCK 0x1FEFC38ull
 #define C_STAMP 0x18
+#define C_FLAGS 0x08   // bit 0: the update's own hold (it stores the time now as the stamp and adds nothing)
 #define C_TIME 0x2C
 #define C_FLOAT 0x30
 
@@ -114,18 +111,45 @@ static void run_fast(uint64_t b) {
         dl_fast_took(&fast, back);
 }
 
+// Slower days and Stopped (day_length.h dl_slow_step): the stamp is written with a compare-and-swap, so a stamp the
+// game stored meanwhile wins (its update runs on another thread, and a few clock functions also store the time now
+// there) and only that frame's write is lost; the game time is only read. The float is set from the time each frame,
+// as the game's own between-minute step runs at its own speed; skipped when the time changed since it was read (the
+// game's minute, a time change from its menu, a load), so the light never shows the minute before.
+// Accepted: a lost hold in a frame where a real second turns lets the game add its minute (one minute early, never
+// back; counted and logged); a stall (no frames for seconds) that starts in the one frame a due minute is let through
+// is counted whole, as at the game's own speed; a hold lasts until 08:00 of the next real day at the earliest (a
+// stop longer than that is counted, and logged as a followed change).
 static void run_slow(uint64_t b) {
+    uint64_t *sp = (uint64_t *)(uintptr_t)(b + CLOCK + C_STAMP);
     uint32_t *tp = (uint32_t *)(uintptr_t)(b + CLOCK + C_TIME);
-    uint64_t stamp = __atomic_load_n((uint64_t *)(uintptr_t)(b + CLOCK + C_STAMP), __ATOMIC_RELAXED);
-    uint32_t t = __atomic_load_n(tp, __ATOMIC_RELAXED);
-    uint64_t minutes;
-    double frac;
-    if (!dl_slow_step(&slow, stamp, dl_unpack(t), speed, &minutes, &frac)) return;
-    __atomic_store_n(tp, dl_pack(minutes, t), __ATOMIC_RELAXED);
-    float f = (float)((minutes % 1440) * 30.0 + frac * 30.0);
-    memcpy((void *)(uintptr_t)(b + CLOCK + C_FLOAT), &f, 4);
+    uint64_t s = __atomic_load_n(sp, __ATOMIC_ACQUIRE), w, ns = plat_now_ns();
+    uint32_t t = __atomic_load_n(tp, __ATOMIC_ACQUIRE);
+    uint8_t flags = __atomic_load_n((uint8_t *)(uintptr_t)(b + CLOCK + C_FLAGS), __ATOMIC_ACQUIRE);
+    double shown = 0, frac;
+    if (!slow.have) {   // the light's place now, for a change of speed (read once)
+        uint32_t fw0 = __atomic_load_n((uint32_t *)(uintptr_t)(b + CLOCK + C_FLOAT), __ATOMIC_ACQUIRE);
+        float f0;
+        memcpy(&f0, &fw0, 4);
+        if (isfinite(f0)) shown = (double)f0 / 30.0 - (double)(dl_unpack(t) % 1440);
+    }
+    if (dl_slow_step(&slow, ns, s, dl_unpack(t), flags & 1, shown, speed, &w, &frac) &&
+        __atomic_compare_exchange_n(sp, &s, w, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        dl_slow_took(&slow, ns, w);
+    static unsigned said_slipped, said_followed;   // both rare: logged, at most every 10 s
+    static uint64_t said_ns;
+    if (slow.slipped < said_slipped || slow.followed < said_followed) said_slipped = said_followed = 0;   // fresh state
+    if ((slow.slipped != said_slipped || slow.followed != said_followed) && ns - said_ns > 10000000000ull) {
+        rt_log("day length: so far at this speed %u game minute(s) added past a hold, %u change(s) of the time followed",
+               slow.slipped, slow.followed);
+        said_slipped = slow.slipped, said_followed = slow.followed, said_ns = ns;
+    }
+    float f = (float)((double)(dl_unpack(t) % 1440) * 30.0 + frac * 30.0);
+    uint32_t fw;
+    memcpy(&fw, &f, 4);
+    if (__atomic_load_n(tp, __ATOMIC_ACQUIRE) == t)
+        __atomic_store_n((uint32_t *)(uintptr_t)(b + CLOCK + C_FLOAT), fw, __ATOMIC_RELEASE);
 }
-
 // The clock can be used: it runs (the float is 0 while the save loads, then ticks) and has read as a clock once,
 // checked once a second of world clock; three misses in a row and it is left alone for the session (state 2: the Day
 // and night rows are greyed out). Both settings ask here (rt_day_length_update, rt_day_length_hours), so the clock is
@@ -150,16 +174,44 @@ static int clock_ready(uint64_t b, int64_t wu) {
     return 0;
 }
 
+// Whether the game's clock update runs. It stores the time now as its stamp every frame, so a stamp that hasn't moved
+// for 2 real seconds means it stopped: on the title screen after a return to it (traced 2026-11-23: the game data
+// pointer stays set there, so save_loaded() can't tell) and during loads; the game's main menu doesn't stop it
+// (traced). Meanwhile nothing is written, and both modes start afresh when it runs again, so nothing carries over
+// into the next save loaded. Our own write of the
+// stamp counts as a move for one frame: the 2 seconds start after it.
+static int clock_runs(uint64_t b) {
+    static uint64_t seen, since_ns;
+    static int stopped;
+    uint64_t s = __atomic_load_n((uint64_t *)(uintptr_t)(b + CLOCK + C_STAMP), __ATOMIC_ACQUIRE), ns = plat_now_ns();
+    if (s != seen || !since_ns) {
+        seen = s, since_ns = ns;
+        if (stopped) {
+            stopped = 0;
+            rt_log("day length: the game's clock runs again");
+        }
+        return 1;
+    }
+    if (!stopped && ns - since_ns > 2000000000ull) {
+        stopped = 1;
+        memset(&fast, 0, sizeof fast);
+        memset(&slow, 0, sizeof slow);
+        rt_log("day length: the game's clock stopped (the title screen or a load); left alone until it runs");
+    }
+    return !stopped;
+}
+
 // Every present (boot.c rt_frame_presented).
 void rt_day_length_update(void) {
     read_setting();
     if (speed == 1.0 || rt_day_length_state() != 1) return;
-    // The world clock runs from the first present (the title screen too); the guard is the save's game data. Not
-    // traced: whether that pointer is cleared on a return to the title, so a held clock may still be written there.
+    // The world clock runs from the first present (the title screen too); the guard is the save's game data, set
+    // before the first load and kept after a return to the title, which clock_runs covers.
     int64_t wu = frame_step_world_us();
     uint64_t b = main_base();
     if (wu < 0 || !b || !save_loaded(b)) return;
     if (!clock_ready(b, wu)) return;
+    if (!clock_runs(b)) return;
     if (speed > 1.0) run_fast(b);
     else run_slow(b);
 }

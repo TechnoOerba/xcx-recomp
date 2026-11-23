@@ -1,5 +1,5 @@
 """runtime/day_length.h through tests/day_length_check.c: the Day length setting's parsing and its faster and slower
-clock on a simulated game clock (60 and 30 frames a second, the game's menu, Change Time, a load, real midnight). No
+clock on a simulated game clock (60 and 30 frames a second, the game's menu, a time change in it, a load, real midnight). No
 game files.
 
     python tests/day_length_test.py        (needs clang: MSYS2 UCRT64, or XCX_CLANG=<path to clang>; it skips without

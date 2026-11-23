@@ -202,8 +202,8 @@
 
 [game]
 # Real minutes a game day lasts on the in-game clock (the F1 menu's Game tab, Day length). 24 (default) is the game's
-# own, a game minute each second; 12 runs the clock twice as fast, 48 half as fast, 0 stops it until the game's Change
-# Time moves it. 1 to 1440 (shorter counts as 1), or 0; a value between the menu's steps works too and shows in the
+# own, a game minute each second; 12 runs the clock twice as fast, 48 half as fast, 0 stops it (a time change in the
+# game's own menu still moves it). 1 to 1440 (shorter counts as 1), or 0; a value between the menu's steps works too and shows in the
 # row in its place. Very short days need a steady frame rate: the clock gains at most a minute a frame on the game's
 # own. Takes effect at once. Game version 2.0.0 only.
 # day_length = 24

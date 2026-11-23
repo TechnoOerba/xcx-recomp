@@ -27,7 +27,8 @@ static unsigned version;
 static PlatMutex set_lock = PLAT_MUTEX_INIT;   // cfg_set, cfg_reset, cfg_save
 static int save_ok = 1;                         // the last cfg_save_to wrote (or had nothing to write)
 
-// Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
+// Every name the runtime reads (and the patch sets' keys in generated/; not Dawn and dusk's four, whose sets follow its
+// settings alone from dawn_dusk.c rt_dawn_dusk_init on), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
     "AB", "ANISO", "APP_POOL", "ASSUME_FOCUS", "ASTC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
@@ -35,7 +36,7 @@ static const char *const known[] = {
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "BRIGHTNESS", "BUG_REPORT_TEST", "CHEATS", "CLOTH_REALTIME", "CORE_DIAG", "CRASH_TEST", "CRIT", "CRIT_OUT", "CROWD_DISTANCE", "CROWD_PATCH", "CUTSCENE_30", "DARK_NIGHTS", "DAWN_DUSK", "DAY_LENGTH", "DD_CURVE_PATCH", "DD_KEYS_PATCH", "DD_LIGHT_PATCH", "DD_TABLES_PATCH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_JITTER", "DLSS_MASK", "DLSS_MASK_PX", "DLSS_MIPBIAS", "DLSS_MV", "DLSS_MVDEBUG", "DLSS_OBJMV", "DLSS_PRESET", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DUMP_ONLY",
+    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "BRIGHTNESS", "BUG_REPORT_TEST", "CHEATS", "CLOTH_REALTIME", "CORE_DIAG", "CRASH_TEST", "CRIT", "CRIT_OUT", "CROWD_DISTANCE", "CROWD_PATCH", "CUTSCENE_30", "DARK_NIGHTS", "DAWN_DUSK", "DAY_LENGTH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_JITTER", "DLSS_MASK", "DLSS_MASK_PX", "DLSS_MIPBIAS", "DLSS_MV", "DLSS_MVDEBUG", "DLSS_OBJMV", "DLSS_PRESET", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DUMP_ONLY",
     "EXEFS", "FAST_CORES", "FEEDBACK", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FPS60", "FPS_LIMIT", "FREEZE_IDLE", "FREE_CORES", "FULLSCREEN", "GATHER_BIAS", "GPL", "GPL_DRAW_BUILD", "GPU",
     "GPU_INDEX", "GPU_NAME", "GRASS_DISTANCE", "GRASS_PATCH", "GRASS_POOL", "HDR", "HDR_GAME_NITS", "HDR_HUE", "HDR_PEAK_NITS", "HDR_UI_NITS", "HIGHFPS_FIX", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",

@@ -341,6 +341,7 @@ void frame_step_present(uint64_t display_ns, int interval); // nvnQueuePresentTe
 void rt_day_length_update(void);                           // every present
 int rt_day_length_state(void);                             // 0 not this game build, 2 the clock didn't read as one, 1 on
 double rt_day_length_hours(void);                          // the time of day in hours [0, 24), -1 without the clock
+void rt_dawn_dusk_init(void);                              // after rt_patches_init: its four sets off, page neutral
 void rt_dawn_dusk_update(void);                            // every present: Dawn and dusk, Night darkness (dawn_dusk.c)
 
 // ---- boot (boot.c, main.c)

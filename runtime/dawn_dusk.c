@@ -123,6 +123,10 @@ static double night_light = 1.0;      // Night darkness: the night light keys' i
 
 static int rd32(uint64_t a, uint32_t *v) { return plat_mem_read(a, v, 4); }
 
+// An address read from game data that this file writes through: n bytes from a, inside the guest's address space (as
+// day_length.c checks the game data pointer). A read that succeeds is not enough: plat_mem_read reads any host page.
+static int guest_ok(uint64_t a, uint64_t n) { return a && a < RT_ADDRESS_LIMIT && n <= RT_ADDRESS_LIMIT - a; }
+
 typedef struct { uint32_t off, count; } KList;
 static int cmp_list(const void *a, const void *b) {
     uint32_t x = ((const KList *)a)->off, y = ((const KList *)b)->off;
@@ -133,7 +137,7 @@ static int cmp_list(const void *a, const void *b) {
 // timed keys than a block holds; logged by the caller).
 static int keys_read(uint64_t T) {
     uint32_t n = 0, off = 0;
-    if (!rd32(T, &n) || !rd32(T + 4, &off) || !n || n > 64) return 0;
+    if (!guest_ok(T, 8) || !rd32(T, &n) || !rd32(T + 4, &off) || !n || n > 64) return 0;
     static KList L[LIST_MAX];
     int nl = 0;
     for (uint32_t g = 0; g < n; g++) {
@@ -158,7 +162,9 @@ static int keys_read(uint64_t T) {
         for (uint32_t k = 0; k < L[i].count; k++) {
             uint64_t a = T + L[i].off + st * k + bo;
             float b, s, in = 0;
-            if (!plat_mem_read(a, &b, 4) || !plat_mem_read(a + 4, &s, 4) || !(s >= 0 && s < 1) || !(b >= 0 && b < 1)) return 0;
+            if (!guest_ok(a - 8, 16) || !plat_mem_read(a, &b, 4) || !plat_mem_read(a + 4, &s, 4) || !(s >= 0 && s < 1) ||
+                !(b >= 0 && b < 1))
+                return 0;
             int m = (int)lrint(s * 1440);
             if (m != 0 && m != 280 && m != 300 && m != 1020 && m != 1125) return 0;
             if (m == 0 && b == 0) continue;   // untimed (always)
@@ -345,7 +351,7 @@ static int sets_list(uint64_t pm, const Profile *p, Set *out) {
             uint8_t v[8];   // start (+0x2c) and blend (+0x30)
             int32_t st;
             float bl;
-            if (!plat_mem_read(grp + 8 + 8 * s, &a, 8) || !a || !plat_mem_read(a + 0x2c, v, 8)) continue;
+            if (!plat_mem_read(grp + 8 + 8 * s, &a, 8) || !guest_ok(a, 0x34) || !plat_mem_read(a + 0x2c, v, 8)) continue;
             memcpy(&st, v, 4), memcpy(&bl, v + 4, 4);
             int moved = 0;
             for (int j = 0; j < p->nsets && !moved; j++) moved = p->sets[j].from == st && lrintf(bl) == p->sets[j].from_blend;
@@ -448,7 +454,7 @@ static int xf_find(uint64_t obj) {
     uint8_t o[0xa8];   // the object up to its size: the id at +0xa, the data at +0x30, the size at +0xa0
     if (!plat_mem_read(obj, o, sizeof o)) return -1;
     memcpy(&id, o + 0xa, 2), memcpy(&addr, o + 0x30, 8), memcpy(&size, o + 0xa0, 8);
-    if (size != XF_SIZE || !addr) return -1;
+    if (size != XF_SIZE || !guest_ok(addr, XF_SIZE)) return -1;
     int i = -1;
     for (int j = 0; j < XF_MAX && i < 0; j++)
         if (xf[j].obj == obj) i = j;
@@ -517,7 +523,7 @@ static void tables_update(const Active *a, double k) {
         last_pm = a->pm;
     }
     uint8_t m[0x1c];   // the manager from +0x350: new texture, old (+8), length (+0x18)
-    if (!mgr || !a->ok || !plat_mem_read(mgr + 0x350, m, sizeof m)) {
+    if (!guest_ok(mgr, 0x36c) || !a->ok || !plat_mem_read(mgr + 0x350, m, sizeof m)) {
         xf_restore();
         return;
     }
@@ -607,22 +613,28 @@ static void read_setting(void) {
     rt_log("dawn/dusk: %s", m == DD_EXTENDED ? "smoothed & extended" : m == DD_SMOOTHED ? "smoothed" : "original");
 }
 
+// Right after rt_patches_init (boot.c rt_boot), before any game code runs: the four sets follow the settings alone,
+// whatever environment switches their generated table names, and their page slots start neutral (no curve, the real
+// time, no saved pointers). Left on until the first present, the light site would run on a zeroed page: light time 0.
+void rt_dawn_dusk_init(void) {
+    s_ddlut = rt_patch_set("ddlut"), s_curve = rt_patch_set("ddcurve"), s_light = rt_patch_set("ddlight");
+    s_env = rt_patch_set("ddkeys");
+    uint8_t *pg = rt_patch_page();
+    if (pg) {
+        float k = 0, ab[2] = {1.0f, 0.0f};
+        memcpy(pg + PG_CURVE, &k, 4), memcpy(pg + PG_LIGHT, ab, 8), memset(pg + PG_LUT, 0, 8), memset(pg + PG_KEYS, 0, 8);
+    }
+    // the patches line before it says "on" for a set its environment key named: it isn't, from here (logged only then,
+    // so a default boot's log is unchanged)
+    int any = rt_patch_enabled(s_ddlut) || rt_patch_enabled(s_curve) || rt_patch_enabled(s_light) || rt_patch_enabled(s_env);
+    rt_patch_switch(s_ddlut, 0), rt_patch_switch(s_curve, 0), rt_patch_switch(s_light, 0), rt_patch_switch(s_env, 0);
+    if (any) rt_log("dawn/dusk: patch sets ddlut, ddcurve, ddlight, ddkeys off until Dawn and dusk or Night darkness needs them");
+}
+
 // Every present (boot.c).
 void rt_dawn_dusk_update(void) {
     static int on;   // anything of ours is in game memory or switched on
     static int env_on, keys_wait;   // ddkeys is on; the keys wait for the game's next key address to be written
-    if (s_ddlut == -2) {
-        s_ddlut = rt_patch_set("ddlut"), s_curve = rt_patch_set("ddcurve"), s_light = rt_patch_set("ddlight");
-        s_env = rt_patch_set("ddkeys");
-        // the four sets follow the settings, whatever their XCX_DD_*_PATCH keys say, and their page slots start
-        // neutral: no curve, the real time, no saved pointers
-        uint8_t *pg = rt_patch_page();
-        if (pg) {
-            float k = 0, ab[2] = {1.0f, 0.0f};
-            memcpy(pg + PG_CURVE, &k, 4), memcpy(pg + PG_LIGHT, ab, 8), memset(pg + PG_LUT, 0, 8), memset(pg + PG_KEYS, 0, 8);
-        }
-        rt_patch_switch(s_ddlut, 0), rt_patch_switch(s_curve, 0), rt_patch_switch(s_light, 0), rt_patch_switch(s_env, 0);
-    }
     if (s_ddlut < 0 || s_curve < 0 || s_light < 0 || s_env < 0 || !rt_patch_page()) return;
     int was = mode;
     double was_nl = night_light;

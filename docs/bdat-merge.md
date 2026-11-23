@@ -132,6 +132,7 @@ a merge runs or is about to); with the menu closed, nothing else touches a mod f
 updated on disk by another program while the menu is closed is seen the next time the Mods tab opens, or else at the
 next start, which merges whatever it finds. This look uses sizes and last-write times only. A start that finds the
 cache uses more: each mod file's change time and its identity on its volume, which a copy tool can't carry over, on
-the file systems known to keep them (NTFS and ReFS on Windows; ext4, btrfs, xfs, f2fs, zfs, bcachefs, tmpfs and
-overlayfs on Linux), and otherwise reads and hashes the mod files. So a copy tool that keeps a file's size and dates
-can update a mod without the Mods tab noticing, and the next start still merges it again.
+the file systems known to keep them (NTFS and ReFS on local drives on Windows, never a network share; ext4, btrfs,
+xfs, f2fs, zfs, bcachefs, tmpfs and overlayfs on Linux), and otherwise reads and hashes the mod files. So a copy tool
+that keeps a file's size and dates can update a mod without the Mods tab noticing, and the next start still merges it
+again.

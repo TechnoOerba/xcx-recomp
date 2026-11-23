@@ -18,6 +18,7 @@ static const char *test_status[8];
 static int test_kind[8], test_nstatus;
 static char moved[65];
 static int moved_up = -1;
+static int test_write_ok = 1;   // what romfs_mods_move and romfs_mods_set answer: 0 = the list could not be written
 extern "C" {
 __attribute__((weak)) void modlib_snapshot(ModLibView *v) { *v = test_view; }
 __attribute__((weak)) void modlib_refresh(void) {}
@@ -38,7 +39,7 @@ __attribute__((weak)) int romfs_mods_priority(char (*ids)[65], int cap) {
 __attribute__((weak)) int romfs_mods_move(const char *id, int up) {
     snprintf(moved, sizeof moved, "%s", id);
     moved_up = up;
-    return 1;
+    return test_write_ok;
 }
 __attribute__((weak)) int romfs_mods_tables_changed(void) { return test_changed; }
 static int test_file_checks;   // romfs_mods_check_files calls: one per refresh, never one per row
@@ -98,7 +99,7 @@ __attribute__((weak)) int bdat_merge_mod_tag(const char *id, char *out, size_t c
 static char turned_off[65];
 __attribute__((weak)) int romfs_mods_set(const char *id, int on) {
     if (!on) snprintf(turned_off, sizeof turned_off, "%s", id);
-    return 1;
+    return test_write_ok;
 }
 const char *cfg_value(const char *) { return "en"; }
 unsigned cfg_version(void) { return 1; }
@@ -215,6 +216,25 @@ int main() {
     io.AddMouseButtonEvent(0, false);
     frame();
     verify(!strcmp(moved, "other") && moved_up == 1, "Up moves that mod up");
+    verify(find('W', nullptr) < 0, "a list written: no failure line");
+
+    // a list that can't be written says so under the list, until a change works
+    test_write_ok = 0;
+    io.AddMousePosEvent((prio_up_low[2].x + prio_up_high[2].x) / 2, (prio_up_low[2].y + prio_up_high[2].y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    frame();
+    verify(find('W', "could not be written") > find('P', "Other mod"), "a move that can't be written says so under the list");
+    test_write_ok = 1;
+    io.AddMousePosEvent((prio_up_low[2].x + prio_up_high[2].x) / 2, (prio_up_low[2].y + prio_up_high[2].y) / 2);
+    io.AddMouseButtonEvent(0, true);
+    frame();
+    io.AddMouseButtonEvent(0, false);
+    frame();
+    frame();
+    verify(find('W', nullptr) < 0, "the next change that works clears the failure line");
 
     // the list differs from what was merged at start-up: the restart line, Merge now, and this run's lines out of
     // the way under their own (shut) heading

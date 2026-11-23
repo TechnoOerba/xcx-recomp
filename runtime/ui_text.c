@@ -81,10 +81,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_CHEATS_NOTE_SETUP] = "needs the setup again",
     [UI_CHEATS_BUTTONS] = "\n\nActs only while its buttons are held (button mask %X).",
     [UI_MODS_PRIORITY] = "Mod priority",
-    [UI_MODS_PRIORITY_DESC] = "Game-file mods that are on, highest priority first. Where two have the same file, the "
+    [UI_MODS_PRIORITY_NOTE] = "Game-file mods that are on, highest priority first. Where two have the same file, the "
                               "higher one's copy is used. Data tables (bdat) that several of them change are merged, "
-                              "and where two set the same value the higher one's is kept. The game reads its data "
-                              "tables at start-up, so a change of priority for them applies at the next start.",
+                              "and where two set the same value the higher one's is kept.",
     [UI_MODS_UP] = "Up",
     [UI_MODS_DOWN] = "Down",
     [UI_MODS_MERGES] = "Data tables as merged when the game started (every line is in the report next to the merged file, in the profile folder's bdat-merge)",
@@ -108,6 +107,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MODS_RESTART_YES] = "Restart",
     [UI_MODS_RESTART_NO] = "Cancel",
     [UI_MODS_RESTART_FAILED] = "The game could not be started again. Close it and start it yourself.",
+    [UI_MODS_LIST_WRITE_FAILED] = "The list of mods could not be written, so it is as it was (the log says why).",
     [UI_MODS_CHANGED_UPDATED] = "updated after the game started",
     [UI_MODS_CHANGED_ON] = "turned on after the game started",
     [UI_CHEATS_LIST] = "Show",
@@ -521,11 +521,10 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_CHEATS_NOTE_SETUP] = "нужен повторный запуск установщика",
     [UI_CHEATS_BUTTONS] = "\n\nДействует, только пока зажаты его кнопки (маска кнопок %X).",
     [UI_MODS_PRIORITY] = "Приоритет модов",
-    [UI_MODS_PRIORITY_DESC] = "Включённые моды файлов игры, сначала с наивысшим приоритетом. Если у двух модов есть "
+    [UI_MODS_PRIORITY_NOTE] = "Включённые моды файлов игры, сначала с наивысшим приоритетом. Если у двух модов есть "
                               "один и тот же файл, используется копия того, что выше. Таблицы данных (bdat), которые "
                               "меняют несколько модов, объединяются, а если два мода задают одно значение, остаётся "
-                              "значение того, что выше. Игра читает таблицы данных при запуске, поэтому новый "
-                              "приоритет для них действует после следующего запуска.",
+                              "значение того, что выше.",
     [UI_MODS_UP] = "Выше",
     [UI_MODS_DOWN] = "Ниже",
     [UI_MODS_MERGES] = "Таблицы данных, объединённые при запуске игры (все строки есть в отчёте рядом с объединённым файлом, в папке bdat-merge профиля)",
@@ -549,6 +548,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MODS_RESTART_YES] = "Перезапустить",
     [UI_MODS_RESTART_NO] = "Отмена",
     [UI_MODS_RESTART_FAILED] = "Не удалось запустить игру заново. Закройте её и запустите сами.",
+    [UI_MODS_LIST_WRITE_FAILED] = "Не удалось записать список модов, он остался прежним (причина в журнале).",
     [UI_MODS_CHANGED_UPDATED] = "обновлён после запуска игры",
     [UI_MODS_CHANGED_ON] = "включён после запуска игры",
     [UI_CHEATS_LIST] = "Показать",

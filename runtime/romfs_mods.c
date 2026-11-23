@@ -75,6 +75,7 @@ static char *start_list;                   // the list text when the game read i
 static int stale_now(void);
 static int ahead_state(void);
 static void refresh_sigs(void);
+static __thread int looked_here;   // refresh_sigs ran on this thread since check() cleared it
 static PlatMutex check_lock = PLAT_MUTEX_INIT;
 static char root[4096];
 static int root_state;                     // 0 not looked up, 1 found, -1 none
@@ -269,12 +270,16 @@ static void rebuild(const char *list) {
 }
 
 // Reads romfs-enabled.txt again when CHECK_MS passed, and rebuilds when it changed. One thread checks at a time;
-// the others go on with the current map.
-static void maybe_reload(void) {
+// the others go on with the current map. look (the Mods tab's refresh): also look at the mod files, before the
+// automatic merge below decides, so a file that changed since the last look restarts its wait first instead of being
+// merged half written when the looks were more than AUTO_MS apart.
+static void check(int look) {
     uint64_t now = plat_now_ms();
-    if (now < __atomic_load_n(&next_check_ms, __ATOMIC_RELAXED) || !plat_mutex_trylock(&check_lock)) return;
-    __atomic_store_n(&next_check_ms, now + CHECK_MS, __ATOMIC_RELAXED);
-    if (mods_root()) {
+    int due = now >= __atomic_load_n(&next_check_ms, __ATOMIC_RELAXED);
+    if ((!due && !look) || !plat_mutex_trylock(&check_lock)) return;
+    looked_here = 0;
+    if (due) __atomic_store_n(&next_check_ms, now + CHECK_MS, __ATOMIC_RELAXED);
+    if (due && mods_root()) {
         char path[4200], buf[LIST_CAP + 1];
         snprintf(path, sizeof path, "%s/romfs-enabled.txt", root);
         int64_t len = -1;
@@ -293,16 +298,20 @@ static void maybe_reload(void) {
             refresh_sigs();   // the files of the list as it is now (a list change is rare: this is no timer)
         }
     }
+    if (look && !looked_here) refresh_sigs();
     // bdat_merge_auto: once the mods have stayed put a moment (a few Up/Down clicks are one change, a file being copied
     // is still changing), the data tables are merged ahead whenever the game read them otherwise than they'd be made
     // now (another list, or a mod's files updated) and no merge for this list is made or running. stale_now and
-    // ahead_state compare what was last looked at (refresh_sigs): no file is touched here.
-    if (now - __atomic_load_n(&changed_at, __ATOMIC_RELAXED) >= AUTO_MS &&
+    // ahead_state compare what was last looked at (refresh_sigs): no file is touched here. The time is taken again:
+    // a look above stores a newer changed_at than now, and now - changed_at would wrap around to a long wait passed.
+    if (plat_now_ms() - __atomic_load_n(&changed_at, __ATOMIC_RELAXED) >= AUTO_MS &&
         !__atomic_load_n(&ahead_busy, __ATOMIC_ACQUIRE) &&
         cfg_bool("XCX_BDAT_MERGE_AUTO") && stale_now() && ahead_state() == 0 && romfs_mods_premerge())
         rt_log("romfs mods: the mods changed; merging their data tables ahead for the next start");
     plat_mutex_unlock(&check_lock);
 }
+
+static void maybe_reload(void) { check(0); }
 
 // The entry for key, or NULL; under lock.
 static ModFile *find(const char *key) {
@@ -403,7 +412,6 @@ static void table_inputs(const char *key, char *sig, size_t cap) {
 // (romfs_mods_check_files), never on a timer: with the menu closed, nothing here touches a mod file.
 static char *cur_sig[STARTED_CAP];
 static uint64_t sig_at[STARTED_CAP];           // when that look began: an older one never replaces a newer one
-static __thread int looked_here;               // refresh_sigs ran on this thread (romfs_mods_check_files clears it)
 static PlatMutex sig_lock = PLAT_MUTEX_INIT;   // guards cur_sig and sig_at
 
 // Table i's signature as last looked at into out; under the map's lock (for started[]).
@@ -898,14 +906,9 @@ int romfs_mods_tables_changed(void) {
 
 void romfs_mods_check_files(void) {
     if (!mods_root()) return;
-    looked_here = 0;
-    maybe_reload();   // after a list change it rebuilds and looks itself: then that look is this refresh's
-    if (looked_here) return;
     // one look at a time, and not inside a rebuild: a game thread holding check_lock is rebuilding or looking right
     // now, so the menu keeps what it has rather than wait for it (the next refresh looks)
-    if (!plat_mutex_trylock(&check_lock)) return;
-    refresh_sigs();
-    plat_mutex_unlock(&check_lock);
+    check(1);
 }
 
 static int stale_now(void) {

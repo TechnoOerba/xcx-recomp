@@ -72,7 +72,7 @@ static int merge_lines(bool ahead) {
 // restarts the game (asking first in the world: anything since the last save would be lost).
 static void mod_priority(const ModLibView &v,bool idle) {
     static char ids[32][65],tag[32][200];static int n,tag_flags[32],changed[32];
-    static uint64_t seen=~0ull;static double next;static bool stale,listchg,restart_failed;static int ahead;
+    static uint64_t seen=~0ull;static double next;static bool stale,listchg,restart_failed,write_failed;static int ahead;
     static char open_id[65],dl[64][320];static int dk[64],dn;   // the row whose lines are open, and its lines
     double now=ImGui::GetTime();
     // a new library view at once while it is idle; during a download or install (which publishes one per chunk) once
@@ -103,7 +103,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
 #endif
     if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",menu_text(UI_MODS_MERGE_AUTO_DESC));
     if(n>=1){
-        ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_PRIORITY_DESC));ImGui::PopTextWrapPos();
+        ImGui::PushTextWrapPos(0);ImGui::TextDisabled("%s",menu_text(UI_MODS_PRIORITY_NOTE));ImGui::PopTextWrapPos();
         int move=-1,off=-1;bool up=false;
         for(int i=0;i<n;++i){
             const char *name=ids[i];
@@ -152,13 +152,19 @@ static void mod_priority(const ModLibView &v,bool idle) {
             }
             ImGui::PopID();
         }
-        if(move>=0){romfs_mods_move(ids[move],up);next=0;}
-        // through the library, as its On box does, so its row above shows the change at once; a mod it doesn't list
-        // (a folder it can't read) straight in the list file
+        // a list that could not be written says so under the list (the log says why) until the next change works
+        if(write_failed){
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(ImVec4(1.0f,0.55f,0.5f,1),"%s",menu_text(UI_MODS_LIST_WRITE_FAILED));
+            ImGui::PopTextWrapPos();PRIO_LINE('W',menu_text(UI_MODS_LIST_WRITE_FAILED));
+        }
+        if(move>=0){write_failed=!romfs_mods_move(ids[move],up);next=0;}
+        // through the library, as its On box does, so its row above shows the change at once (the library says so
+        // itself when it can't write the list); a mod it doesn't list (a folder it can't read) straight in the list file
         if(off>=0){
             bool listed=false;
             for(int k=0;k<v.count;++k)listed|=!strcmp(v.rows[k].id,ids[off])&&v.rows[k].installed;
-            if(listed)modlib_set_enabled(ids[off],0);else romfs_mods_set(ids[off],0);
+            if(listed){modlib_set_enabled(ids[off],0);write_failed=false;}else write_failed=!romfs_mods_set(ids[off],0);
             next=0;
         }
     }

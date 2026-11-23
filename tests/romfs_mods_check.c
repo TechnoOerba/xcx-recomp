@@ -110,10 +110,11 @@ int main(void) {
     put("a/romfs/bdat/x.bdat", "a's copy, being written");
     romfs_mods_check_files();
     verify(romfs_mods_premerge_state() == 0, "the merge made ahead no longer matches");
-    plat_sleep_ms(AUTO_MS - 500);
+    // Past AUTO_MS since the first change (a sleep never ends early), so only the second change's look can hold the
+    // merge back; the game reads right after it, which leaves a loaded machine all of AUTO_MS before that check fails.
+    plat_sleep_ms(AUTO_MS + 200);
     put("a/romfs/bdat/x.bdat", "a's copy, being written, more of it");
     romfs_mods_check_files();
-    plat_sleep_ms(AUTO_MS / 2 - 50);   // 1.7 s since the first change, 0.7 s since the second: 0.8 s spare each way
     game_reads();
     wait_merge();
     verify(prepared == 2, "no merge while the file was still changing a moment ago");

@@ -29,8 +29,9 @@ static float lib_focus_line_bottom,lib_box_bottom;   // the focused row's line u
 static const char *status_name(int status) {
     switch(status) {case MOD_LOADED:return "Loaded";case MOD_DISABLED:return "Disabled";case MOD_INCOMPATIBLE:return "Incompatible";case MOD_FAULTED:return "Faulted";default:return "Starting";}
 }
-// The name of the library entry a part belongs to: library.ini's group_name, else what its own name says before ": "
-// (installer/mods.py, part_name: "Tweaks mod: Probe tweak"), else the entry's id.
+// The name of the library entry a part belongs to: library.ini's group_name (installer/mods.py, write_info, always
+// writes it with a group), else, for a library.ini written by hand without one, what the part's own name says before
+// ": " (part_name: "Tweaks mod: Probe tweak"), else the entry's id.
 static void group_label(const ModLibRow &r,char *out,size_t cap) {
     const char *colon=strstr(r.name,": ");
     if(r.group_name[0])snprintf(out,cap,"%s",r.group_name);
@@ -63,11 +64,11 @@ static bool nav_pressed(bool right) {
                :ImGui::IsKeyPressed(ImGuiKey_LeftArrow,false)||ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft,false)||
                  ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft,false);
 }
-static bool nav_vertical(bool down) {   // held, it repeats as ImGui's own moves do
-    return down?ImGui::IsKeyPressed(ImGuiKey_DownArrow,true)||ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown,true)||
-                ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown,true)
-              :ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)||ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp,true)||
-                ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp,true);
+static bool nav_vertical(bool down,bool repeat=true) {   // held, it repeats as ImGui's own moves do (repeat)
+    return down?ImGui::IsKeyPressed(ImGuiKey_DownArrow,repeat)||ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown,repeat)||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown,repeat)
+              :ImGui::IsKeyPressed(ImGuiKey_UpArrow,repeat)||ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp,repeat)||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp,repeat);
 }
 // At the start of the library, before its rows: Right, Left, Up or Down from what was focused at the end of the last
 // frame.
@@ -156,8 +157,11 @@ void mods_page_select(const char *owner,const char *page){snprintf(requested_own
 // The mod library (runtime/mod_library.c): its mods and the installed ones on the left, the picked one's text and
 // buttons on the right. Jobs run on the library's thread; this only reads its view and asks. Returns whether a row
 // took the first focus.
+static bool lib_focusable;   // the library drew something the tab's first focus can take: a row, or Refresh enabled
+static bool library_focusable() { return lib_focusable; }
 static bool library(float scale,bool focus_first) {
     static ModLibView v;modlib_snapshot(&v);
+    lib_focusable=v.count>0||v.state==MODLIB_IDLE;
     static char picked[65],confirm_remove[65];
     ImGui::SeparatorText(menu_text(UI_MODS_LIBRARY));
     bool idle=v.state==MODLIB_IDLE;
@@ -174,9 +178,10 @@ static bool library(float scale,bool focus_first) {
         ImGui::TextWrapped("%s",v.notes[i].text);
         if(v.notes[i].error)ImGui::PopStyleColor();
     }
-    if(!v.count){
+    if(!v.count){   // nothing listed (offline, or still loading): Refresh takes the tab's first focus while it can
         ImGui::TextWrapped("%s",menu_text(UI_MODS_EMPTY));
         ImGui::BeginDisabled(!idle);if(ImGui::Button(menu_text(UI_MODS_REFRESH)))modlib_refresh();ImGui::EndDisabled();
+        if(focus_first&&idle){focus_here();return true;}
         return false;
     }
     nav_switch(picked,sizeof picked);   // Right / Left between the list and the pane, before anything is drawn
@@ -234,7 +239,8 @@ static bool library(float scale,bool focus_first) {
             }
         }
         ImGui::EndChild();
-        list_focus=false;   // asked for and not drawn (the list changed): dropped
+        list_focus=false;want_focus=0;   // asked for and not drawn (the list changed): dropped
+        if(v.hidden)ImGui::TextDisabled(menu_text(UI_MODS_HIDDEN),v.hidden,MODLIB_ROWS);
 #ifdef XCX_MOD_UI_TESTING
         lib_box_height=ImGui::GetItemRectSize().y;lib_box_max=rows_max;
 #endif
@@ -293,11 +299,13 @@ void mods_page(float scale,float bottom,bool focus_first) {
     // switch does. ImGui's own move would end on the menu's Continue button: the library rows sit in a box of their
     // own, a second child level, whose rows scrolled out of view ImGui doesn't clip from the search (ui/menu.cpp, the
     // page's NavFlattened child).
+    // Only while something on the page can take the focus (last frame's count): else ImGui's own move goes on to the
+    // menu's buttons below.
+    static bool can_focus;
     {
         ImGuiContext &g=*GImGui;ImGuiWindow *nav=g.NavWindow;
-        bool down=ImGui::IsKeyPressed(ImGuiKey_DownArrow,false)||ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown,false)||
-                  ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown,false);
-        if(down&&nav==ImGui::GetCurrentWindow()&&   // on the tabs, or on nothing (a page left behind took the focus away)
+        bool down=nav_vertical(true,false);
+        if(down&&can_focus&&nav==ImGui::GetCurrentWindow()&&   // on the tabs, or on nothing (a page left behind took the focus away)
            (!g.NavId||ImGui::WindowRectRelToAbs(nav,nav->NavRectRel[g.NavLayer]).Max.y<=ImGui::GetCursorScreenPos().y)){
             ImGui::NavMoveRequestCancel();ImGui::SetNavCursorVisible(true);focus_first=true;
         }
@@ -398,6 +406,7 @@ void mods_page(float scale,float bottom,bool focus_first) {
         }
     }
     ImGui::EndChild();
+    can_focus=snapshot.count>0||library_focusable();
     if(first_try){   // held when the focus is now in this page, else tried again next frame
         ImGuiWindow *nav=GImGui->NavWindow;
         bool held=GImGui->NavId&&nav&&strstr(nav->Name,"##mods_page");

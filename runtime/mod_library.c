@@ -629,12 +629,12 @@ static void normalise(void) {
     plat_mutex_unlock(&lock);
 }
 
-typedef struct { ModLibRow *rows; int n, cap; } Scan;
+typedef struct { ModLibRow *rows; int n, cap, over; } Scan;   // over: mods past cap, not listed
 
 static int scan_entry(const char *name, int kind, uint64_t size, void *ctx) {
     (void)size;
     Scan *s = ctx;
-    if (kind != PLAT_FS_DIR || !valid_id(name) || s->n >= s->cap) return 1;
+    if (kind != PLAT_FS_DIR || !valid_id(name)) return 1;
     char dir[4200], path[4300];
     join(dir, sizeof dir, root(), name);
     ModLibRow r = {0};
@@ -644,6 +644,10 @@ static int scan_entry(const char *name, int kind, uint64_t size, void *ctx) {
     snprintf(path, sizeof path, "%s/mod.ini", dir);
     if (!r.kind[0] && plat_fs_kind(path) == PLAT_FS_FILE) strcpy(r.kind, "lua");
     if (!r.kind[0]) return 1;
+    if (s->n >= s->cap) {   // counted, so the tab can say some are not listed
+        s->over++;
+        return 1;
+    }
     snprintf(r.name, sizeof r.name, "%s", name);
     snprintf(path, sizeof path, "%s/library.ini", dir);
     uint64_t sz = 0;
@@ -654,7 +658,6 @@ static int scan_entry(const char *name, int kind, uint64_t size, void *ctx) {
         ini_value(ini, "version", r.version, sizeof r.version);
         ini_value(ini, "group", r.group, sizeof r.group);
         ini_value(ini, "group_name", r.group_name, sizeof r.group_name);
-        ini_value(ini, "part", r.part, sizeof r.part);
         if (!valid_id(r.group)) r.group[0] = 0;
         free(ini);
     }
@@ -672,12 +675,16 @@ static int by_name(const void *a, const void *b) {
 // The view's rows from the index and the folder: library entries first, then mods only on disk.
 static void rescan(void) {
     static ModLibRow have[MODLIB_ROWS];
-    Scan s = {have, 0, MODLIB_ROWS};
+    Scan s = {have, 0, MODLIB_ROWS, 0};
     if (root()) plat_fs_list(root(), scan_entry, &s);
     static ModLibRow rows[MODLIB_ROWS];
-    int n = 0;
+    int n = 0, hidden = s.over;
     plat_mutex_lock(&lock);
-    for (int i = 0; i < index_count && n < MODLIB_ROWS; i++) {
+    for (int i = 0; i < index_count; i++) {
+        if (n >= MODLIB_ROWS) {
+            hidden++;
+            continue;
+        }
         ModLibRow r = index_entries[i].row;
         for (int k = 0; k < s.n; k++)
             if (!strcmp(have[k].id, r.id)) {
@@ -688,11 +695,16 @@ static void rescan(void) {
             }
         rows[n++] = r;
     }
-    for (int k = 0; k < s.n && n < MODLIB_ROWS; k++)
-        if (have[k].id[0]) rows[n++] = have[k];
+    for (int k = 0; k < s.n; k++)
+        if (have[k].id[0]) {
+            if (n < MODLIB_ROWS) rows[n++] = have[k];
+            else hidden++;
+        }
     qsort(rows, (size_t)n, sizeof *rows, by_name);
     memcpy(view.rows, rows, (size_t)n * sizeof *rows);
     view.count = n;
+    if (hidden && hidden != view.hidden) rt_log("mod library: %d mods not listed (the list holds %d)", hidden, MODLIB_ROWS);
+    view.hidden = hidden;
     publish_locked();
     plat_mutex_unlock(&lock);
 }

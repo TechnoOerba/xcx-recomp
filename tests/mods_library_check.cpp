@@ -232,9 +232,11 @@ int main() {
     other_tab = false;
     int rows = test_view.count;
     test_view.count = 0;
+    test_view.state = MODLIB_LOADING;
     test_view.generation++;
     frame(true);
     test_view.count = rows;
+    test_view.state = MODLIB_IDLE;
     test_view.generation++;
     frame();
     frame();
@@ -248,6 +250,36 @@ int main() {
     step(ImGuiKey_GamepadDpadDown);
     verify(GImGui->NavWindow && strstr(GImGui->NavWindow->Name, "library_rows"),
            "Down from the tab goes into the library list");
+
+    // nothing in the library (offline) and no Lua mods: Down from the tab lands on Refresh; while it loads (Refresh
+    // can't be pressed), ImGui's own move goes on to the menu's Continue instead of being swallowed
+    rows = test_view.count;
+    test_view.count = 0;
+    test_view.generation++;
+    focus_tab = true;
+    frame();
+    frame();
+    step(ImGuiKey_GamepadDpadDown);
+    frame();
+    ImGuiWindow *page = ImGui::FindWindowByName("Mods");
+    verify(GImGui->NavWindow && strstr(GImGui->NavWindow->Name, "##mods_page") && GImGui->NavCursorVisible,
+           "an empty library: Down from the tab reaches its Refresh");
+    test_view.state = MODLIB_LOADING;
+    test_view.generation++;
+    focus_tab = true;
+    frame();
+    frame();
+    for (int k = 0; k < 3; k++) step(ImGuiKey_GamepadDpadDown);
+    frame();
+    verify(GImGui->NavWindow == page && GImGui->NavId == page->GetID("Continue"),
+           "a loading, empty library: Down from the tab goes on to Continue");
+    test_view.state = MODLIB_IDLE;
+    test_view.count = rows;
+    test_view.generation++;
+    focus_tab = true;   // back into the list for the checks below
+    frame();
+    frame();
+    step(ImGuiKey_GamepadDpadDown);
 
     // a title too long for the list's width takes two lines; a short one one
     row("longname", "A mod with a long name that runs on past the width of the list, as some real mods' names do", 0);

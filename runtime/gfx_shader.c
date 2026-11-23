@@ -92,15 +92,15 @@ static volatile int64_t n_requests, n_hits, n_failures, n_keys, n_xlated;   // n
 typedef struct {                                           // one translator child
     PlatChild *child;                                      // NULL: not started
     int busy;                                              // a request owns it (under S.lock)
-    int low;                                               // below normal priority, for the background preparation's
-    size_t in_len;                                         // requests only (tl_private), so the game's never wait on it
+    int low;                                               // the background preparation's (tl_private) only: lowered
+    size_t in_len;                                         // on Linux (plat_child_lower), never used for the game's
     char inbuf[LINE_MAX_LEN * 2];
 } Svc;
 
 // The background preparation's translations stay on disk only: with tl_private set, translate_one hands back the
 // shader it made or loaded without entering it in the memory cache, and sets tl_owned (the caller frees it). Kept in
 // memory, the ~25,000 seed variants would stay resident for the whole run though play draws few of them. Its requests
-// also go to translator children of their own, started below normal priority (svc_get).
+// also go to translator children of their own (svc_get), lowered on Linux, where the threads stay at nice 0.
 static _Thread_local int tl_private, tl_owned;
 
 static struct {
@@ -295,7 +295,7 @@ static int child_start(Svc *v) {
         rt_log("gfx_shader: cannot start %s (error %lu)", xlate_exe, (unsigned long)err);
         return 0;
     }
-    // for good: on Linux an unprivileged process can lower a priority but not raise it again
+    // for good: an unprivileged process can lower a priority but not raise it again (Linux; nothing on Windows)
     if (v->low) plat_child_lower(v->child);
     v->in_len = 0;
     return 1;

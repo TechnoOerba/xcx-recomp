@@ -44,10 +44,11 @@ def ini_value(dest, key):
 
 def shader_cache(dest):
     """The shader cache folder the game uses (gfx_shader.c cache_folder): shader_cache in xcx.ini when it fits the
-    game's path buffer, a relative path from the game's folder, else dest/shader-cache. One set only in the environment
-    is not seen here; the setup then checks the default folder."""
+    game's path buffer, a relative path from the game's folder, else dest/shader-cache. XCX_SHADER_CACHE in the
+    environment wins over the file, as in the game (runtime/cfg.c), when the setup runs with the game's environment."""
     dest = Path(dest)
-    value = ini_value(dest, 'shader_cache')
+    # set but empty in the environment: the game's default folder, as cfg_get hands the game the empty value
+    value = os.environ['XCX_SHADER_CACHE'] if 'XCX_SHADER_CACHE' in os.environ else ini_value(dest, 'shader_cache')
     if value and len(value.encode('utf-8')) < PATH_CAP:
         return dest / value
     return dest / DEFAULT_CACHE
@@ -75,8 +76,8 @@ def prepared_missing(dest):
 def prepared_intact(dest):
     """No prepared list, or one whose translations are mostly still in the shader cache. A cache deleted by hand
     leaves the list behind with none of them; a stray missing file is no reason to prepare everything again. The game
-    asks less (one of three sampled records present, gfx_shader.c prepared_current): it runs at every start, so it only
-    catches a cache that is gone."""
+    asks the same of a sample (up to 64 records spread over the list, gfx_shader.c prepared_current), as it checks at
+    every start."""
     if not (Path(dest) / PREPARED[0]).exists():
         return True
     counts = prepared_missing(dest)

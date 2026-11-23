@@ -109,19 +109,24 @@ Setup's look (`installer/theme.py`) takes the colours of the F1 menu (`runtime/u
    - **off**: no seed (an earlier one is removed); the game translates each shader when it first meets it.
 
    A new seed or another translator deletes `shader-prepared.bin` and `shader-prepared.id`, and the game also
-   prepares again when the id names another translator or graphics card; a failure only warns. In the game, Advanced
+   prepares again when the id names another translator or graphics card; a failure only warns. A translator rebuilt
+   from the same sources (every release) is the same translator: the setup compares the identity in `xcx_xlate.id`,
+   not the exe's bytes, so an update keeps the cache. Variants that fail to translate are left out of the list and
+   translated in play when met. In the game, Advanced
    → Shaders and pipelines has **Prepare shaders now** (the background pass at once) and **Clear shader cache**
    (deletes the caches at the next start, or at the setup's next run with "now", which then prepares into them; the
    seed stays, and from a folder `XCX_SHADER_CACHE` names only the cache's own files go). The window keeps the choice
    a folder was set up with when that folder is chosen again. A prepared list whose translations are no longer in the
    shader cache's `in/` folder is removed so the shaders are prepared again: by the setup when half or more are gone,
-   and by the game at its start when none of three sampled records is left (a cache deleted by hand). The box
+   and by the game at its start when half or more of up to 64 records sampled across the list are gone. The box
    "Rebuild" beside the choice (`--prepare-again`; greyed out until the install folder has shaders, and with off)
    deletes the shader cache and the list on purpose first: the whole default `shader-cache` folder, or only the
    cache's own files from a folder `xcx.ini` names (never the install folder or one above it). The seed and the
    prepared list live beside `xcx.exe`; the setup finds the cache folder as the game does, from `shader_cache` in
-   `xcx.ini` (relative to the install folder) or `shader-cache` beside `xcx.exe` (one set only in the environment is
-   not seen). Rebuild while the game runs stops with "close the game first" on Windows.
+   `xcx.ini` or `XCX_SHADER_CACHE` in the environment (which wins, as in the game), or `shader-cache` beside
+   `xcx.exe`. A relative folder is taken from the folder of `xcx.exe`, in the game too: before this, the game took it
+   from the working directory, so a game started from another folder used another cache. Rebuild while the game runs
+   stops with "close the game first" on Windows; a read-only folder says so instead.
 6. **DLSS** (the window's tick box, on by default, or `--dlss`; Windows with an NVIDIA RTX GPU): download
    `nvngx_dlss.dll` from NVIDIA's own DLSS SDK repository (github.com/NVIDIA/DLSS, a pinned tag, NVIDIA RTX SDK
    license) into the install folder and check its size and SHA-256 (`steps.py`, `Dlss`). The release does not ship

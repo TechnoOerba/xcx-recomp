@@ -581,6 +581,47 @@ class RecentTest(unittest.TestCase):
         (dest / 'xcx.ini').write_text('shader_cache = first\nshader_cache = cache2\n', encoding='utf-8')
         self.assertEqual(shader_cache(dest), dest / 'cache2')   # the last line wins; relative to the game folder
 
+    def test_shader_cache_folder_from_the_environment(self):   # XCX_SHADER_CACHE there wins, as in the game (cfg.c)
+        import os
+        from unittest import mock
+        from installer.steps import shader_cache
+        dest = self.tmp / 'env'
+        dest.mkdir()
+        (dest / 'xcx.ini').write_text('shader_cache = from-ini' + chr(10), encoding='utf-8')
+        with mock.patch.dict(os.environ, {'XCX_SHADER_CACHE': 'from-env'}):
+            self.assertEqual(shader_cache(dest), dest / 'from-env')
+        with mock.patch.dict(os.environ, {'XCX_SHADER_CACHE': ''}):   # set but empty: the game's default folder
+            self.assertEqual(shader_cache(dest), dest / 'shader-cache')
+        with mock.patch.dict(os.environ):
+            os.environ.pop('XCX_SHADER_CACHE', None)
+            self.assertEqual(shader_cache(dest), dest / 'from-ini')
+
+    def test_translator_identity(self):   # #223: the .id names the translator; a rebuilt exe of it is the same one
+        from installer import steps
+        a, b = self.tmp / 'a' / steps.XLATE, self.tmp / 'b' / steps.XLATE
+        for exe, data in ((a, b'build 1'), (b, b'build 2')):
+            exe.parent.mkdir()
+            exe.write_bytes(data)
+        self.assertNotEqual(steps.translator_identity(a), steps.translator_identity(b))   # no .id: the exe decides
+        a.with_suffix('.id').write_text('ab' * 32 + chr(10), encoding='ascii')
+        b.with_suffix('.id').write_text('AB' * 32, encoding='ascii')
+        self.assertEqual(steps.translator_identity(a), 'ab' * 32)
+        self.assertEqual(steps.translator_identity(a), steps.translator_identity(b))
+        b.with_suffix('.id').write_text('not an id', encoding='ascii')
+        self.assertTrue(steps.translator_identity(b).startswith('exe '))
+        self.assertEqual(steps.translator_identity(self.tmp / 'none' / steps.XLATE), '')
+
+    def test_prepare_permission_error(self):   # the game running, or a folder that can't be written
+        from unittest import mock
+        from installer import steps
+        ctx = SimpleNamespace(dest=self.tmp / 'ro')
+        for locked, want in ((True, 'compile.exe_in_use'), (False, 'prepare.no_write')):
+            with mock.patch.object(steps.Prepare, 'prepare', side_effect=PermissionError(13, 'denied', 'x.bin')),                     mock.patch.object(steps, 'exe_locked', return_value=locked):
+                with self.assertRaises(runner.InstallError) as e:
+                    steps.Prepare().run(ctx)
+            self.assertEqual(e.exception.id, want)
+        self.assertFalse(steps.exe_locked(self.tmp / 'missing.exe'))
+
     def test_bad_values_dropped(self):
         from installer import recent
         self.installed()

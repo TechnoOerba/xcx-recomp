@@ -83,6 +83,33 @@ def fingerprint(*parts):
     return h.hexdigest()
 
 
+def translator_identity(xlate):
+    """What runtime/gfx_shader.c puts into every shader cache key for this translator: the sha256 hex in the .id
+    beside it (tools/build_xlate.py hashes the translator's sources into it), else the sha256 of the exe. Every release
+    builds the translator again and its exe is not byte-identical from build to build, so the exe's hash alone would
+    call an unchanged translator another one."""
+    try:
+        text = xlate.with_suffix('.id').read_text(encoding='ascii').strip().lower()
+    except (OSError, UnicodeDecodeError):
+        text = ''
+    if len(text) == 64 and all(c in '0123456789abcdef' for c in text):
+        return text
+    return 'exe ' + file_sha256(xlate) if xlate.is_file() else ''
+
+
+def exe_locked(exe):
+    """A running program's exe can't be opened for writing on Windows; elsewhere (and for a missing exe) False."""
+    if os.name != 'nt' or not exe.is_file():
+        return False
+    try:
+        with open(exe, 'r+b'):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def remove(path):
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
@@ -978,7 +1005,7 @@ class Prepare(Step):
 
     def current(self, ctx, record):
         xlate = ctx.dest / XLATE
-        return (not self.again(ctx) and xlate.is_file() and file_sha256(xlate) == record.get('xlate_sha256')
+        return (not self.again(ctx) and xlate.is_file() and translator_identity(xlate) == record.get('xlate_identity')
                 and all((ctx.dest / n).is_file() for n in SEED_FILES) == bool(record.get('seed_sha256'))
                 and (not record.get('prepared') or (ctx.dest / PREPARED[0]).is_file())
                 and prepared_intact(ctx.dest)
@@ -991,16 +1018,22 @@ class Prepare(Step):
     def run(self, ctx):
         try:
             return self.prepare(ctx)
-        except PermissionError:   # mostly the game running (its translator children, open cache files) on Windows
-            raise InstallError('compile.exe_in_use', path=str(ctx.dest / GAME_EXE)) from None
+        except PermissionError as e:
+            # the game running (its translator children, open cache files) locks xcx.exe on Windows; otherwise the
+            # folder or a file in it is read-only, or another program holds it
+            if exe_locked(ctx.dest / GAME_EXE):
+                raise InstallError('compile.exe_in_use', path=str(ctx.dest / GAME_EXE)) from None
+            raise InstallError('prepare.no_write', path=str(e.filename or ctx.dest)) from None
 
     def prepare(self, ctx):
         layout, dest = ctx.layout, ctx.dest
         ctx.reporter.progress('prepare', 'translator', force=True)
         xlate = dest / XLATE
-        if xlate.is_file() and file_sha256(xlate) != file_sha256(layout.xlate):
-            # another translator: its cache keys differ, the old ones only take space, and the prepared list names
-            # translations that are gone (a folder xcx.ini names keeps everything that isn't the cache's)
+        # Another translator: its cache keys differ, the old ones only take space, and the prepared list names
+        # translations that are gone (a folder xcx.ini names keeps everything that isn't the cache's). Compared by
+        # identity, not by the exe's bytes: a rebuilt translator of the same sources keys the cache the same, and
+        # deleting it would make every update prepare all the shaders again (#223).
+        if xlate.is_file() and translator_identity(xlate) != translator_identity(layout.xlate):
             clear_cache(dest, ctx.reporter.log)
             for n in PREPARED:
                 remove(dest / n)
@@ -1014,7 +1047,7 @@ class Prepare(Step):
             destination = dest / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             replace_file(src, destination)
-        record = {'xlate_sha256': file_sha256(xlate), 'shaders': self.mode(ctx)}
+        record = {'xlate_identity': translator_identity(xlate), 'shaders': self.mode(ctx)}
         if self.again(ctx):   # before the seed, so a failed seed still leaves the shaders to be translated afresh
             ctx.reporter.log(f'prepare again: removing the shader cache ({shader_cache(dest)}) and the prepared list')
             clear_cache(dest, ctx.reporter.log)

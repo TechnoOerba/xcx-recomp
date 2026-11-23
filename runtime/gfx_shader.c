@@ -92,9 +92,16 @@ static volatile int64_t n_requests, n_hits, n_failures, n_keys, n_xlated;   // n
 typedef struct {                                           // one translator child
     PlatChild *child;                                      // NULL: not started
     int busy;                                              // a request owns it (under S.lock)
-    size_t in_len;
+    int low;                                               // below normal priority, for the background preparation's
+    size_t in_len;                                         // requests only (tl_private), so the game's never wait on it
     char inbuf[LINE_MAX_LEN * 2];
 } Svc;
+
+// The background preparation's translations stay on disk only: with tl_private set, translate_one hands back the
+// shader it made or loaded without entering it in the memory cache, and sets tl_owned (the caller frees it). Kept in
+// memory, the ~25,000 seed variants would stay resident for the whole run though play draws few of them. Its requests
+// also go to translator children of their own, started below normal priority (svc_get).
+static _Thread_local int tl_private, tl_owned;
 
 static struct {
     PlatMutex lock;
@@ -288,6 +295,8 @@ static int child_start(Svc *v) {
         rt_log("gfx_shader: cannot start %s (error %lu)", xlate_exe, (unsigned long)err);
         return 0;
     }
+    // for good: on Linux an unprivileged process can lower a priority but not raise it again
+    if (v->low) plat_child_lower(v->child);
     v->in_len = 0;
     return 1;
 }
@@ -341,25 +350,32 @@ static int svc_used(void) {                                // caller holds S.loc
     return used;
 }
 
-// A child for one request: an idle running one, else a new slot while fewer than S.limit are in use, else waits.
-static Svc *svc_get(void) {
+// A child for one request of the given kind (low: the background preparation's, tl_private): an idle running one of
+// that kind, else a new slot while fewer than S.limit are in use, else an idle one of the other kind, stopped and
+// started again as this kind, else waits.
+static Svc *svc_get(int low) {
     plat_mutex_lock(&S.lock);
     if (!S.limit) S.limit = svc_runtime_limit();
     Svc *v;
+    int restart = 0;
     for (;;) {
-        Svc *empty = NULL;
+        Svc *empty = NULL, *other = NULL;
         v = NULL;
         for (int i = 0; i < MAX_SVC && !v; i++) {
             Svc *c = &S.s[i];
-            if (!c->busy && c->child) v = c;
+            if (!c->busy && c->child && c->low == low) v = c;
+            else if (!c->busy && c->child) other = other ? other : c;
             else if (!c->busy && !empty) empty = c;
         }
         if (!v && empty && svc_used() < S.limit) v = empty;
+        if (!v && other) v = other, restart = 1;
         if (v) break;
         plat_cond_wait(&S.freed, &S.lock);
     }
     v->busy = 1;
     plat_mutex_unlock(&S.lock);
+    if (restart) child_stop(v);
+    v->low = low;   // busy: only this request touches it now
     return v;
 }
 
@@ -397,7 +413,7 @@ static void svc_set_limit(int n) {
 // One request on a child; a dead child is restarted once. 0 when the translator is unavailable. The caller has given
 // up its virtual core (kern_core_away): the wait for a child and the translation are host time.
 static int svc_request(const char *line, char *reply, size_t reply_size) {
-    Svc *v = svc_get();
+    Svc *v = svc_get(tl_private);
     int ok = 0;
     for (int attempt = 0; attempt < 2 && !ok; attempt++)
         if (!(ok = child_exchange(v, line, reply, reply_size))) child_stop(v);
@@ -1037,7 +1053,7 @@ static size_t build_request(char *o0, const char *hex, const char *stage, const 
 // Raw line exchange for the probe: one line to the service, its reply in `reply`. Starts the service if needed.
 int gfx_shader_raw_request(const char *line, char *reply, size_t reply_size) {
     int away = kern_core_away();
-    Svc *v = svc_get();
+    Svc *v = svc_get(0);
     int ok = child_exchange(v, line, reply, reply_size);
     if (!ok) child_stop(v);
     svc_put(v);
@@ -1133,11 +1149,6 @@ const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t
     if (s) ans_note(&r, stage, control, code, a, s);
     return s;
 }
-
-// The background preparation's translations stay on disk only: with tl_private set, translate_one hands back the
-// shader it made or loaded without entering it in the memory cache, and sets tl_owned (the caller frees it). Kept in
-// memory, the ~25,000 seed variants would stay resident for the whole run though play draws few of them.
-static _Thread_local int tl_private, tl_owned;
 
 // One seed variant into the disk cache, for the background preparation: its input id in iid, 1 on success. Unlike
 // gfx_shader_get it neither records the pair as met in play (the seed would fill shader-answers.bin and
@@ -1254,7 +1265,12 @@ static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *co
     const uint8_t *look = r->final ? key : NULL, *look_iid = r->iid;
     if (!r->final && use_find(r->code_hash, &m)) build_key(r->code_hash, a, &m, mk, miid), look = mk, look_iid = miid;
     if (look && (s = mem_find(look))) return plat_inc64(&n_hits), s;
-    if (look && (s = disk_load(look, look_iid))) return plat_inc64(&n_hits), hand_back(s);
+    if (look && (s = disk_load(look, look_iid))) {
+        // translated before (a pass stopped halfway): the preparation's checks look for the stored inputs too
+        // (prepared_current, installer/shaders.py prepared_intact); play keeps its old path
+        if (tl_private) in_store(s->iid, stage, control, code, r, a);
+        return plat_inc64(&n_hits), hand_back(s);
+    }
 
     uint64_t skip = stage == GFX_STAGE_CS ? 0 : CODE_SKIP;
     char hex[65], code_path[PATH_CAP + 80], spv_path[PATH_CAP + 80], res_path[PATH_CAP + 80];
@@ -1733,7 +1749,9 @@ static void unpack_answers(const uint8_t *p, GfxShaderAnswers *a) {
 }
 
 // Reads a record file's body (after its header) into *body; 0 when absent, and a file with another header is removed.
-static int rec_read(const char *path, const char *magic, uint32_t version, uint32_t rec_size, uint8_t **body, size_t *n) {
+// keep: a file this code never writes (the setup's seed): one of another format or version is ignored, not deleted.
+static int rec_read_as(const char *path, const char *magic, uint32_t version, uint32_t rec_size, uint8_t **body,
+                       size_t *n, int keep) {
     *body = NULL, *n = 0;
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -1750,9 +1768,14 @@ static int rec_read(const char *path, const char *magic, uint32_t version, uint3
     fclose(f);
     if (!ok) {
         free(*body), *body = NULL, *n = 0;
-        if (len > 0) rt_log("gfx_shader: %s has another format or version; it is rewritten", path), remove(path);
+        if (len > 0 && keep) rt_log("gfx_shader: %s has another format or version; ignored", path);
+        else if (len > 0) rt_log("gfx_shader: %s has another format or version; it is rewritten", path), remove(path);
     }
     return ok;
+}
+
+static int rec_read(const char *path, const char *magic, uint32_t version, uint32_t rec_size, uint8_t **body, size_t *n) {
+    return rec_read_as(path, magic, version, rec_size, body, n, 0);
 }
 
 // Walks shader-programs.bin records; returns the byte length of the whole records. fn may be NULL.
@@ -1888,7 +1911,8 @@ static void prg_collect(const uint8_t *rec, void *ctx) {
     l->idx[l->n++].rec = rec;
 }
 
-enum { PREP_GIVE_UP = 64 };   // failures before the first success: no translator (missing, blocked); stop, log once
+enum { PREP_GIVE_UP = 64,     // failures before the first success: no translator (missing, blocked); stop, log once
+       PREP_SAMPLE = 64 };     // prepared_current: records sampled for their stored inputs
 static volatile int32_t prep_gave_up;   // the last prepare_files stopped that way (prepare_seed's summary line)
 
 static void prep_worker(void *arg) {
@@ -1957,8 +1981,9 @@ static long long prepare_files(const char *ans_path, const char *prg_path, int t
     double t0 = (double)plat_now_ms();
     uint8_t *ab = NULL, *pb = NULL;
     size_t an = 0, pn = 0;
-    if (!rec_read(ans_path, "XCXSANS", ANS_VERSION, ANS_REC, &ab, &an) ||
-        !rec_read(prg_path, "XCXSPRG", PRG_VERSION, 0, &pb, &pn)) {
+    // read only: a seed the setup shipped stays even when this build can't read it (the setup writes it again)
+    if (!rec_read_as(ans_path, "XCXSANS", ANS_VERSION, ANS_REC, &ab, &an, 1) ||
+        !rec_read_as(prg_path, "XCXSPRG", PRG_VERSION, 0, &pb, &pn, 1)) {
         rt_log("gfx_shader: prepare: no %s (%s)", what, ans_path);
         free(ab), free(pb);
         return -1;
@@ -2059,10 +2084,10 @@ static int prepare_seed(const char *dir, int threads, int procs, int background)
     }
     free(seen.v);
     RecHeader h = {PRP_MAGIC, PRP_VERSION, PRP_REC};
-    // nothing translated (no translator, say), or more than one record in twenty failed (a full disk, a translator that
-    // dies): no prepared list, so the setup warns and the next start tries again rather than trusting a part
-    int too_many = failed * 20 > (size_t)n;
-    uint8_t *file = recs && u && !too_many ? malloc(sizeof h + u * PRP_REC + 1) : NULL;
+    // the list names what was prepared; the variants that failed are translated in play when met, as without a seed.
+    // Writing no list for them would start the pass again at every start for the same failures. Nothing prepared (no
+    // working translator, say): no list, so the setup warns and the next start tries again.
+    uint8_t *file = recs && u && !prep_gave_up ? malloc(sizeof h + u * PRP_REC + 1) : NULL;
     int ok = file != NULL;
     if (ok) {
         memcpy(file, &h, sizeof h), memcpy(file + sizeof h, recs, u * PRP_REC);
@@ -2079,8 +2104,7 @@ static int prepare_seed(const char *dir, int threads, int procs, int background)
              "warm-up %zu, other %zu) from %lld seed records, %llu translations failed, in %.0f ms; %s %s", u,
              stages[GFX_STAGE_VS], stages[GFX_STAGE_FS], stages[GFX_STAGE_CS], by[0], by[1], by[2], n,
              (unsigned long long)failed, (double)plat_now_ms() - t0,
-             ok ? "wrote" : prep_gave_up ? "gave up (no working translator), not writing"
-             : too_many ? "too many failed, not writing" : "cannot write", out);
+             ok ? "wrote" : prep_gave_up || !u ? "gave up (no working translator), not writing" : "cannot write", out);
     rt_log("%s", msg);
     if (!background) printf("%s\n", msg);   // xcx.exe --prepare-shaders reports on the console
     free(file), free(recs), free(iid), free(ab);
@@ -2120,19 +2144,19 @@ static int prepared_current(const char *dir) {
     key_hex(xlate_id, hex);
     int same = f && n == 64 && !memcmp(f, hex, 64);
     free(f);
-    if (same) {   // the translations too: a shader cache deleted by hand leaves the list behind. Of the first, middle and
-        // last record, at least one must have its stored inputs: this check runs at every start, so it only catches a
-        // cache that is gone (installer/shaders.py prepared_intact, the setup's stricter rule: half or more present)
+    if (same) {   // the translations too: a shader cache deleted by hand leaves the list behind. Of up to 64 records
+        // spread over the list (first and last included), half or more must have their stored inputs, the setup's
+        // rule (installer/shaders.py prepared_intact) on a sample: this check runs at every start
         uint8_t *b = NULL;
         size_t len = 0;
         int ok = rec_read(prp, PRP_MAGIC, PRP_VERSION, PRP_REC, &b, &len) && len >= PRP_REC;
-        size_t k = len / PRP_REC, pick[3] = {0, k / 2, k ? k - 1 : 0};
-        same = 0;
-        for (int i = 0; i < 3 && ok && !same; i++) {
+        size_t k = len / PRP_REC, picks = k < PREP_SAMPLE ? k : PREP_SAMPLE, have = 0;
+        for (size_t i = 0; ok && i < picks; i++) {
             char p[PATH_CAP + 80];
-            in_path(b + pick[i] * PRP_REC + 4, p);
-            same = file_exists(p);
+            in_path(b + (picks > 1 ? i * (k - 1) / (picks - 1) : 0) * PRP_REC + 4, p);
+            have += file_exists(p);
         }
+        same = ok && have * 2 >= picks;
         free(b);
         if (!same) rt_log("gfx_shader: %s names translations the shader cache no longer has; preparing again", prp);
     }

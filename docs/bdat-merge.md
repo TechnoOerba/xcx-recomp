@@ -124,7 +124,11 @@ the cache with their quick note, so the next start uses them as they are. **Merg
 (xcx.ini `bdat_merge_auto`) does the same by itself 1.5 s after the last change. **Revert to the start-up list**
 writes the list back as the game started with it, and **Restart now** starts a new copy of the game that waits for
 this one to close, then closes it; in the world (a save loaded or a new game started, not at the title screen) it asks
-first, since anything since the last save would be lost.
+first, since anything since the last save would be lost. The new copy gets the old one's process id in the environment
+variable `XCX_RESTART_AFTER` (`rt_restart_game`, `runtime/main.c`) and, before it claims memory, files or the window,
+waits up to two minutes for that process to close, then removes the variable so nothing it starts inherits it. If the
+old game hasn't closed by then, the new copy says so in a message box and doesn't start, so two games never run on one
+save. A second press while the window closes starts nothing more.
 
 To find these changes, mod files are looked at only when the list changes, when the library updates a mod, when a
 merge is made ahead, and while the Mods tab is open (one look for all its rows, once a second, four times a second while

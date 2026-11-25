@@ -105,7 +105,9 @@ Setup's look (`installer/theme.py`) takes the colours of the F1 menu (`runtime/u
      the window shows the time left). A rerun with the list already there only refills the driver's cache
      (`xcx.exe --warm-shaders`, seconds);
    - **background** (the command line's default, as for a launcher): only the seed; the game prepares it at its next
-     start while it runs and shows its progress in a corner (`shader_prepare` in `xcx.ini`);
+     start while it runs and shows its progress in a corner (`shader_prepare` in `xcx.ini`, default 1; the threads it
+     uses are `shader_prepare_threads`, 1 to 16, default an eighth of the CPU threads, 1 to 4; both apply at the next
+     start);
    - **off**: no seed (an earlier one is removed); the game translates each shader when it first meets it.
 
    A new seed or another translator deletes `shader-prepared.bin` and `shader-prepared.id`, and the game also

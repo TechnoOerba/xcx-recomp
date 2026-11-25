@@ -93,9 +93,15 @@ what is in `mods/`:
   from a console, as the window does.
 - Archives: zip through Python's `zipfile`, RAR 4 and 5 through `bin/xcx-unpack` (`installer/unpack.c` over the RAR
   readers of libarchive, pinned in `deps/libarchive/`, built by `tools/build_unpack.py` in both release scripts; a
-  checkout builds it into `build/unpack/` on first use). 7z is recognised and named, not read. Every entry is checked
+  checkout builds it into `build/unpack/` on first use). 7z is recognized and named, not read. Every entry is checked
   before anything is written: links, devices, password-protected files and paths that leave the folder stop the
   install.
+- `tools/check_libarchive_pins.py` checks `deps/libarchive/` against libarchive's own release: it downloads the
+  release named in `deps/libarchive/pins.json` (or reads one given with `--archive FILE`), checks the archive's
+  SHA-256, then compares every pinned file byte for byte. The mod tests workflow runs it. `--update VERSION --sha256
+  HASH` moves to another release: it copies the same files from it and writes `pins.json` again. Take that hash from
+  what libarchive publishes for the release (its release page or the signed `.asc`), never from the downloaded file,
+  since it is the one value the script trusts; the reviewer compares it with libarchive's.
 - An archive without a `romfs/` folder is read by `installer/mod_layout.py`: with the install's game files at hand
   (`installer/game_paths.py`: the loose files of `romfs/index.json` and the path hashes of `sts.arh`, XXH64 of
   `/<path>` as the runtime looks them up), it tries each folder of the archive as the top of the game's folders and

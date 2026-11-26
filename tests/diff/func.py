@@ -2,7 +2,8 @@
 same function from its entry until it returns.
 
 Picks functions from the ExeFS modules: no branches out of the function, no SVC, BRK, system register, exclusive or
-atomic instructions; with conditional branches, and loops, jump tables, SIMD and calls where the module has them.
+atomic instructions, no runtime hook of a verified build (RUNTIME_HOOK); with conditional branches, and loops, jump
+tables, SIMD and calls where the module has them.
 Emits them with the generator's own Emitter, compiles them with tests/diff/harness.c, and runs each from random
 states: x0-x7 point into the scratch buffer (or hold small integers), the buffer holds pointers into itself and random
 data, SP sits near the buffer's top and LR is a sentinel address. Unicorn (Cortex-A57) stops when PC reaches the
@@ -25,6 +26,7 @@ import argparse
 import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import time
@@ -46,6 +48,11 @@ SENTINEL = 0x7210000000  # LR on entry; never executed
 PTR_LO, PTR_HI = BUF + 0x8000, BUF + 0x28000
 STACK_TOP = BUF + 0x3F000
 MIN_INSNS, MAX_INSNS = 6, 600
+# Calls the generator adds into some functions of a verified build (recomp/appendage.py, romfs_mods.py, mod_state.py,
+# mod_menu.py): they run runtime code the harness doesn't have and change the function on purpose, so a function that
+# carries one is left out.
+RUNTIME_HOOK = re.compile(r'\b(appendage_glyph_\w+|romfs_mod_declines|rt_mod_menu_\w+|'
+                          r'mod_(flag_get|flag_set|reward_begin|reward_test|reward_claim))\(')
 
 
 FNV = 0x100000001B3
@@ -173,6 +180,8 @@ def check_function(emitter, entry, end):
                 return None
     if simd_mask(mod.words[(entry - mod.lo) >> 2:(end - mod.lo) >> 2]).any():
         tags.add('simd')
+    if any(RUNTIME_HOOK.search(line) for line in emitter.function(entry, end)[0]):
+        return None
     return tags
 
 

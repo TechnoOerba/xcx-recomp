@@ -364,3 +364,67 @@ class ModState(unittest.TestCase):
 
 if __name__ == '__main__':
     sys.exit(unittest.main())
+
+
+@unittest.skipUnless(clang(), 'needs clang (MSYS2 UCRT64)')
+class RuntimeValues(ModState):
+    """Runtime values and features (mod_state.h): a built-in feature shipped as an opt-in mod."""
+
+    def setUp(self):
+        super().setUp()
+        self.mod('extras', {'id': 'extras', 'version': '1', 'features': ['example.extra-rules']})
+        self.enable('isle', 'extras')
+
+    def test_a_feature_is_on_with_its_mod(self):
+        out = self.run_script('feature example.extra-rules', 'feature other')
+        self.assertEqual(self.answers(out, 'feature'), [['1', 'extras'], ['0', '-']])
+        self.enable('isle')
+        out = self.run_script('feature example.extra-rules')
+        self.assertEqual(self.answers(out, 'feature'), [['0', '-']])
+
+    def test_values_are_kept_per_save_under_their_owner(self):
+        self.run_script('owner core-feature', 'vset core-feature score/4 9500', 'vset extras tier/4 3',
+                        'vset gone nope 1', *self.save())
+        st = self.state()
+        self.assertEqual(st['mods']['core-feature']['values'], {'score/4': 9500})
+        self.assertEqual(st['mods']['extras']['values'], {'tier/4': 3})
+        self.assertEqual(st['mods']['extras']['flags'], {})
+        self.assertNotIn('values', st['mods']['isle'])   # a mod without values gets the section it always had
+        self.assertNotIn('gone', st['mods'])             # an owner that is neither on nor registered keeps nothing
+        out = self.run_script('owner core-feature', *self.load(), 'present 10', 'vget core-feature score/4',
+                              'vget extras tier/4', 'vget core-feature none', 'loads')
+        self.assertEqual(self.answers(out, 'vget'), [['1', '9500'], ['1', '3'], ['0', '0']])
+        self.assertEqual(self.answers(out, 'loads'), [['1', '1']])
+
+    def test_a_runtime_owner_not_registered_is_kept_as_it_was(self):
+        self.run_script('owner core-feature', 'vset core-feature round 2968', *self.save())
+        self.run_script(*self.load(), 'present 10', *self.save())   # a build without the feature: section kept
+        self.assertEqual(self.state()['mods']['core-feature']['values'], {'round': 2968})
+
+    def test_values_of_a_mod_that_is_off_stay_dormant(self):
+        self.run_script('vset extras tier/1 4', *self.save())
+        self.enable('isle')
+        out = self.run_script(*self.load(), 'present 10', 'vget extras tier/1', 'vset extras tier/1 9', *self.save())
+        self.assertEqual(self.answers(out, 'vget'), [['0', '0']])
+        self.assertEqual(self.state()['mods']['extras']['values'], {'tier/1': 4})
+        self.enable('isle', 'extras')
+        out = self.run_script(*self.load(), 'present 10', 'vget extras tier/1')
+        self.assertEqual(self.answers(out, 'vget'), [['1', '4']])
+
+    def test_another_save_brings_its_own_values(self):
+        self.run_script('owner core-feature', 'vset core-feature round 1', *self.save('gamedata01', 1000))
+        self.run_script('owner core-feature', 'vset core-feature round 2', *self.save('gamedata02', 2000))
+        out = self.run_script('owner core-feature', *self.load('gamedata02', 2000), 'present 10', 'vget core-feature round',
+                              *self.load('gamedata01', 1000), 'present 10', 'vget core-feature round', 'loads')
+        self.assertEqual(self.answers(out, 'vget'), [['1', '2'], ['1', '1']])
+        self.assertEqual(self.answers(out, 'loads'), [['2', '1']])
+
+    def test_not_current_while_a_load_waits(self):
+        out = self.run_script('owner core-feature', 'loads', *self.save(), 'loads', 'title', 'read gamedata01', 'loads')
+        self.assertEqual(self.answers(out, 'loads'), [['0', '0'], ['0', '1'], ['0', '0']])
+
+
+# RuntimeValues reuses ModState's helpers, not its tests (its mods folder is another).
+for _name in [n for n in dir(ModState) if n.startswith('test_')]:
+    if _name not in RuntimeValues.__dict__:
+        setattr(RuntimeValues, _name, None)

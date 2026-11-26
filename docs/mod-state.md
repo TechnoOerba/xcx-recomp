@@ -75,6 +75,27 @@ to `state-<slot>.json.bad`, so it is never overwritten; the log says so.
   the party in the sea or a void; the party is moved to that spot instead (all four positions of the game data, before
   the world loads them), and the log says so.
 
+## Features of the runtime that mods switch on
+
+The same file can hold state for the runtime's own features, so a feature built into the recomp can ship as a mod
+that a player turns off like any other:
+
+- **Features.** A mod's `mod.json` may name features, for example `"features": ["example.extra-rules"]` (ids follow
+  the mod id rule, up to 8). A feature is on while an enabled mod names it. If several do, the one highest in the
+  priority list owns it (`mod_state_feature` in `runtime/mod_state.h`). The mod needs no game files. To tune the
+  feature, it can change the game tables the feature reads, which the bdat merge combines like any other change
+  ([bdat-merge.md](bdat-merge.md)).
+- **Values.** Runtime code keeps per-save numbers of its own in a `values` object inside a section
+  (`mod_state_value`, `mod_state_set_value`), in one of two places:
+  - Under the id of the mod that turns the feature on. While that mod is off, the values stay dormant like its flags,
+    and they come back when it is on again.
+  - Under a runtime owner the code registers (`mod_state_owner`), whose section is always read.
+
+  A section without values is written exactly as before. A build without the feature keeps the section as it was.
+- **Loads.** `mod_state_loads()` changes each time the state is replaced: a slot loaded, another save or a New Game,
+  or mods switched. `mod_state_current()` is 1 only while the state belongs to the save the game holds. So a feature
+  reads its values again after each load, and it writes nothing while a load is under way.
+
 ## Setting
 
 `mod_state` in `xcx.ini` (`[files]`), or `XCX_MOD_STATE`: `1` (default) on, `0` off (any other value is on). Off,

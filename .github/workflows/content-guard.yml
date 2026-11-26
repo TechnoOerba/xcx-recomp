@@ -13,3 +13,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tools/check_content.py
+      # The map regions' hook sites and panel layouts (no game files). The layout test skips itself without clang; here
+      # that would be a pass that tested nothing, so any skip fails the job.
+      - name: Regions tests
+        env:
+          XCX_CLANG: clang
+        run: |
+          clang --version
+          for t in tests/hook_sites_test.py tests/region_layout_test.py; do
+            python "$t" -v 2>&1 | tee test.log
+            test "${PIPESTATUS[0]}" -eq 0
+            if grep -E "\.\.\. skipped|skipped=" test.log; then echo "::error::$t skipped tests"; exit 1; fi
+          done

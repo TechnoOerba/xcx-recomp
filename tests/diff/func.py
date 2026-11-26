@@ -49,10 +49,10 @@ PTR_LO, PTR_HI = BUF + 0x8000, BUF + 0x28000
 STACK_TOP = BUF + 0x3F000
 MIN_INSNS, MAX_INSNS = 6, 600
 # Calls the generator adds into some functions of a verified build (recomp/appendage.py, romfs_mods.py, mod_state.py,
-# mod_menu.py): they run runtime code the harness doesn't have and change the function on purpose, so a function that
-# carries one is left out.
+# regions.py, mod_menu.py): they run runtime code the harness doesn't have and change the function on purpose, so a
+# function that carries one is left out.
 RUNTIME_HOOK = re.compile(r'\b(appendage_glyph_\w+|romfs_mod_declines|rt_mod_menu_\w+|'
-                          r'mod_(flag_get|flag_set|reward_begin|reward_test|reward_claim))\(')
+                          r'mod_(flag_get|flag_set|reward_begin|reward_test|reward_claim)|region_\w+)\(')
 
 
 FNV = 0x100000001B3

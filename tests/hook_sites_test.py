@@ -1,4 +1,4 @@
-"""The generator's hook modules (recomp/mod_state.py): every site a hook changes is checked.
+"""The generator's hook modules (recomp/mod_state.py, recomp/regions.py): every site a hook changes is checked.
 
 A hook module adds C at chosen addresses of one build. Its verified() compares an instruction word at each listed
 address with the build's, so a hook on a moved or different instruction stops the generation instead of running.
@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'recomp'))
 
 import mod_state  # noqa: E402
+import regions  # noqa: E402
 
 BASE = 0x7000000000
 
@@ -94,6 +95,10 @@ class HookSites(unittest.TestCase):
     def test_mod_state(self):
         self.check(mod_state)
         self.mismatch(mod_state)
+
+    def test_regions(self):
+        self.check(regions)
+        self.mismatch(regions)
 
 
 if __name__ == '__main__':

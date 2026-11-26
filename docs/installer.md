@@ -81,6 +81,9 @@ what is in `mods/`:
   copy, the higher mod winning where two change the same thing; the rules are in [bdat-merge.md](bdat-merge.md). The
   merged file and a report of every change left out or settled by priority go to `<profile>/bdat-merge/`, and the
   Mods tab shows them; `tests/bdat_merge_test.py` covers the rules.
+- A mod that changes the world map ships only the pieces it changed, in `romfs/map/ma9990.pieces/`; the game puts the
+  map together from its own files and every enabled mod's pieces, the higher mod winning where two change the same
+  entry: [map-mods.md](map-mods.md).
 
 Saves are never touched. The game uses a game-file mod's copy the next time it loads the file, so data read at
 start-up (the bdat tables) needs a restart.

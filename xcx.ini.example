@@ -258,6 +258,10 @@
 [files]
 # Folder with RomFS mod files that replace or add game files. Default: none.
 # romfs_mods =
+# The flags and survey reward marks of game-file mods, kept in mods/state-<slot>.json inside the save folder instead of
+# in the game's save (docs/mod-state.md). 0 turns this off: mods' flag ids then reach the game's own flag storage.
+# Default: 1. Read once at start.
+# mod_state = 1
 
 [diagnostics]
 # Extra lines in the log, comma separated: svc, host, ipc, fs, gfx, perf, sched, audio, present or all. The menu's

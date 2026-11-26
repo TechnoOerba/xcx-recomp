@@ -79,6 +79,9 @@ what is in `mods/`:
 Saves are never touched. The game uses a game-file mod's copy the next time it loads the file, so data read at
 start-up (the bdat tables) needs a restart.
 
+Game-file mods keep their own flags and survey reward marks in a file next to each save slot, never in the game's
+save: [mod-state.md](mod-state.md).
+
 The game's F1 menu has the same manager on its **Mods** tab (`runtime/mod_library.c`: WinHTTP downloads on Windows,
 curl on Linux, `runtime/mod_zip.c` unpacks), with the same checks and folder layout. Both write
 `mods/<id>/library.ini` (name, author, version, kind), so each sees the other's installs and updates.

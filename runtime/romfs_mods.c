@@ -108,7 +108,11 @@ static int valid_id(const char *id, size_t n) {
 }
 
 // Rebuilds the file map from the list file's text (NUL-terminated).
+static uint32_t generation;   // bumped at each rebuild: the enabled list changed, or a mod was updated in place
+static int watch_scene;       // the scene is followed even with no mod file enabled (mod_state.c has a mod.json mod)
+
 static void rebuild(const char *list) {
+    __atomic_add_fetch(&generation, 1, __ATOMIC_RELAXED);
     Walk w = {0};
     int mods = 0;
     char line[256];
@@ -224,14 +228,29 @@ static int guest_string(uint64_t p, char *out, size_t cap) {
     return n >= 2 && n < cap - 1;
 }
 
+// The scene, from what the game loads (while a mod is enabled): the title screen's scene (ev/title/) at boot and at each
+// return to the title; the world's map information and collision once a save is loaded or a new game started.
+static int at_title;            // the last of those was a title file
+static uint32_t world_loads;    // world files loaded after a title file: one per load of the world
+int romfs_mods_at_title(void) { return __atomic_load_n(&at_title, __ATOMIC_RELAXED); }
+uint32_t romfs_mods_world_loads(void) { return __atomic_load_n(&world_loads, __ATOMIC_RELAXED); }
+
 uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     maybe_reload();
-    if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED)) return list;
+    int files = __atomic_load_n(&nfiles, __ATOMIC_RELAXED) != 0;
+    if (!files && !__atomic_load_n(&watch_scene, __ATOMIC_RELAXED)) return list;   // no mods: the game's path as it is
     // One entry, then the empty string that ends the list. Thread-local: the archive walks it right away on this thread.
     static __thread char one[1026];
     char raw[1024];
     if (!guest_string(path, raw, sizeof raw)) return list;
-    if (!make_key(raw, one, sizeof one - 1) || !lookup(one, NULL, 0)) return list;
+    if (!make_key(raw, one, sizeof one - 1)) return list;
+    if (!strncmp(one, "ev/title/", 9)) {
+        __atomic_store_n(&at_title, 1, __ATOMIC_RELAXED);
+    } else if ((!strcmp(one, "gimmick/world_info.bin") || !strncmp(one, "map/mapcoli/", 12)) &&
+               __atomic_exchange_n(&at_title, 0, __ATOMIC_RELAXED)) {
+        __atomic_add_fetch(&world_loads, 1, __ATOMIC_RELAXED);
+    }
+    if (!files || !lookup(one, NULL, 0)) return list;
     one[strlen(one) + 1] = 0;
     if (__atomic_fetch_add(&claim_logs, 1, __ATOMIC_RELAXED) < 64) rt_log("romfs mods: %s from a mod", one);
     return (uint64_t)(uintptr_t)one;
@@ -274,7 +293,12 @@ static int read_enabled(char (*ids)[65], int cap) {
 
 const char *romfs_mods_dir(void) { return mods_root() ? root : NULL; }
 
+int romfs_mods_enabled(char (*ids)[65], int cap) { return mods_root() ? read_enabled(ids, cap) : 0; }
+uint32_t romfs_mods_generation(void) { return __atomic_load_n(&generation, __ATOMIC_RELAXED); }
+void romfs_mods_watch_scene(int on) { if (on) __atomic_store_n(&watch_scene, 1, __ATOMIC_RELAXED); }
+
 void romfs_mods_reload(void) {
+    __atomic_add_fetch(&generation, 1, __ATOMIC_RELAXED);
     plat_mutex_lock(&check_lock);
     list_len_seen = -2;   // rebuilt from the list at the next check even when its bytes are the same
     plat_mutex_unlock(&check_lock);

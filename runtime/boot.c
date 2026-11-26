@@ -18,6 +18,7 @@
 #include "cheats.h"
 #include "fs.h"
 #include "gfx.h"
+#include "mod_state.h"
 #include "nvn_api.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -363,6 +364,7 @@ void rt_frame_presented(const tex_t *t, uint64_t n) {
     rt_grass_update();
     rt_objlod_update();
     rt_crowd_update();
+    mod_state_update();   // a save the game loaded: its mods' state (runtime/mod_state.c)
     int64_t w = cfg->seconds ? frame_step_world_us() : -1;
     if (w < 0 || (double)w < cfg->seconds * 1e6) return;
     if (cfg->shot) save_shot(t, cfg->shot);

@@ -13,6 +13,18 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path);
 // 0 when none.
 int romfs_mod_file(const char *path, char *out, size_t cap);
 
+// The scene, from the files the game loads while a mod is enabled (runtime/mod_state.c reads it): 1 when the title
+// screen's files (ev/title/) came after the world's last (gimmick/world_info.bin, map/mapcoli/); and how many times the
+// world loaded after the title.
+int romfs_mods_at_title(void);
+uint32_t romfs_mods_world_loads(void);
+// The enabled mods' ids as this file reads romfs-enabled.txt (valid ids, in order, without repeats; each 65 bytes); how
+// many. A generation bumped whenever the list changed or a mod was updated in place. And, once any mod declares state
+// (runtime/mod_state.c), the scene above is followed even while no mod has files on.
+#define ROMFS_MODS_MAX 32
+int romfs_mods_enabled(char (*ids)[65], int cap);
+uint32_t romfs_mods_generation(void);
+void romfs_mods_watch_scene(int on);
 // The mods folder (XCX_MOD_DIR, else "mods" beside xcx.exe); NULL when there is none.
 const char *romfs_mods_dir(void);
 // Rebuilds the file map at the next lookup, for a mod whose files changed (an update) while its id stayed listed.

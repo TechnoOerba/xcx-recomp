@@ -53,6 +53,7 @@ sys.path.insert(0, str(ROOT / 'recomp'))
 import flags  # noqa: E402
 import appendage  # noqa: E402
 import romfs_mods  # noqa: E402
+import mod_state  # noqa: E402
 import jumptables  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
@@ -237,6 +238,7 @@ class Emitter:
         self.mod = mod
         self.appendage = appendage.verified(mod)
         self.romfs_mods = romfs_mods.verified(mod)
+        self.mod_state = mod_state.verified(mod)
         self.starts = starts
         self.patched = patched or {}   # {address: (set index, [replacement words])} (recomp/patches.py)
         self.spins = spins or {}       # {spin wait back-edge: its head} (recomp/patches.py `spin`)
@@ -465,6 +467,8 @@ class Emitter:
             out = [f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)});']
             if self.appendage and (hook := appendage.entry(mod, entry)):
                 out.append('    ' + hook)
+            if self.mod_state and (hook := mod_state.entry(mod, entry)):
+                out.append('    ' + hook)
             if fp.used:
                 out.append('    ' + fp.decl())
 
@@ -578,6 +582,8 @@ class Emitter:
                 emit(i, '    ' + op(i, ins.code))
                 if self.romfs_mods and (hook := romfs_mods.after(mod, a)):
                     emit(i, '    ' + hook)   # read and written through the register planner, like the op
+                if self.mod_state and (hook := mod_state.after(mod, a)):
+                    emit(i, '    ' + hook)
             elif k == 'trap':
                 emit(i, f'    {spill}{fx(i, ins.code)}')
             elif k in ('b', 'bcond'):
@@ -646,6 +652,8 @@ def chunk_text(name, number, emitter, fns):
     hook_header = '#include "appendage_glyph.h"\n' if any('appendage_glyph_' in s for s in body) else ''
     if any('romfs_mod_declines' in s for s in body):
         hook_header += '#include "romfs_mods.h"\n'
+    if any(re.search(r'\bmod_(flag_get|flag_set|reward_begin|reward_test|reward_claim)\(', s) for s in body):
+        hook_header += '#include "mod_state.h"\n'
     return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n' + hook_header + '\n' + protos + '\n'
             + '\n\n'.join(body) + '\n')
 

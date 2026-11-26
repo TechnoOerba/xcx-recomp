@@ -24,6 +24,7 @@
 
 #include "fs.h"
 #include "host.h"
+#include "mod_state.h"
 #include "platform/platform.h"
 #include "romfs_mods.h"
 #include "romfs_path.h"
@@ -40,7 +41,9 @@ enum { M_FREE, M_SAVE, M_TEMP, M_CACHE, M_SAVE_RO, M_AOC };   // M_SAVE: the wor
                                                               // save; M_AOC: add-on content (read-only)
 
 typedef struct { int kind; char name[32]; char root[1024]; } Mount;
-typedef struct { PlatFile *h; int mode, save; } File;   // h NULL = free; save: on a save-data mount
+// h NULL = free; save: on a save-data mount; slot/slot_size: a save slot's data file opened for reading, whose read
+// to the end tells runtime/mod_state.c that the game is loading that slot
+typedef struct { PlatFile *h; int mode, save; char slot[MOD_STATE_SLOT_MAX]; int64_t slot_size; } File;
 typedef struct { char *name; int kind; uint64_t size; } Listed;
 typedef struct { Listed *e; int n, next, mode, used; } Dir;   // the directory's entries at open; used 0 = free
 
@@ -617,6 +620,7 @@ static uint32_t save_commit(void) {
     // Hard links to the committed save only while the thread leaves it alone: one applying a commit in place
     // replaces its files under the comparison.
     const char *base = !commit_pending && exists(save_root) ? save_root : NULL;
+    mod_state_before_commit(work_root);   // the mods' state of the slots written, committed with them
     if (remove_tree(next_root) || copy_tree(work_root, next_root, base, 0, &nfiles, &linked, &bytes)) {
         rt_log("fs: save commit: copying the working copy failed (system error %u); committed save unchanged",
                plat_fs_os_error());
@@ -651,6 +655,7 @@ static void storage_init(void *param) {
                   (unsigned long long)uid[0]) < (int)sizeof save_root, "save path");
     need(snprintf(tx_root, sizeof tx_root, "%s/save-tx", profile) < (int)sizeof tx_root, "save path");
     snprintf(work_root, sizeof work_root, "%s/work", tx_root);
+    mod_state_set_save_dir(work_root);   // where the game reads its save: the working copy
     snprintf(backup_root, sizeof backup_root, "%s/save-backup", profile);
     make_dirs(tx_root);
     make_dirs(backup_root);
@@ -975,18 +980,25 @@ static uint32_t open_file(uint64_t *out, const char *path, int mode) {
     if (plat_fs_kind(p) != PLAT_FS_FILE) return FS_R_PATH_NOT_FOUND;
     if ((kind == M_SAVE_RO || kind == M_AOC) && (mode & FS_OPEN_WRITE)) return FS_R_UNSUPPORTED_OPEN;
     int save_writer = kind == M_SAVE && (mode & FS_OPEN_WRITE);
+    // A save slot's data file (gamedata01, ..., gamedataa): its mod state goes with it (runtime/mod_state.c)
+    const char *base = strrchr(p, '/');
+    base = base ? base + 1 : p;
+    int slot = (kind == M_SAVE || kind == M_SAVE_RO) && mod_state_slot_file(base);
+    int64_t slot_size = slot && !(mode & FS_OPEN_WRITE) ? plat_file_size(p) : 0;
     int err = 0;
     PlatFile *f = plat_fs_open(p, (mode & FS_OPEN_WRITE) != 0, &err);
     if (!f) return fs_result(err);
     plat_mutex_lock(&lock);
     for (int i = 0; i < NFILES; i++)
         if (!files[i].h) {
-            files[i] = (File){f, mode, save_writer};
+            files[i] = (File){f, mode, save_writer, {0}, slot_size};
+            if (slot_size > 0) snprintf(files[i].slot, sizeof files[i].slot, "%s", base);
             *out = FILE_BASE + (uint64_t)i;
             plat_mutex_unlock(&lock);
             if (save_writer) {
                 plat_inc32(&save_writers);
                 save_touched();
+                if (slot) mod_state_slot_written(base);
             }
             return 0;
         }
@@ -1009,6 +1021,12 @@ static uint32_t read_file(uint64_t *out, uint64_t h, int64_t offset, void *buffe
         done += (uint64_t)n;
     }
     *out = done;
+    char slot[MOD_STATE_SLOT_MAX] = "";   // a save slot read to its end: the game is loading it (runtime/mod_state.c)
+    plat_mutex_lock_shared(&lock);
+    const File *file = &files[h - FILE_BASE];
+    if (file->h == f && file->slot[0] && (int64_t)((uint64_t)offset + done) >= file->slot_size) memcpy(slot, file->slot, sizeof slot);
+    plat_mutex_unlock_shared(&lock);
+    if (slot[0]) mod_state_save_read(slot);
     return 0;
 }
 

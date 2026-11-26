@@ -24,6 +24,9 @@ jobs:
           clang --version
           python tests/day_length_test.py -v
           python tests/menu_text_test.py -v
+      # xcx.ini.example and cfg.c's section table agree on every key's section. No game files.
+      - name: Example ini sections test
+        run: python tests/ini_sections_test.py -v
       # The game side of Day length and of Dawn and dusk / Night darkness, which only the whole game build links.
       # -Wno-bitwise-instead-of-logical: Ubuntu's clang warns on runtime/simd_fp.h (macro FOK, through host.h).
       - name: Compile the Day and night runtime files

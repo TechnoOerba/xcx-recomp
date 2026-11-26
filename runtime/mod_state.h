@@ -44,3 +44,23 @@ void mod_state_set_save_dir(const char *save_dir);
 // Every present: loads the mod state of a slot the game loaded, follows mods switched on or off, and samples the spot
 // to return to when a save made on a mod's land loads with that mod off.
 void mod_state_update(void);
+
+// ---- Runtime values and features
+// For the runtime's own features (not game-file mods): numbers kept per save in the same file, and features a mod
+// turns on by naming them in its mod.json ("features": ["example.extra-rules"], ids by the mod id rule). This is
+// how a feature built into the runtime is shipped as an opt-in mod: its code is here, a mod switches it on (and may
+// tune it through the game's tables, bdat-merge.md), and its numbers live in that mod's section of the file, so they
+// stay dormant while the mod is off and come back with it.
+int mod_state_on(void);   // 0 with XCX_MOD_STATE=0: then nothing below keeps anything
+// A runtime owner: its section ("values") is read and written whatever mods are on. Call before the first load.
+void mod_state_owner(const char *id);
+// 1 when an enabled mod names this feature (the top one by priority), its id into owner.
+int mod_state_feature(const char *feature, char *owner, size_t cap);
+// A runtime value of an owner (an enabled mod or a runtime owner) in the state of the save the game holds; names are
+// at most 95 bytes, no quote, backslash or control character. Setting one for an owner that is off does nothing.
+int mod_state_value(const char *owner, const char *name, uint32_t *v);
+void mod_state_set_value(const char *owner, const char *name, uint32_t v);
+// Bumped each time the state is replaced (a slot loaded, another save or a New Game, mods switched): read the values
+// again. mod_state_current: 1 while the state is the one of the save the game holds (0 during a load and before it).
+uint32_t mod_state_loads(void);
+int mod_state_current(void);

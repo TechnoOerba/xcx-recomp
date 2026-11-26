@@ -31,6 +31,11 @@
 //   ("regions" in mod.json). A save made on a mod's land and loaded with that mod off would put the player in the
 //   sea or a void; the party is moved to that last position instead.
 //
+// - For the runtime (mod_state.h, "Runtime values and features"): a mod's mod.json may name features ("features":
+//   ["example.extra-rules"]) that runtime code turns on while that mod is enabled, and runtime code keeps
+//   numbers of its own per save ("values" in a section): under such a mod's id (dormant with the mod, like its flags),
+//   or under a runtime owner that is always read (mod_state_owner).
+//
 // XCX_MOD_STATE=0 turns it all off (mod ids then reach the game's storage, as without this file).
 #include "mod_state.h"
 #include "cfg.h"
@@ -55,11 +60,17 @@
 #define NEW_GAME_MS 2000      // how long a save time must differ, with no save behind it, to count as another save
 #define SAMPLE_MS 500         // between samples of the spot outside mod land, and checks of the enabled mods
 #define MAX_REGIONS 16      // regions per mod in mod.json
+#define MAX_FEATURES 8      // features per mod in mod.json
+#define MAX_OWNERS 8        // runtime owners (mod_state_owner)
 
-enum { K_FLAG, K_REWARD };
+enum { K_FLAG, K_REWARD, K_VALUE };
 typedef struct { char owner[64], name[96]; uint8_t kind; uint32_t type, id; } Decl;   // a mod.json entry
-typedef struct { char id[64], version[32]; uint32_t regions[MAX_REGIONS]; int nregions; } Mod;
-typedef struct { char owner[64], name[96]; uint32_t value, gen; } Value;              // a stored value
+typedef struct {
+    char id[64], version[32], features[MAX_FEATURES][64];
+    uint32_t regions[MAX_REGIONS];
+    int nregions, nfeatures;
+} Mod;
+typedef struct { char owner[64], name[96]; uint32_t value, gen; uint8_t runtime; } Value;   // runtime: a K_VALUE
 typedef struct { char owner[64]; char *raw; } Raw;                                    // a section kept as it is
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
@@ -97,6 +108,9 @@ static uint32_t applied_world;  // romfs_mods_world_loads() when a slot's state 
 static int sample_outside;      // the last sample was outside mod land, at sample_pos
 static float sample_pos[3];
 static char save_dir[1100];
+static char runtime_owners[MAX_OWNERS][64];   // mod_state_owner: sections always read, whatever mods are on
+static int nruntime_owners;
+static uint32_t loads;          // bumped whenever the state is replaced (mod_state_loads)
 static _Thread_local uint32_t cur_reward;   // the mod reward row this thread's grant tested last (0: a game row)
 
 static int enabled(void) {
@@ -265,6 +279,13 @@ static const Mod *mod_on(const char *id) {
         if (!strcmp(mods[i].id, id)) return &mods[i];
     return NULL;
 }
+static int runtime_owner(const char *id) {
+    for (int i = 0; i < nruntime_owners; i++)
+        if (!strcmp(runtime_owners[i], id)) return 1;
+    return 0;
+}
+// An owner whose section is read as values: an enabled mod, or a runtime owner.
+static int owner_on(const char *id) { return mod_on(id) || runtime_owner(id); }
 static const Decl *decl_of(uint8_t kind, uint32_t type, uint32_t id) {
     for (int i = 0; i < ndecls; i++)
         if (decls[i].kind == kind && decls[i].id == id && (kind == K_REWARD || decls[i].type == type)) return &decls[i];
@@ -300,6 +321,15 @@ static void read_manifest(const char *folder) {
                 } while (!j.bad && jlit(&j, ','));
                 if (!j.bad && !jlit(&j, ']')) j.bad = 1;
             }
+        } else if (jeq(k, kn, "features") && jlit(&j, '[')) {
+            if (jlit(&j, ']')) continue;
+            do {
+                if (!jstr(&j, &s, &n)) break;
+                bad_name |= !mod_id_ok(s, n);
+                if (m.nfeatures < MAX_FEATURES) long_name |= !jcopy(m.features[m.nfeatures++], sizeof m.features[0], s, n);
+                else rt_log("mods: %s/mod.json: a feature left out (%d features at most)", folder, MAX_FEATURES);
+            } while (!j.bad && jlit(&j, ','));
+            if (!j.bad && !jlit(&j, ']')) j.bad = 1;
         } else if ((jeq(k, kn, "flags") || jeq(k, kn, "rewards")) && jlit(&j, '[')) {
             int reward = jeq(k, kn, "rewards");
             if (jlit(&j, ']')) continue;
@@ -357,8 +387,8 @@ static void read_manifest(const char *folder) {
         ndecls = before;
         return;
     }
-    rt_log("mods: %s (%s, version %s): %d flag(s) and reward(s) in the mod state, %d region(s)", m.id, folder,
-           m.version[0] ? m.version : "-", ndecls - before, m.nregions);
+    rt_log("mods: %s (%s, version %s): %d flag(s) and reward(s) in the mod state, %d region(s), %d feature(s)", m.id,
+           folder, m.version[0] ? m.version : "-", ndecls - before, m.nregions, m.nfeatures);
     mods = grow(mods, &capmods, nmods + 1, sizeof *mods);
     mods[nmods++] = m;
 }
@@ -410,6 +440,7 @@ static void val_put(const char *owner, const char *name, uint32_t v, uint32_t g)
         e = &vals[nvals++];
         snprintf(e->owner, sizeof e->owner, "%s", owner);
         snprintf(e->name, sizeof e->name, "%s", name);
+        e->runtime = 0;
     }
     e->value = v;
     e->gen = g;
@@ -530,7 +561,8 @@ static void write_values(Out *o, const char *owner, uint8_t kind, int indent) {
     char **names = NULL;
     int n = 0, cap = 0;
     for (int i = 0; i < nvals; i++) {
-        if (strcmp(vals[i].owner, owner) || is_reward_value(owner, vals[i].name) != (kind == K_REWARD)) continue;
+        if (strcmp(vals[i].owner, owner) || vals[i].runtime != (kind == K_VALUE)) continue;
+        if (kind != K_VALUE && is_reward_value(owner, vals[i].name) != (kind == K_REWARD)) continue;
         names = grow(names, &cap, n + 1, sizeof *names);
         names[n++] = vals[i].name;
     }
@@ -552,6 +584,12 @@ static void write_section(Out *o, const char *owner, const char *version, int in
     write_values(o, owner, K_FLAG, indent + 2);
     putf(o, ",\n%*s\"rewards\": ", indent + 2, "");
     write_values(o, owner, K_REWARD, indent + 2);
+    int any = 0;   // "values" only when there are some: a mod without them gets the file it always had
+    for (int i = 0; i < nvals && !any; i++) any = vals[i].runtime && !strcmp(vals[i].owner, owner);
+    if (any) {
+        putf(o, ",\n%*s\"values\": ", indent + 2, "");
+        write_values(o, owner, K_VALUE, indent + 2);
+    }
     putf(o, ",\n%*s\"version\": ", indent + 2, "");
     put_str(o, version);
     putf(o, "\n%*s}", indent, "");
@@ -587,7 +625,7 @@ static char *state_text(uint32_t save_time, const char *slot) {
         put_str(&o, own[i]);
         puts_(&o, ": ");
         const Mod *m = mod_on(own[i]);
-        if (kept && !m) puts_(&o, kept->raw);   // a mod that is off: its section as it was
+        if (kept && !owner_on(own[i])) puts_(&o, kept->raw);   // a mod that is off: its section as it was
         else write_section(&o, own[i], m ? m->version : "", 4);
     }
     free(own);
@@ -695,14 +733,17 @@ void mod_state_before_commit(const char *work_root) {
 }
 
 // ---- reading a state file
-static void read_values(J *j, const char *owner) {
+static void read_values(J *j, const char *owner, int runtime) {
     const char *k; int kn, first = 1;
     if (!jlit(j, '{')) { j->bad = 1; return; }
     while (!j->bad && jmember(j, &first, &k, &kn)) {
         char name[96];
         if (!jcopy(name, sizeof name, k, kn)) { j->bad = 1; return; }
         uint32_t v = jnum(j);
-        if (!j->bad && !val_of(owner, name)) val_put(owner, name, v, 0);   // what the game set since the load wins
+        if (!j->bad && !val_of(owner, name)) {   // what the game set since the load wins
+            val_put(owner, name, v, 0);
+            val_of(owner, name)->runtime = (uint8_t)runtime;
+        }
     }
 }
 
@@ -711,7 +752,8 @@ static void read_section(J *j, const char *owner) {
     const char *fk; int fkn, first = 1;
     if (!jlit(j, '{')) { j->bad = 1; return; }
     while (!j->bad && jmember(j, &first, &fk, &fkn)) {
-        if (jeq(fk, fkn, "flags") || jeq(fk, fkn, "rewards")) read_values(j, owner);
+        if (jeq(fk, fkn, "flags") || jeq(fk, fkn, "rewards")) read_values(j, owner, 0);
+        else if (jeq(fk, fkn, "values")) read_values(j, owner, 1);
         else jskip(j);   // version, and parts a newer runtime added: rebuilt per mod
     }
 }
@@ -767,7 +809,7 @@ static int read_state(const char *path, uint32_t g) {
                 if (!jcopy(owner, sizeof owner, mk, mkn)) { j.bad = 1; break; }
                 jws(&j);
                 const char *body = j.p;
-                if (!mod_on(owner) && strcmp(owner, "_undeclared")) {   // off: kept as it is
+                if (!owner_on(owner) && strcmp(owner, "_undeclared")) {   // off: kept as it is
                     jskip(&j);
                     if (!j.bad) keep_raw(owner, body, (size_t)(j.p - body));
                     continue;
@@ -839,6 +881,7 @@ static void apply_pending(uint64_t gd) {
     applied_world = romfs_mods_world_loads();
     int ok = read_state(path, load_gen);
     if (!ok) clear_state(load_gen);
+    loads++;
     stamp = now;
     differ_since = 0;
     int nmod = 0;
@@ -894,7 +937,7 @@ static void follow_enabled_list(char *list) {
             }
     for (int i = 0; i < nraws; i++) {
         if (!raws[i].owner[0]) continue;
-        if (!mod_on(raws[i].owner)) {   // off: its values now live in the kept section only
+        if (!owner_on(raws[i].owner)) {   // off: its values now live in the kept section only
             int n = 0;
             for (int v = 0; v < nvals; v++)
                 if (strcmp(vals[v].owner, raws[i].owner)) vals[n++] = vals[v];
@@ -910,6 +953,7 @@ static void follow_enabled_list(char *list) {
         nraws--;
         i--;
     }
+    loads++;   // a feature may have come or gone with its values
     rt_log("mods: the enabled mods changed: %d with a mod.json", nmods);
 }
 
@@ -981,6 +1025,7 @@ void mod_state_update(void) {
         } else if (now_ms - differ_since >= NEW_GAME_MS) {
             int had = active();
             clear_state(differ_gen);
+            loads++;
             if (had) rt_log("mods: the game holds another save (time %u, the state was for %u): the mod state starts empty", now,
                    stamp);
             stamp = now;
@@ -989,4 +1034,70 @@ void mod_state_update(void) {
         }
     }
     plat_mutex_unlock(&lock);
+}
+
+// ---- runtime values and features (mod_state.h)
+int mod_state_on(void) { return enabled(); }
+
+void mod_state_owner(const char *id) {
+    if (!id || !mod_id_ok(id, (int)strlen(id))) return;   // (may run before the settings are read)
+    plat_mutex_lock(&lock);
+    if (!runtime_owner(id) && nruntime_owners < MAX_OWNERS)
+        snprintf(runtime_owners[nruntime_owners++], sizeof runtime_owners[0], "%s", id);
+    plat_mutex_unlock(&lock);
+}
+
+int mod_state_feature(const char *feature, char *owner, size_t cap) {
+    if (!enabled() || !feature) return 0;
+    int found = 0;
+    plat_mutex_lock(&lock);
+    init_once();
+    for (int i = 0; i < nmods && !found; i++)   // mods in priority order: the top one that names it
+        for (int k = 0; k < mods[i].nfeatures && !found; k++)
+            if (!strcmp(mods[i].features[k], feature)) {
+                found = 1;
+                if (owner && cap) snprintf(owner, cap, "%s", mods[i].id);
+            }
+    plat_mutex_unlock(&lock);
+    return found;
+}
+
+int mod_state_value(const char *owner, const char *name, uint32_t *v) {
+    if (!enabled()) return 0;
+    plat_mutex_lock(&lock);
+    const Value *e = val_of(owner, name);
+    int ok = e && e->runtime;
+    if (ok && v) *v = e->value;
+    plat_mutex_unlock(&lock);
+    return ok;
+}
+
+void mod_state_set_value(const char *owner, const char *name, uint32_t v) {
+    if (!enabled() || !plain(name, (int)strlen(name)) || strlen(name) >= 96) return;
+    plat_mutex_lock(&lock);
+    init_once();
+    if (owner_on(owner)) {
+        Value *e = val_of(owner, name);
+        if (!e || e->value != v || !e->runtime) {
+            val_set(owner, name, v);
+            val_of(owner, name)->runtime = 1;
+        }
+    }
+    plat_mutex_unlock(&lock);
+}
+
+uint32_t mod_state_loads(void) {
+    plat_mutex_lock(&lock);
+    uint32_t n = loads;
+    plat_mutex_unlock(&lock);
+    return n;
+}
+
+int mod_state_current(void) {
+    if (!enabled()) return 0;
+    uint64_t gd = LD64(GAMEDATA_PTR);
+    plat_mutex_lock(&lock);
+    int cur = gd && held && LD32(gd + GD_SAVE_TIME) == stamp && !(pending[0] && pending_title) && !differ_since;
+    plat_mutex_unlock(&lock);
+    return cur;
 }

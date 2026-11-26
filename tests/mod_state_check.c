@@ -21,6 +21,11 @@
 //   fps <n>                  the presents' rate (60 at the start)
 //   sync                     prints "sync" (the test waits for it before it changes the mods folder)
 //   pos                      the party's positions in the game data: "pos x y z" (the first; all four must agree)
+//   owner <id>               a runtime owner (mod_state_owner)
+//   vset <owner> <name> <v>  a runtime value set (mod_state_set_value)
+//   vget <owner> <name>      a runtime value: "vget <found> <value>"
+//   feature <name>           "feature <found> <owner>" (mod_state_feature)
+//   loads                    "loads <mod_state_loads()> <mod_state_current()>"
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -162,7 +167,7 @@ int main(int argc, char **argv) {
     mod_state_set_save_dir(working);   // the game reads its save from the working copy
     char line[512];
     while (fgets(line, sizeof line, stdin)) {
-        char cmd[32] = "", a[128] = "";
+        char cmd[32] = "", a[128] = "", b[128] = "";
         unsigned long u1 = 0, u2 = 0, u3 = 0;
         float f1, f2, f3;
         Cpu c;
@@ -214,6 +219,20 @@ int main(int argc, char **argv) {
             step_ns = 1000000000ull / u1;
         } else if (!strcmp(cmd, "sync")) {
             printf("sync\n");
+        } else if (!strcmp(cmd, "owner") && sscanf(line, "%*s %127s", a) == 1) {
+            mod_state_owner(a);
+        } else if (!strcmp(cmd, "vset") && sscanf(line, "%*s %127s %127s %lu", a, b, &u1) == 3) {
+            mod_state_set_value(a, b, (uint32_t)u1);
+        } else if (!strcmp(cmd, "vget") && sscanf(line, "%*s %127s %127s", a, b) == 2) {
+            uint32_t v = 0;
+            int ok = mod_state_value(a, b, &v);
+            printf("vget %d %u\n", ok, v);
+        } else if (!strcmp(cmd, "feature") && sscanf(line, "%*s %127s", a) == 1) {
+            char o[64] = "-";
+            int ok = mod_state_feature(a, o, sizeof o);
+            printf("feature %d %s\n", ok, o);
+        } else if (!strcmp(cmd, "loads")) {
+            printf("loads %u %d\n", mod_state_loads(), mod_state_current());
         } else if (!strcmp(cmd, "pos")) {
             float v[4][3];
             for (int p = 0; p < 4; p++) memcpy(v[p], gamedata + GD_POSITION + 16 * p, sizeof v[p]);

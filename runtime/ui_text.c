@@ -173,6 +173,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RAIN_DROPLETS_DESC] = "In rain the game draws round droplets just in front of the camera. They follow your "
                                    "view and land on distant ledges as big blobs. Off hides them; the falling rain and "
                                    "the splashes on the ground near you stay. Applies at once.",
+    [UI_MENU_AO] = "Ambient occlusion",
+    [UI_MENU_AO_DESC] = "The soft shading where surfaces meet: in corners, under ledges, in grass and leaves. Original "
+                        "is the game's (soft halos). Light is sharper, in creases only; Medium adds broad shade under "
+                        "bushes and foliage; Strong deepens it at full size, at some GPU cost. Applies at once.",
+    [UI_MENU_AO_ORIGINAL] = "Original", [UI_MENU_AO_LIGHT] = "Light", [UI_MENU_AO_MEDIUM] = "Medium", [UI_MENU_AO_STRONG] = "Strong",
     [UI_MENU_GRASS] = "Grass distance",
     [UI_MENU_GRASS_DESC] = "How far from the camera grass loads and is drawn. Original keeps the game's ranges (10 to 90 m "
                            "per grass layer); higher values multiply them, so grass appears further away and its denser "
@@ -620,6 +625,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RAIN_DROPLETS_DESC] = "В дождь игра рисует круглые капли прямо перед камерой. Они следуют за взглядом и "
                                    "крупными пятнами ложатся на дальние уступы. «Выкл.» их скрывает; сам дождь и брызги "
                                    "рядом не меняются. Применяется сразу.",
+    [UI_MENU_AO] = "Затенение (AO)",
+    [UI_MENU_AO_DESC] = "Тени там, где сходятся поверхности: в углах, в траве и листве. «Как в игре» — с "
+                        "ореолами. «Слабое» — чётче, только в складках; «Среднее» — ещё и тень под кустами; «Сильное» — "
+                        "глубже, в полном разрешении, дороже для GPU. Применяется сразу.",
+    [UI_MENU_AO_ORIGINAL] = "Как в игре", [UI_MENU_AO_LIGHT] = "Слабое", [UI_MENU_AO_MEDIUM] = "Среднее", [UI_MENU_AO_STRONG] = "Сильное",
     [UI_MENU_GRASS] = "Дальность травы",
     [UI_MENU_GRASS_DESC] = "Как далеко от камеры загружается и рисуется трава. «Как в игре» оставляет дальность игры "
                            "(от 10 до 90 м для каждого слоя травы); большие значения умножают её, и трава появляется "

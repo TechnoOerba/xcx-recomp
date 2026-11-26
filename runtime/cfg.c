@@ -31,7 +31,7 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // settings alone from dawn_dusk.c rt_dawn_dusk_init on), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
-    "AB", "ANISO", "APP_POOL", "ASSUME_FOCUS", "ASTC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
+    "AB", "ANISO", "AO", "APP_POOL", "ASSUME_FOCUS", "ASTC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
     "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
@@ -70,7 +70,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"OPERATION_MODE", "graphics"}, {"RENDER_SCALE", "graphics"}, {"UPSCALER", "graphics"}, {"SHARPNESS", "graphics"},
     {"ANISO", "graphics"},
     {"GRASS_DISTANCE", "graphics"}, {"CROWD_DISTANCE", "graphics"}, {"OBJECT_LOD_RANGE", "graphics"},
-    {"OBJECT_LOD_MODE", "graphics"}, {"RAIN_DROPLETS", "graphics"},
+    {"OBJECT_LOD_MODE", "graphics"}, {"AO", "graphics"}, {"RAIN_DROPLETS", "graphics"},
     {"BOKEH", "graphics"}, {"BOKEH_SKY", "graphics"}, {"BOKEH_CLOUDS", "graphics"},
     {"CHEATS", "game"}, {"LANG", "game"}, {"MENU_LANG", "game"},
     {"DAY_LENGTH", "game"}, {"DAWN_DUSK", "game"}, {"DARK_NIGHTS", "game"},
@@ -115,6 +115,7 @@ static const CfgMeta metas[] = {
     {"OBJECT_LOD_RANGE", "0", "0|10|20|30|50|75|100|150|200|300|500|750|1000", LIVE},
     {"OBJECT_LOD_MODE", "auto", "auto|fixed", LIVE},
     {"CROWD_DISTANCE", "1", "1|1.5|2|3|4", LIVE}, {"RAIN_DROPLETS", "1", "0|1", LIVE},
+    {"AO", "original", "original|light|medium|strong", LIVE},   // vk_ao.c: ambient occlusion
     {"BOKEH", "off", "off|horizon|vista|portrait", LIVE},   // vk_bokeh.c: far depth of field
     {"BOKEH_SKY", "0", "0|1", LIVE},                    // vk_bokeh.c: 1 = the sky blurs too (default: it stays sharp)
     {"BOKEH_CLOUDS", "0", "0|1", LIVE},                 // vk_bokeh.c: 1 = the clouds blur too (default: they stay sharp)

@@ -785,10 +785,13 @@ static void tab_graphics(float scale) {
     row_object_lod();
     if (!crowd_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
     row_crowd();
-    opt_group(UI_MENU_EFFECTS_GROUP);   // the 2.0.0 update's effects (vk_exec_draw.c)
+    opt_group(UI_MENU_EFFECTS_GROUP);   // the 2.0.0 update's effects (vk_exec_draw.c), in alphabetical order (English)
     int fx_ok = grass_ok || crowd_ok || objlod_ok;
+    static const UiTextId ao[] = {UI_MENU_AO_ORIGINAL, UI_MENU_AO_LIGHT, UI_MENU_AO_MEDIUM, UI_MENU_AO_STRONG};
     if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
+    opt_choice("XCX_AO", UI_MENU_AO, ao, 4, UI_MENU_AO_DESC);
     static const UiTextId rain[] = {UI_MENU_OFF, UI_MENU_ON};   // a list like its neighbors (arrows), cfg.c's 0|1
+    if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
     opt_choice("XCX_RAIN_DROPLETS", UI_MENU_RAIN_DROPLETS, rain, 2, UI_MENU_RAIN_DROPLETS_DESC);
     if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);   // like its neighbours: only 2.0.0 was checked
     row_bokeh();

@@ -164,6 +164,16 @@ extern int vk_dump_armed;
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
+// vk_ao.c (XCX_AO): the Ambient occlusion row. Pass begins (the scene depth), the game's occlusion draws (kind 1 the
+// occlusion with its projection, 2 and 3 its blurs; 1 = skip the draw), the lighting's descriptor for the game's
+// occlusion target while Strong ran (vk_ao_swap_image), per present.
+extern VkImage vk_ao_swap_image;
+int vk_ao_active(void);
+float vk_ao_floor(void);
+void vk_ao_pass(VkExec *ex);
+int vk_ao_draw(VkExec *ex, int kind, const float proj[4]);
+void vk_ao_swap(VkDescriptorImageInfo *d);
+void vk_ao_frame(void);
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload);   // before a copy or texture clear is replayed
 void vk_dump_present(uint64_t frame);    // vk_be_present: waits for the dump frame's copies and closes the logs

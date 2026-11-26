@@ -40,19 +40,21 @@ All of it is data in the mod's `romfs/` ([installer.md](installer.md), game-file
   site in column 3, up to 6 hexagon ids after it) that name a data probe site and hexagons of this region to uncover
   when a probe is installed there, after the game's own list for that site. A site that lies in one region can
   uncover hexagons of a neighboring far region this way.
-- For the panels below: menu layouts with a row for each mod region (the game's layouts have exactly as many rows as
-  it fills).
+- Nothing for the panels: their rows are made when the game opens their layouts (see "Panel rows" below), so a
+  region mod ships no menu layout. A mod that does ship one with enough rows keeps it.
+- Missions count for the region their point lies in on the region map (the Map tab's Region Intel counts them by
+  where they are), so a mod's missions on its region's cells count for it.
 
 ## What the game then does
 
-- **Segments tab**: the region's hexagons and markers, with its name and survey rate. For ids 20 and 23 the minimap
-  also outlines the current hexagon (not for a far region: see Limits).
+- **Segments tab**: the region's hexagons and markers, with its name and survey rate; the minimap outlines the
+  current hexagon of the region as for the game's own.
 - **Survey rate**: the region has its own rate, and Mira's total counts it like every other region with hexagons (the
   game's total is the plain mean of the regions' rates, so a small region weighs as much as a continent).
 - **Survey Reward List**: a page per mod region with rewards, after the game's pages.
 - **Region Intel** (hold ZL on the map; the Segments, Map and FrontierNav tabs) and **Map Shortcuts** (X on the map):
-  a row or entry for each mod region, in id order (on the Segments tab before Mira's row), as many as the mod's layout
-  has rows for.
+  a row or entry for each mod region, in id order (on the Segments tab before Mira's row); on the Map tab with the
+  region's mission count.
 - **Region Discovered** banner, wrecks, enemies, data probes and the survey reward pop-up work in the region as in the
   game's own.
 
@@ -77,15 +79,30 @@ region every hook returns what the game had.
   code) get the mod regions too.
 - Survey panels: the Survey Reward List gets a row vector per far region past the panel's end and pages for them.
   Region Intel's lists and the Map Shortcuts list keep their row widgets in fixed arrays inside their panel; when mod
-  regions exist the panel is allocated bigger and the lists' widget arrays move past its end, so the layout's extra
-  rows get widgets.
+  regions exist the panel is allocated bigger (room for 48 mod regions in each list) and the lists' widget arrays move
+  past its end, so the layout's extra rows get widgets. The Map tab's mission counts come from the tree the game
+  builds of the current missions per region, read for the mod regions after the game read its own.
+- Panel rows (`runtime/region_layout.c`): the panels build one row widget per row node `mc_List01`, `mc_List02`, ...
+  of their menu layout (`ui/image/04010_parts05.wilay` for Region Intel on the Segments and Map tabs,
+  `04010_parts04.wilay` for Map Shortcuts, `04030_frontiernet_parts08.wilay` for the FrontierNav tab). When the game
+  opens one of them and mod regions exist, the copy it would read (a mod's, else its own from its archive) gets a row
+  per mod region and is served from `<profile>/region-layouts/`: the last row and its child components copied one row
+  step on, a special last row (Mira's, hidden in the Map tab's mission view by a track of its placement node) kept
+  last, the window one row taller per row; Map Shortcuts moves up a row per row (it reaches the screen's bottom), the
+  FrontierNav panel widens once for a longer name. A panel taller than the screen's band is scaled down as a whole,
+  to half size at the least. With no mod region nothing is served.
 - The field-region test (`region > 24` means "no field") answers 0 for a far region; the discovery flag of a far
   region comes from its `flg`; a probe install also uncovers the hexagons its site names in `SEG_ProbeListZone<id>`.
 
 ## Cost
 
 - No mod region: one table lookup per id at the segment manager's creation (once a boot); every hook is a comparison
-  that returns the game's value.
+  that returns the game's value, and each RomFS open and archive lookup asks one comparison more.
+- With mod regions, every RomFS open and archive lookup compares its path with the three layouts' (a short copy and
+  three string compares); each layout is made once a boot when the game first opens it (1-10 ms; the time is in its
+  log line) and written to `<profile>/region-layouts/`, which is left there when the mods go (the next boot with mod
+  regions writes it again); the Region Intel panel is allocated with 31 KB instead of 6.5 KB, Map Shortcuts
+  with 5 KB more.
 - With mod regions: the panels and the Segments tab do the game's own work for each extra region. The segment manager
   is 0x2510 bytes bigger per far region, plus one slot it skips (the 25th would overlap its own fields).
 
@@ -94,13 +111,15 @@ region every hook returns what the game had.
 - Only the 2.0.0 update's build gets the hooks.
 - Which regions are mod regions is decided once a boot: a mod with regions switched on or off while the game runs takes
   effect at the next start (as its data tables do).
-- In a far region the minimap shows the land but no outline of the current hexagon; the Segments tab, the survey
-  rate and the panels show the region's hexagons as for any other.
-- What the panels show is capped by the mod's layouts and by the code, which grows each list to 16 rows: the Segments
-  tab's region list holds 24 entries (the five continents and 19 mod regions); Region Intel on the Segments tab and on
-  the Map tab has 16 rows (the game's 11 regions and Mira, so 4 mod regions), on the FrontierNav tab 16 (the game's 5,
-  so 11 mod regions); Map Shortcuts 16 entries (the game's 8, so 8 mod regions). Mod regions go in id order; one past
-  a cap, or past the rows its layout has, is left out of that panel, and the log says so once.
+- The minimap outlines a hexagon only while the player is in that hexagon's region (the region map decides, cell by
+  cell), as for the game's regions; paint a region's cells to match its hexagons.
+- The Segments tab's region list holds 24 entries (the five continents and 19 mod regions): it lives inside the map
+  screen's object, whose fields after it are used throughout the map code. Mod regions past the 19th have no hexagons
+  drawn there (their survey rate, rewards and panel rows are unaffected); the log says so once.
+- Region Intel (Segments, Map and FrontierNav tabs) and Map Shortcuts have rows for as many mod regions as fit on the
+  screen with the panel at half size or more (25 to 27 in each). A mod's own layout that already has enough rows is
+  used as it is, not fitted to the screen (up to 48 mod regions then). Mod regions go in id order; one past that is
+  left out of the panel, and the log says so once.
 - The Enemy Index's "Region Found" filter has fixed checkboxes for the five continents and "Other"; enemies of a far
   region are listed under "Other".
 - A region whose hexagons the game can't find (no `SEG_TerminalZone<id>`) is not a mod region, even if other tables

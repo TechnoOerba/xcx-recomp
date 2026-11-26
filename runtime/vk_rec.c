@@ -13,6 +13,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "prof.h"
 #include "vk.h"
 #include "platform/platform.h"
 
@@ -51,6 +52,7 @@ static void exec_packet(uint32_t op, void *p);
 static void rec_main(void *arg) {
     (void)arg;
     plat_thread_priority(rec_prio);
+    prof_rec_tid = plat_thread_id();   // XCX_PROFILE_REPLAY samples it too (prof_win.c)
     uint64_t t = 0;
     for (;;) {
         uint64_t h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);

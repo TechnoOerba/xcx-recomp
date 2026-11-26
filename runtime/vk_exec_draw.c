@@ -137,6 +137,7 @@ static struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_S
 static struct {
     int on;
     uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip;
+    uint64_t sm_hit, pm_hit, dyn_set;   // shader memo and pipeline memo hits, dynamic state recorded
 } BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
@@ -1312,6 +1313,8 @@ static void bind_stats(const VkPipeInfo *info) {
                "same program and state as the draw before %.3f, also same buffers %.3f; descriptor builds skipped %.3f",
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.ac_miss / d, BS.same_prog / d,
                BS.same_all / d, BS.bind_skip / d);
+        rt_log("vk_exec: per draw: shader memo hits %.3f, pipeline memo hits %.3f, dynamic state recorded %.3f",
+               BS.sm_hit / d, BS.pm_hit / d, BS.dyn_set / d);
     }
 }
 
@@ -1875,6 +1878,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     uint32_t gen = memo ? vk_texture_slots_gen() : 0;   // before shader_for, whose lookups may bump it
     if (memo && SM.valid && memo_match(ex, gen, &SM.k)) {
         vs = SM.vs, fs = SM.fs, has_vs = 1, has_fs = SM.has_fs;
+        BS.sm_hit++;
         if (memo == 2) {
             int hv, hf, wv, wf;
             const GfxShader *v2 = shader_for(ex, NVN_STAGE_VS, &hv, &wv, 0), *f2 = shader_for(ex, NVN_STAGE_FS, &hf, &wf, 0);
@@ -1935,6 +1939,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     uint64_t w0 = 0;
     if (pipe_memo_on() && PM.valid && !memcmp(&PM.s, &s, sizeof s)) {
         info = PM.info, pending = 0;
+        BS.pm_hit++;
         p = __atomic_load_n(&info->pipeline, __ATOMIC_ACQUIRE);
     } else {
         w0 = t0 ? t0 : wait_ms ? kern_now_ns() : 0;   // the clock is read only for draws that may wait
@@ -1968,6 +1973,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
+        BS.dyn_set++;
         ex->recorded++;
         B.st = s, B.st_valid = 1;
     }

@@ -344,7 +344,7 @@ extern "C" void menu_vk_release(void) {
 // XCX_BUG_REPORT_TEST=<frame>[:save]: at that presented frame, what "Make a bug report" does (with the save for :save,
 // whatever the opt-in row says), without opening the folder; the Advanced tab then scrolls to the button, so an
 // XCX_MENU_TEST page shot after it shows the zip's path.
-enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_MENU, TAB_ADVANCED, TAB_MODS, TAB_CHEATS, TAB_COUNT };
+enum { TAB_DISPLAY, TAB_GRAPHICS, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_ADVANCED, TAB_MODS, TAB_CHEATS, TAB_COUNT };
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -408,7 +408,7 @@ static void test_apply_sets(uint64_t frame) {
     }
 }
 
-// ---- the lists the Screen and Game tabs build
+// ---- the lists the Display, Graphics and Game tabs build
 enum { MAX_GPUS = 8 };
 static char g_gpu_names[MAX_GPUS][VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
 static int g_gpu_n = -1;   // -1: not listed yet
@@ -580,28 +580,26 @@ static const char *present_note(void) {
     return note;
 }
 
-// ---- the tabs
-static void tab_screen(float scale) {
-    opt_begin("##screen", scale);
+// ---- the tabs. Each holds one kind of setting, so a new one has an obvious place: Display how the picture reaches the
+// monitor, Graphics what the game draws, Game how it plays, Sound what it sounds like.
+
+// Display: how the picture reaches the monitor (window, game resolution, presentation, frame rate, the card that draws
+// it), then its fit and brightness, HDR, and the performance overlay. What the game draws is on the Graphics tab.
+static void tab_display(float scale) {
+    opt_begin("##display", scale);
     static const UiTextId mode[] = {UI_MENU_MODE_WINDOW, UI_MENU_MODE_BORDERLESS, UI_MENU_MODE_FULLSCREEN};
     opt_choice("XCX_FULLSCREEN", UI_MENU_FULLSCREEN, mode, 3, UI_MENU_FULLSCREEN_DESC);
     row_window_size();
+    row_output_res();
     static const UiTextId present[] = {UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE};
     opt_choice("XCX_VK_PRESENT", UI_MENU_PRESENT, present, 3, UI_MENU_PRESENT_DESC, present_note());
+    row_fps_limit();   // under Presentation: VSync and the limit decide the frame rate together
+    static const UiTextId cut[] = {UI_MENU_CUTSCENE_30, UI_MENU_CUTSCENE_MIXED, UI_MENU_CUTSCENE_LIMIT};
+    opt_choice("XCX_CUTSCENE_30", UI_MENU_CUTSCENE_FPS, cut, 3, UI_MENU_CUTSCENE_FPS_DESC);
     row_gpu();
-    static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
-    opt_choice("XCX_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
-    opt_group(UI_MENU_GRAPHICS);
-    row_output_res();
-    row_render_scale();
-    static const UiTextId aniso[] = {UI_MENU_ANISO_GAME, UI_MENU_ANISO_2X, UI_MENU_ANISO_4X, UI_MENU_ANISO_8X,
-                                     UI_MENU_ANISO_16X};
-    opt_choice("XCX_ANISO", UI_MENU_ANISO, aniso, 5, UI_MENU_ANISO_DESC);
-    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR, UI_MENU_UPSCALER_DLSS};
-    opt_choice("XCX_UPSCALER", UI_MENU_UPSCALER, up, 3, UI_MENU_UPSCALER_DESC);
+    opt_group(UI_MENU_PICTURE_GROUP);
     static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH};
     opt_choice("XCX_PICTURE_FIT", UI_MENU_PICTURE_FIT, fit, 2, UI_MENU_PICTURE_FIT_DESC);
-    opt_slider("XCX_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
     opt_slider("XCX_BRIGHTNESS", UI_MENU_BRIGHTNESS, 40, 120, UI_MENU_BRIGHTNESS_DESC, 5, "%.0f %%");
     opt_group(UI_MENU_HDR_GROUP);
     opt_toggle("XCX_HDR", UI_MENU_HDR, UI_MENU_HDR_DESC);
@@ -609,6 +607,9 @@ static void tab_screen(float scale) {
     opt_slider("XCX_HDR_GAME_NITS", UI_MENU_HDR_GAME, 80, 500, UI_MENU_HDR_GAME_DESC, 5, "%.0f");
     opt_slider("XCX_HDR_UI_NITS", UI_MENU_HDR_UI, 80, 500, UI_MENU_HDR_UI_DESC, 5, "%.0f");
     opt_slider("XCX_HDR_HUE", UI_MENU_HDR_HUE, 0, 100, UI_MENU_HDR_HUE_DESC, 5, "%.0f %%");
+    opt_group(UI_MENU_OVERLAY_GROUP);
+    static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
+    opt_choice("XCX_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
     opt_end();
 }
 
@@ -740,25 +741,25 @@ static void row_dawn_dusk(void) {
     opt_choice_list("XCX_DARK_NIGHTS", UI_MENU_DARK_NIGHTS, dn_values, dn_names, 3, UI_MENU_DARK_NIGHTS_DESC);
 }
 
-static void tab_game(float scale) {
-    opt_begin("##game", scale);
-    row_fps_limit();
-    static const UiTextId cut[] = {UI_MENU_CUTSCENE_30, UI_MENU_CUTSCENE_MIXED, UI_MENU_CUTSCENE_LIMIT};
-    opt_choice("XCX_CUTSCENE_30", UI_MENU_CUTSCENE_FPS, cut, 3, UI_MENU_CUTSCENE_FPS_DESC);
-    row_game_lang();
-    static const UiTextId voice[] = {UI_MENU_GAME_LANG_AUTO, UI_MENU_VOICE_JA, UI_MENU_VOICE_EN};
-    opt_choice("XCX_VOICE_LANG", UI_MENU_VOICE_LANG, voice, 3, UI_MENU_VOICE_LANG_DESC);
+// Graphics: what the game draws and how sharp it is: the console mode the game draws for (docked or handheld), the 3D
+// scene's size and upscaling, texture filtering, and how far the world's detail reaches.
+static void tab_graphics(float scale) {
+    opt_begin("##graphics", scale);
+    opt_group(UI_MENU_QUALITY_GROUP);
     static const UiTextId mode[] = {UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD};
     opt_choice("XCX_OPERATION_MODE", UI_MENU_OPERATION_MODE, mode, 2, UI_MENU_OPERATION_MODE_DESC);
-    opt_toggle("XCX_CHEATS", UI_MENU_CHEATS, UI_MENU_CHEATS_DESC);
-    opt_group(UI_MENU_DAY_NIGHT_GROUP);   // the in-game clock and its light: Day length, Dawn and dusk, Night darkness
-    row_day_length();
-    row_dawn_dusk();
+    row_render_scale();
+    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR, UI_MENU_UPSCALER_DLSS};
+    opt_choice("XCX_UPSCALER", UI_MENU_UPSCALER, up, 3, UI_MENU_UPSCALER_DESC);
+    opt_slider("XCX_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
+    static const UiTextId aniso[] = {UI_MENU_ANISO_GAME, UI_MENU_ANISO_2X, UI_MENU_ANISO_4X, UI_MENU_ANISO_8X,
+                                     UI_MENU_ANISO_16X};
+    opt_choice("XCX_ANISO", UI_MENU_ANISO, aniso, 5, UI_MENU_ANISO_DESC);
     int grass_ok = rt_grass_available(), crowd_ok = rt_crowd_available(), objlod_ok = rt_objlod_available();   // the 2.0.0 update's (grass.c, crowd.c, objlod.c)
-    // A setting that can't apply on this game build stays in the menu, greyed out with its note, like the Day and night
-    // rows: the player sees it exists and why it is off; Object detail range's Auto/Fixed sub-row only shows under it
-    // (row_object_lod). Each row's own file decides: grass.c and crowd.c by their patch set, objlod.c by the game
-    // version and the code at its sites (one that differs on 2.0.0 shows the same note).
+    // A setting that can't apply on this game build stays in the menu, greyed out with its note, like the Game tab's
+    // Day and night rows: the player sees it exists and why it is off; Object detail range's Auto/Fixed sub-row only
+    // shows under it (row_object_lod). Each row's own file decides: grass.c and crowd.c by their patch set, objlod.c by the
+    // game version and the code at its sites (one that differs on 2.0.0 shows the same note).
     opt_group(UI_MENU_WORLD_GROUP);
     static const UiTextId grass[] = {UI_MENU_GRASS_ORIGINAL, UI_MENU_GRASS_15, UI_MENU_GRASS_2, UI_MENU_GRASS_3};
     if (!grass_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
@@ -770,9 +771,27 @@ static void tab_game(float scale) {
     opt_end();
 }
 
+// Game: Cheats, the text languages (the game's and this menu's; the voices are on the Sound tab), and the in-game
+// clock's Day and night rows.
+static void tab_game(float scale) {
+    opt_begin("##game", scale);
+    opt_toggle("XCX_CHEATS", UI_MENU_CHEATS, UI_MENU_CHEATS_DESC);
+    opt_group(UI_MENU_LANG_GROUP);
+    row_game_lang();
+    static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU};
+    opt_choice("XCX_MENU_LANG", UI_MENU_MENU_LANG, langs, 3, UI_MENU_MENU_LANG_DESC);
+    opt_group(UI_MENU_DAY_NIGHT_GROUP);   // the in-game clock and its light: Day length, Dawn and dusk, Night darkness
+    row_day_length();
+    row_dawn_dusk();
+    opt_end();
+}
+
+// Sound: the volume and the voices' language.
 static void tab_sound(float scale) {
     opt_begin("##sound", scale);
     opt_slider("XCX_VOLUME", UI_MENU_VOLUME, 0, 100, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
+    static const UiTextId voice[] = {UI_MENU_GAME_LANG_AUTO, UI_MENU_VOICE_JA, UI_MENU_VOICE_EN};
+    opt_choice("XCX_VOICE_LANG", UI_MENU_VOICE_LANG, voice, 3, UI_MENU_VOICE_LANG_DESC);
     opt_end();
 }
 
@@ -974,13 +993,6 @@ static void tab_controls(float scale) {
     binds_rows(scale);
     opt_end();
     binds_after_page();
-}
-
-static void tab_menu(float scale) {
-    opt_begin("##menu", scale);
-    static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU};
-    opt_choice("XCX_MENU_LANG", UI_MENU_MENU_LANG, langs, 3, UI_MENU_MENU_LANG_DESC);
-    opt_end();
 }
 
 // Built-in cheats whose description carries a warning (and their row a mark): they can break a save's progress.
@@ -1304,9 +1316,9 @@ static void tab_advanced(float scale) {
     }
 }
 
-static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU, UI_MENU_TAB_ADVANCED, UI_MENU_TAB_MODS,
-                                              UI_MENU_TAB_CHEATS};
+static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_DISPLAY, UI_MENU_TAB_GRAPHICS, UI_MENU_TAB_GAME,
+                                              UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS, UI_MENU_TAB_ADVANCED,
+                                              UI_MENU_TAB_MODS, UI_MENU_TAB_CHEATS};
 static int g_tab;               // the tab shown
 static uint64_t g_registered_epoch;
 static char g_registered_owner[65];
@@ -1673,11 +1685,11 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
             // buttons and the tabs (up from "Continue" went to the tabs, down from the tabs to "Continue")
             opt_reserve_bottom(bottom);
             switch (k) {
-            case TAB_SCREEN: tab_screen(scale); break;
+            case TAB_DISPLAY: tab_display(scale); break;
+            case TAB_GRAPHICS: tab_graphics(scale); break;
             case TAB_GAME: tab_game(scale); break;
             case TAB_SOUND: tab_sound(scale); break;
             case TAB_CONTROLS: tab_controls(scale); break;
-            case TAB_MENU: tab_menu(scale); break;
             case TAB_ADVANCED: tab_advanced(scale); break;
             case TAB_MODS: mods_page(scale,bottom,focus_page); break;
             case TAB_CHEATS: tab_cheats(scale); break;

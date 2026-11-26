@@ -96,8 +96,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     SWKBD("Text entry", "Enter a name", "Cross", "OK", "Cancel", "Controller: A = OK, B = Cancel"),
 
     [UI_MENU_TITLE] = "Settings",
-    [UI_MENU_TAB_SCREEN] = "Screen", [UI_MENU_TAB_GAME] = "Game", [UI_MENU_TAB_SOUND] = "Sound",
-    [UI_MENU_TAB_CONTROLS] = "Controls", [UI_MENU_TAB_MENU] = "Menu", [UI_MENU_TAB_ADVANCED] = "Advanced",
+    [UI_MENU_TAB_DISPLAY] = "Display", [UI_MENU_TAB_GRAPHICS] = "Graphics", [UI_MENU_TAB_GAME] = "Game",
+    [UI_MENU_TAB_SOUND] = "Sound", [UI_MENU_TAB_CONTROLS] = "Controls", [UI_MENU_TAB_ADVANCED] = "Advanced",
     [UI_MENU_CONTINUE] = "Continue", [UI_MENU_QUIT] = "Quit game",
     [UI_QUIT_CONFIRM] = "Quit the game? Progress since the last save is lost.", [UI_QUIT_YES] = "Yes", [UI_QUIT_NO] = "No",
     [UI_MENU_ON] = "On", [UI_MENU_OFF] = "Off", [UI_MENU_AUTO] = "Automatic", [UI_MENU_DEFAULT_MARK] = "default",
@@ -124,7 +124,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PERF_OFF] = "Off", [UI_MENU_PERF_FPS] = "FPS", [UI_MENU_PERF_FULL] = "Full",
     // printf format of the overlay line in FPS mode: the frame rate
     [UI_PERF_LINE_FPS] = "%.0f fps",
-    [UI_MENU_GRAPHICS] = "Picture",
+    [UI_MENU_PICTURE_GROUP] = "Picture", [UI_MENU_OVERLAY_GROUP] = "Overlay", [UI_MENU_QUALITY_GROUP] = "Image quality",
     [UI_MENU_OUTPUT_RES] = "Game resolution",
     [UI_MENU_OUTPUT_RES_DESC] = "The size the game draws its picture and interface in. Above 1920 x 1080 the game needs "
                                 "more video memory and GPU time.",
@@ -341,6 +341,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_PAD_DPAD_DOWN] = "D-pad down", [UI_PAD_ZL] = "Left trigger", [UI_PAD_ZR] = "Right trigger",
     [UI_PAD_CROSS] = "Cross", [UI_PAD_CIRCLE] = "Circle", [UI_PAD_SQUARE] = "Square", [UI_PAD_TRIANGLE] = "Triangle",
 
+    [UI_MENU_LANG_GROUP] = "Language",
     [UI_MENU_MENU_LANG] = "Menu language", [UI_MENU_MENU_LANG_DESC] = "Language of this menu and the overlay.",
     [UI_MENU_MENU_LANG_AUTO] = "Automatic (from Windows)",
 
@@ -525,8 +526,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     SWKBD("Ввод текста", "Введите имя", "Cross", "ОК", "Отмена", "Контроллер: A — ОК, B — отмена"),
 
     [UI_MENU_TITLE] = "Настройки",
-    [UI_MENU_TAB_SCREEN] = "Экран", [UI_MENU_TAB_GAME] = "Игра", [UI_MENU_TAB_SOUND] = "Звук",
-    [UI_MENU_TAB_CONTROLS] = "Управление", [UI_MENU_TAB_MENU] = "Меню", [UI_MENU_TAB_ADVANCED] = "Дополнительно",
+    [UI_MENU_TAB_DISPLAY] = "Экран", [UI_MENU_TAB_GRAPHICS] = "Графика", [UI_MENU_TAB_GAME] = "Игра",
+    [UI_MENU_TAB_SOUND] = "Звук", [UI_MENU_TAB_CONTROLS] = "Управление", [UI_MENU_TAB_ADVANCED] = "Дополнительно",
     [UI_MENU_CONTINUE] = "Продолжить", [UI_MENU_QUIT] = "Выйти из игры",
     [UI_QUIT_CONFIRM] = "Выйти из игры? Прогресс после последнего сохранения будет потерян.", [UI_QUIT_YES] = "Да",
     [UI_QUIT_NO] = "Нет",
@@ -555,7 +556,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                   "режимы.",
     [UI_MENU_PERF_OFF] = "Выкл.", [UI_MENU_PERF_FPS] = "FPS", [UI_MENU_PERF_FULL] = "Полный",
     [UI_PERF_LINE_FPS] = "%.0f к/с",
-    [UI_MENU_GRAPHICS] = "Изображение",
+    [UI_MENU_PICTURE_GROUP] = "Изображение", [UI_MENU_OVERLAY_GROUP] = "Индикатор",
+    [UI_MENU_QUALITY_GROUP] = "Качество изображения",
     [UI_MENU_OUTPUT_RES] = "Разрешение игры",
     [UI_MENU_OUTPUT_RES_DESC] = "Размер, в котором игра рисует картинку и интерфейс. Выше 1920 × 1080 игре нужно больше "
                                 "видеопамяти и времени GPU.",
@@ -758,6 +760,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_PAD_ZR] = "Правый курок",
     [UI_PAD_CROSS] = "Крест", [UI_PAD_CIRCLE] = "Круг", [UI_PAD_SQUARE] = "Квадрат", [UI_PAD_TRIANGLE] = "Треугольник",
 
+    [UI_MENU_LANG_GROUP] = "Язык",
     [UI_MENU_MENU_LANG] = "Язык меню", [UI_MENU_MENU_LANG_DESC] = "Язык этого меню и индикатора.",
     [UI_MENU_MENU_LANG_AUTO] = "Автоматически (из Windows)",
 

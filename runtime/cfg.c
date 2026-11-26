@@ -36,7 +36,7 @@ static const char *const known[] = {
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "BOKEH", "BOKEH_CLOUDS", "BOKEH_SKY", "BRIGHTNESS", "BUG_REPORT_TEST", "CHEATS", "CLOTH_REALTIME", "CORE_DIAG", "CRASH_TEST", "CRIT", "CRIT_OUT", "CROWD_DISTANCE", "CROWD_PATCH", "CUTSCENE_30", "DARK_NIGHTS", "DAWN_DUSK", "DAY_LENGTH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_JITTER", "DLSS_MASK", "DLSS_MASK_PX", "DLSS_MIPBIAS", "DLSS_MV", "DLSS_MVDEBUG", "DLSS_OBJMV", "DLSS_PRESET", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DUMP_ONLY",
+    "BIND_ZL", "BIND_ZR", "BLOCK_VIEWS_3D", "BLOOM", "BOKEH", "BOKEH_CLOUDS", "BOKEH_SKY", "BRIGHTNESS", "BUG_REPORT_TEST", "CHEATS", "CLOTH_REALTIME", "CORE_DIAG", "CRASH_TEST", "CRIT", "CRIT_OUT", "CROWD_DISTANCE", "CROWD_PATCH", "CUTSCENE_30", "DARK_NIGHTS", "DAWN_DUSK", "DAY_LENGTH", "DESC_TEMPLATE", "DEVICE_PROFILE", "DLSS_JITTER", "DLSS_MASK", "DLSS_MASK_PX", "DLSS_MIPBIAS", "DLSS_MV", "DLSS_MVDEBUG", "DLSS_OBJMV", "DLSS_PRESET", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG", "DUMP_ONLY",
     "EXEFS", "FAST_CORES", "FEEDBACK", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FPS60", "FPS_LIMIT", "FREEZE_IDLE", "FREE_CORES", "FULLSCREEN", "GATHER_BIAS", "GPL", "GPL_DRAW_BUILD", "GPU",
     "GPU_INDEX", "GPU_NAME", "GRASS_DISTANCE", "GRASS_PATCH", "GRASS_POOL", "HDR", "HDR_GAME_NITS", "HDR_HUE", "HDR_PEAK_NITS", "HDR_UI_NITS", "HIGHFPS_FIX", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIB_PREBUILD",
@@ -70,7 +70,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"OPERATION_MODE", "graphics"}, {"RENDER_SCALE", "graphics"}, {"UPSCALER", "graphics"}, {"SHARPNESS", "graphics"},
     {"ANISO", "graphics"},
     {"GRASS_DISTANCE", "graphics"}, {"CROWD_DISTANCE", "graphics"}, {"OBJECT_LOD_RANGE", "graphics"},
-    {"OBJECT_LOD_MODE", "graphics"}, {"AO", "graphics"}, {"RAIN_DROPLETS", "graphics"},
+    {"OBJECT_LOD_MODE", "graphics"}, {"AO", "graphics"}, {"BLOOM", "graphics"}, {"RAIN_DROPLETS", "graphics"},
     {"BOKEH", "graphics"}, {"BOKEH_SKY", "graphics"}, {"BOKEH_CLOUDS", "graphics"},
     {"CHEATS", "game"}, {"LANG", "game"}, {"MENU_LANG", "game"},
     {"DAY_LENGTH", "game"}, {"DAWN_DUSK", "game"}, {"DARK_NIGHTS", "game"},
@@ -116,6 +116,7 @@ static const CfgMeta metas[] = {
     {"OBJECT_LOD_MODE", "auto", "auto|fixed", LIVE},
     {"CROWD_DISTANCE", "1", "1|1.5|2|3|4", LIVE}, {"RAIN_DROPLETS", "1", "0|1", LIVE},
     {"AO", "original", "original|light|medium|strong", LIVE},   // vk_ao.c: ambient occlusion
+    {"BLOOM", "original", "off|soft|original|strong|intense", LIVE},   // vk_exec_draw.c bloom_scale; by amount
     {"BOKEH", "off", "off|horizon|vista|portrait", LIVE},   // vk_bokeh.c: far depth of field
     {"BOKEH_SKY", "0", "0|1", LIVE},                    // vk_bokeh.c: 1 = the sky blurs too (default: it stays sharp)
     {"BOKEH_CLOUDS", "0", "0|1", LIVE},                 // vk_bokeh.c: 1 = the clouds blur too (default: they stay sharp)

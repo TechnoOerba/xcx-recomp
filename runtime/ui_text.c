@@ -178,6 +178,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                         "is the game's (soft halos). Light is sharper, in creases only; Medium adds broad shade under "
                         "bushes and foliage; Strong deepens it at full size, at some GPU cost. Applies at once.",
     [UI_MENU_AO_ORIGINAL] = "Original", [UI_MENU_AO_LIGHT] = "Light", [UI_MENU_AO_MEDIUM] = "Medium", [UI_MENU_AO_STRONG] = "Strong",
+    [UI_MENU_BLOOM] = "Bloom",
+    [UI_MENU_BLOOM_DESC] = "The glow around bright light: the sun, lamps, glowing parts. Original is the game's; Soft halves "
+                           "the glow, for a clearer picture (above all with HDR on); Strong makes it half again as big, "
+                           "Intense twice, a dreamier look; Off removes it. Applies at once.",
+    [UI_MENU_BLOOM_ORIGINAL] = "Original", [UI_MENU_BLOOM_SOFT] = "Soft", [UI_MENU_BLOOM_STRONG] = "Strong", [UI_MENU_BLOOM_INTENSE] = "Intense",
     [UI_MENU_GRASS] = "Grass distance",
     [UI_MENU_GRASS_DESC] = "How far from the camera grass loads and is drawn. Original keeps the game's ranges (10 to 90 m "
                            "per grass layer); higher values multiply them, so grass appears further away and its denser "
@@ -630,6 +635,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                         "ореолами. «Слабое» — чётче, только в складках; «Среднее» — ещё и тень под кустами; «Сильное» — "
                         "глубже, в полном разрешении, дороже для GPU. Применяется сразу.",
     [UI_MENU_AO_ORIGINAL] = "Как в игре", [UI_MENU_AO_LIGHT] = "Слабое", [UI_MENU_AO_MEDIUM] = "Среднее", [UI_MENU_AO_STRONG] = "Сильное",
+    [UI_MENU_BLOOM] = "Свечение (bloom)",
+    [UI_MENU_BLOOM_DESC] = "Ореол вокруг ярких источников: солнца, фонарей, светящихся деталей. «Как в игре» — свечение "
+                           "игры; «Мягкое» вдвое слабее, чище (особенно с HDR); «Сильное» в полтора раза ярче, "
+                           "«Интенсивное» вдвое; «Выкл.» убирает. Применяется сразу.",
+    [UI_MENU_BLOOM_ORIGINAL] = "Как в игре", [UI_MENU_BLOOM_SOFT] = "Мягкое", [UI_MENU_BLOOM_STRONG] = "Сильное", [UI_MENU_BLOOM_INTENSE] = "Интенсивное",
     [UI_MENU_GRASS] = "Дальность травы",
     [UI_MENU_GRASS_DESC] = "Как далеко от камеры загружается и рисуется трава. «Как в игре» оставляет дальность игры "
                            "(от 10 до 90 м для каждого слоя травы); большие значения умножают её, и трава появляется "

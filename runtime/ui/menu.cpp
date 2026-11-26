@@ -790,6 +790,10 @@ static void tab_graphics(float scale) {
     static const UiTextId ao[] = {UI_MENU_AO_ORIGINAL, UI_MENU_AO_LIGHT, UI_MENU_AO_MEDIUM, UI_MENU_AO_STRONG};
     if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
     opt_choice("XCX_AO", UI_MENU_AO, ao, 4, UI_MENU_AO_DESC);
+    static const UiTextId bloom[] = {UI_MENU_OFF, UI_MENU_BLOOM_SOFT, UI_MENU_BLOOM_ORIGINAL, UI_MENU_BLOOM_STRONG,
+                                     UI_MENU_BLOOM_INTENSE};   // by amount, as cfg.c lists them
+    if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
+    opt_choice("XCX_BLOOM", UI_MENU_BLOOM, bloom, 5, UI_MENU_BLOOM_DESC);
     static const UiTextId rain[] = {UI_MENU_OFF, UI_MENU_ON};   // a list like its neighbors (arrows), cfg.c's 0|1
     if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
     opt_choice("XCX_RAIN_DROPLETS", UI_MENU_RAIN_DROPLETS, rain, 2, UI_MENU_RAIN_DROPLETS_DESC);

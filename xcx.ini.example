@@ -89,6 +89,9 @@
 # creases only), medium (also broad shade under bushes and foliage) or strong (deeper, at the full scene size, at some
 # GPU cost). Changes take effect at once.
 # ao = original
+# Bloom, the glow around bright light, by amount: off, soft (half the game's), original, strong (1.5 times) or
+# intense (twice). Changes take effect at once.
+# bloom = original
 # Camera rain droplets: 1 (default) keeps the round droplets the game draws just in front of the camera in rain; 0
 # leaves them out (the falling rain stays). Changes take effect at once.
 # rain_droplets = 1

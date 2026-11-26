@@ -1882,7 +1882,10 @@ static uint64_t guest_fnv(const uint8_t *p, uint32_t n) {
 //   programs that read it (fragment slot 7) with c3[7].y as its floor: a day set and a night set by the hour, the same
 //   on every continent and indoors (2026-11-22 census and later views); the night's fifth program has another block,
 //   whose [7] changes with the hour, and is left as the game's.
+// - Bloom (bloom_copy): the sum of the bloom's three blur levels (into the 640x360 bloom image at 1440p, before the draw
+//   that adds it to the scene).
 #define FX_AO_VS 0xabbcb083bd1f3d5full        // the full-screen vertex shader of the occlusion and its blurs
+#define FX_BLOOM_VS 0xa48c2f85eb5c9004ull     // and of the bloom sum
 #define FX_LIGHT_VS 0xb660f8fc9937fa19ull     // and of the lighting volumes, by day
 #define FX_NIGHT_VS 0x75a1420393e6fa11ull     // and at night
 static const struct { uint64_t fs; uint32_t len; uint64_t vs; } FX_PROG[] = {
@@ -1891,6 +1894,7 @@ static const struct { uint64_t fs; uint32_t len; uint64_t vs; } FX_PROG[] = {
     {0x126d0c01aa456aebull, 2304, FX_AO_VS},      // FX_AO: the occlusion
     {0x573ce30d9479469aull, 1024, FX_AO_VS},      // FX_AO_BLUR1: the blur across
     {0xb5cc3a5222c072b1ull, 768, FX_AO_VS},       // FX_AO_BLUR2: the blur down
+    {0x6dd829724a6c17f2ull, 512, FX_BLOOM_VS},    // FX_BLOOM: the bloom sum
     {0x725cff79c5ea7637ull, 3328, FX_LIGHT_VS},   // FX_LIGHT..: the lighting programs, the day set
     {0xd9b93f8264728846ull, 3584, FX_LIGHT_VS},
     {0x9a2faefe74f5b3dcull, 3584, FX_LIGHT_VS},
@@ -1901,7 +1905,7 @@ static const struct { uint64_t fs; uint32_t len; uint64_t vs; } FX_PROG[] = {
     {0x70a51d62960a0834ull, 3584, FX_NIGHT_VS},
     {0x3d261aac23257586ull, 3584, FX_NIGHT_VS},
 };
-enum { FX_NONE, FX_RAIN, FX_CLOUDS, FX_AO, FX_AO_BLUR1, FX_AO_BLUR2, FX_LIGHT };   // FX_LIGHT and up: lighting
+enum { FX_NONE, FX_RAIN, FX_CLOUDS, FX_AO, FX_AO_BLUR1, FX_AO_BLUR2, FX_BLOOM, FX_LIGHT };   // FX_LIGHT and up: lighting
 
 static int fx_program(VkExec *ex) {   // FX_*; kept per program serial
     static struct { uint64_t serial; int8_t kind; } memo[4096];
@@ -1964,6 +1968,47 @@ static int ao_projection(VkExec *ex, float proj[4]) {
     float c3[16];
     if (!fs_c3_read(ex, c3, sizeof c3)) return 0;
     proj[0] = c3[10], proj[1] = c3[14], proj[2] = c3[0], proj[3] = c3[5];
+    return 1;
+}
+
+// Bloom (XCX_BLOOM = off | soft | original | strong | intense, live; the menu lists them by amount): the bloom sum's
+// fragment shader weighs its three levels by c3[1].xyz (0.2, 0.1, 0.1 in the field); Soft binds a copy of c3 with them
+// halved, Strong with them 1.5 times, Intense twice, Off at 0, so the draw that adds the bloom to the scene adds less,
+// more or nothing. Original binds nothing. Strong and Intense were picked from pictures of New LA at night and a
+// Primordia sunset and then in game (2026-11-25): Intense gives big halos at night and can wash a bright sunset sky
+// out, which is why Strong stays too.
+static float bloom_scale(void) {
+    static unsigned ver = ~0u;
+    static float scale = 1;
+    if (cfg_version() == ver) return scale;
+    ver = cfg_version();
+    const char *m = cfg_value("XCX_BLOOM");
+    float s = !strcmp(m, "soft")      ? 0.5f
+              : !strcmp(m, "strong")  ? 1.5f
+              : !strcmp(m, "intense") ? 2.0f
+              : !strcmp(m, "off")     ? 0.0f
+                                      : 1.0f;
+    if (s != scale)
+        rt_log("bloom: %s", s == 1      ? "original"
+                            : s > 1.5f  ? "intense (2x)"
+                            : s > 1     ? "strong (1.5x)"
+                            : s > 0     ? "soft (half)"
+                                        : "off");
+    scale = s;
+    return scale;
+}
+
+static int bloom_copy(VkExec *ex, float scale, VkDescriptorBufferInfo *out) {
+    enum { N = 2 * 16 };   // the shader reads c3[0..1]
+    float c3[8];
+    if (!fs_c3_read(ex, c3, N)) return 0;
+    static int told;
+    if (!told) told = 1, rt_log("bloom: the bloom sum found (the game's weights %.3f %.3f %.3f)", c3[4], c3[5], c3[6]);
+    for (int i = 4; i < 7; i++) c3[i] *= scale;
+    VkBuffer b;
+    VkDeviceSize o;
+    memcpy(scratch(ex, N, &b, &o), c3, N);
+    *out = (VkDescriptorBufferInfo){b, o, N};
     return 1;
 }
 
@@ -2037,16 +2082,19 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     }
     if (!vs || (has_fs && !fs)) return 0;
     if (has_fs && rain_droplets_hidden(ex)) return 0;   // the camera rain droplets, when the setting hides them
-    int fx_ovr = 0;   // the Effects rows: a c3 copy bound for this draw (the lighting's floor)
+    int fx_ovr = 0;   // the Effects rows: a c3 copy bound for this draw (Bloom's, the lighting's floor)
     VkDescriptorBufferInfo fx_info = {0};
     if (has_fs) {
-        if (vk_ao_active()) {
+        float bs = bloom_scale();
+        if (bs != 1 || vk_ao_active()) {
             int k = fx_program(ex);
             if (k == FX_AO) {
                 float proj[4] = {0};
                 if (ao_projection(ex, proj) && vk_ao_draw(ex, 1, proj)) return 0;
             } else if (k == FX_AO_BLUR1 || k == FX_AO_BLUR2) {
                 if (vk_ao_draw(ex, k == FX_AO_BLUR1 ? 2 : 3, NULL)) return 0;
+            } else if (k == FX_BLOOM && bs != 1) {
+                fx_ovr = bloom_copy(ex, bs, &fx_info);
             } else if (k >= FX_LIGHT) {
                 float fl = vk_ao_floor();
                 if (fl != 1) fx_ovr = light_copy(ex, fl, &fx_info);

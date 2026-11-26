@@ -258,6 +258,9 @@
 [files]
 # Folder with RomFS mod files that replace or add game files. Default: none.
 # romfs_mods =
+# When the game-file mods change while the game runs, merge their data tables for the next start right away, in the
+# background, instead of waiting for Merge now in the Mods tab (docs/bdat-merge.md). Default: 0.
+# bdat_merge_auto = 0
 # The flags and survey reward marks of game-file mods, kept in mods/state-<slot>.json inside the save folder instead of
 # in the game's save (docs/mod-state.md). 0 turns this off: mods' flag ids then reach the game's own flag storage.
 # Default: 1. Read once at start.

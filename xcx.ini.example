@@ -85,6 +85,9 @@
 # 1.5, 2, 3 or 4. Turn on replay_async = 1 before raising it: without it the extra people slow busy places a lot (in
 # the Commercial District at 4x, about 66 instead of 90 fps). Changes take effect at once.
 # crowd_distance = 1
+# Camera rain droplets: 1 (default) keeps the round droplets the game draws just in front of the camera in rain; 0
+# leaves them out (the falling rain stays). Changes take effect at once.
+# rain_droplets = 1
 
 [game]
 # 1 turns cheats on: the F1 menu gets its Cheats tab, and the cheats switched on there run. 0 (default) keeps every

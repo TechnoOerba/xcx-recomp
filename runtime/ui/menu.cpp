@@ -768,6 +768,11 @@ static void tab_graphics(float scale) {
     row_object_lod();
     if (!crowd_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
     row_crowd();
+    opt_group(UI_MENU_EFFECTS_GROUP);   // the 2.0.0 update's effects (vk_exec_draw.c)
+    int fx_ok = grass_ok || crowd_ok || objlod_ok;
+    if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
+    static const UiTextId rain[] = {UI_MENU_OFF, UI_MENU_ON};   // a list like its neighbors (arrows), cfg.c's 0|1
+    opt_choice("XCX_RAIN_DROPLETS", UI_MENU_RAIN_DROPLETS, rain, 2, UI_MENU_RAIN_DROPLETS_DESC);
     opt_end();
 }
 

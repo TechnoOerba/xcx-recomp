@@ -1854,6 +1854,69 @@ static int pipe_memo_on(void) {
     return PM.on;
 }
 
+// Camera rain droplets (XCX_RAIN_DROPLETS, live, on by default). In rain the game draws round droplets (a 32x32
+// six-frame flip book) in a small volume 1 to 4 m in front of the camera. They follow the view and, on screen, land on
+// whatever is behind them, so they read as big blobs on distant ledges, more so at 1440p and 4K. Off skips those draws;
+// the falling rain and the splashes on the ground near the player are other effects and stay.
+// The draws are recognised by their program, from the FNV-1a hash of its guest shader code (not of our translation,
+// which changes with the translator), and by the 32x32x6 flip book in fragment slot 3: another effect in New LA uses
+// the same program in clear weather with a 16x16x8 book and is left alone.
+static uint64_t guest_fnv(const uint8_t *p, uint32_t n) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
+    return h;
+}
+
+// The game's draws the Effects rows look for, recognised by the FNV-1a hash of each program's guest shader code (2.0.0),
+// not of our translation, which changes with the translator. One table and one memo for all of them, so a program is
+// hashed once, whichever row asks first. A miss (another game version) only leaves the game's own draw.
+// - The camera rain droplets (the Camera rain droplets row).
+static const struct { uint64_t fs; uint32_t len; uint64_t vs; } FX_PROG[] = {
+    {0x8eaffeb44d1e1319ull, 1024, 0xbcfbcf458a0c3bfdull},   // FX_RAIN: the camera rain droplets
+};
+enum { FX_NONE, FX_RAIN };
+
+static int fx_program(VkExec *ex) {   // FX_*; kept per program serial
+    static struct { uint64_t serial; int8_t kind; } memo[4096];
+    uint64_t serial = ex->prog->serial;
+    typeof(memo[0]) *m = &memo[(serial * 0x9E3779B97F4A7C15ull) >> 52];
+    if (serial && m->serial == serial) return m->kind;
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    int kind = FX_NONE;
+    if (find_stage(ex->prog, NVN_STAGE_FS, &ctl, &code, &len)) {
+        uint64_t fh = 0;
+        for (int i = 0; i < (int)(sizeof FX_PROG / sizeof FX_PROG[0]) && !kind; i++) {
+            if (len != FX_PROG[i].len) continue;   // most programs differ in length: no hash for them
+            if (!fh) fh = guest_fnv(code, len);
+            if (fh != FX_PROG[i].fs) continue;
+            const uint8_t *vc;
+            uint32_t vl;
+            if (find_stage(ex->prog, NVN_STAGE_VS, &ctl, &vc, &vl) && guest_fnv(vc, vl) == FX_PROG[i].vs) kind = i + 1;
+        }
+    }
+    if (serial) m->serial = serial, m->kind = (int8_t)kind;
+    return kind;
+}
+
+// 1 when the draw is the camera rain droplets and the setting hides them.
+static int rain_droplets_hidden(VkExec *ex) {
+    static unsigned ver = ~0u;
+    static int off;
+    if (cfg_version() != ver) {
+        ver = cfg_version();
+        int o = !cfg_bool("XCX_RAIN_DROPLETS");
+        if (o != off) rt_log("rain droplets: %s", o ? "hidden" : "shown");
+        off = o;
+    }
+    if (!off || fx_program(ex) != FX_RAIN) return 0;
+    uint64_t h = ex->tex[NVN_STAGE_FS][3];
+    view_t v;
+    int hv = 0;
+    const VkTexImage *t = h ? vk_texture_by_id(NVN_HANDLE_TEX(h), &v, &hv) : NULL;
+    return t && t->width == 32 && t->height == 32 && t->depth == 6;
+}
+
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (ex->render_disabled) return 0;
@@ -1900,6 +1963,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
     }
     if (!vs || (has_fs && !fs)) return 0;
+    if (has_fs && rain_droplets_hidden(ex)) return 0;   // the camera rain droplets, when the setting hides them
     if (vk_dlss_skip_draw(ex)) return 0;   // the game's FXAA scaling, whose target DLSS wrote (vk_dlss.c)
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;

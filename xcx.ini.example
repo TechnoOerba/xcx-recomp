@@ -262,6 +262,9 @@
 # in the game's save (docs/mod-state.md). 0 turns this off: mods' flag ids then reach the game's own flag storage.
 # Default: 1. Read once at start.
 # mod_state = 1
+# Map regions a game-file mod adds by shipping a SEG_TerminalZone<id> table (docs/regions.md). 0 turns this off: such
+# tables are not looked for and the game runs its own region code only. Default: 1. Read once a boot.
+# region_tables = 1
 
 [diagnostics]
 # Extra lines in the log, comma separated: svc, host, ipc, fs, gfx, perf, sched, audio, present or all. The menu's

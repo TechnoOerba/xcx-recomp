@@ -54,6 +54,7 @@ import flags  # noqa: E402
 import appendage  # noqa: E402
 import romfs_mods  # noqa: E402
 import mod_state  # noqa: E402
+import regions  # noqa: E402
 import jumptables  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
@@ -239,6 +240,7 @@ class Emitter:
         self.appendage = appendage.verified(mod)
         self.romfs_mods = romfs_mods.verified(mod)
         self.mod_state = mod_state.verified(mod)
+        self.regions = regions.verified(mod)
         self.starts = starts
         self.patched = patched or {}   # {address: (set index, [replacement words])} (recomp/patches.py)
         self.spins = spins or {}       # {spin wait back-edge: its head} (recomp/patches.py `spin`)
@@ -469,6 +471,8 @@ class Emitter:
                 out.append('    ' + hook)
             if self.mod_state and (hook := mod_state.entry(mod, entry)):
                 out.append('    ' + hook)
+            if self.regions and (hook := regions.entry(mod, entry)):
+                out.append('    ' + hook)
             if fp.used:
                 out.append('    ' + fp.decl())
 
@@ -481,6 +485,8 @@ class Emitter:
             if t in starts:
                 refs.add(t)
                 invoke = appendage.call(mod, a, t) if self.appendage else f'{fname(t)}(c);'
+                if self.regions and (hook := regions.call(mod, a, t)):
+                    invoke = hook
                 return f'c->x[30] = {hx(a + 4)}; {spill}{invoke}{reload_call}'
             self.stats['external_calls'] += 1
             return f'c->x[30] = {hx(a + 4)}; {spill}c->pc = {hx(t)}; rt_dispatch(c);{reload_call}'
@@ -584,6 +590,8 @@ class Emitter:
                     emit(i, '    ' + hook)   # read and written through the register planner, like the op
                 if self.mod_state and (hook := mod_state.after(mod, a)):
                     emit(i, '    ' + hook)
+                if self.regions and (hook := regions.after(mod, a)):
+                    emit(i, '    ' + hook)
             elif k == 'trap':
                 emit(i, f'    {spill}{fx(i, ins.code)}')
             elif k in ('b', 'bcond'):
@@ -654,6 +662,8 @@ def chunk_text(name, number, emitter, fns):
         hook_header += '#include "romfs_mods.h"\n'
     if any(re.search(r'\bmod_(flag_get|flag_set|reward_begin|reward_test|reward_claim)\(', s) for s in body):
         hook_header += '#include "mod_state.h"\n'
+    if any(re.search(r'\bregion_\w+\(', s) for s in body):
+        hook_header += '#include "regions.h"\n'
     return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n' + hook_header + '\n' + protos + '\n'
             + '\n\n'.join(body) + '\n')
 

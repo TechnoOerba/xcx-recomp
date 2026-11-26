@@ -80,7 +80,8 @@ Saves are never touched. The game uses a game-file mod's copy the next time it l
 start-up (the bdat tables) needs a restart.
 
 Game-file mods keep their own flags and survey reward marks in a file next to each save slot, never in the game's
-save: [mod-state.md](mod-state.md).
+save: [mod-state.md](mod-state.md). A game-file mod can also add map regions of its own, with hexagons, a survey rate,
+rewards and rows in the survey panels: [regions.md](regions.md).
 
 The game's F1 menu has the same manager on its **Mods** tab (`runtime/mod_library.c`: WinHTTP downloads on Windows,
 curl on Linux, `runtime/mod_zip.c` unpacks), with the same checks and folder layout. Both write

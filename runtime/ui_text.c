@@ -462,6 +462,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_OV_FMT_SIZE] = "%ux%u", [UI_MENU_OV_FMT_SCENE] = "%ux%u, %.0f%%",
     [UI_MENU_OV_FMT_FSR] = "AMD FSR 1, sharpness %d%%", [UI_MENU_OV_SCALE_NONE] = "none (1:1)",
     [UI_MENU_OV_SCALE_BILINEAR] = "bilinear",
+    [UI_MODS_MAP_PIECES] = "Map pieces (the world map as the game's own plus the mods' changes, put together when the map first loaded)",
+    [UI_MODS_MAP_STALE] = "The mods' map pieces have changed since the game started. The map is put together once per start, so the change applies after a restart.",
 };
 
 static const char *const text_ru[UI_TEXT_COUNT] = {
@@ -899,6 +901,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_OV_FMT_SIZE] = "%ux%u", [UI_MENU_OV_FMT_SCENE] = "%ux%u, %.0f%%",
     [UI_MENU_OV_FMT_FSR] = "AMD FSR 1, резкость %d%%", [UI_MENU_OV_SCALE_NONE] = "нет (1:1)",
     [UI_MENU_OV_SCALE_BILINEAR] = "билинейное",
+    [UI_MODS_MAP_PIECES] = "Части карты (карта мира из собственной карты игры и изменений модов, собранная при первой загрузке карты)",
+    [UI_MODS_MAP_STALE] = "Части карты в модах изменились после запуска игры. Карта собирается один раз за запуск, поэтому изменение вступит в силу после перезапуска.",
 };
 
 #define SWKBD_ONLY(name, ...) static const char *const name[UI_TEXT_COUNT] = {SWKBD(__VA_ARGS__)}

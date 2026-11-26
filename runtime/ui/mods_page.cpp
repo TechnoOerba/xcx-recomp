@@ -9,6 +9,7 @@ extern "C" {
 #include "mod_library.h"
 #include "romfs_mods.h"
 #include "bdat_merge.h"
+#include "map_overlay.h"
 #include "ui_text.h"
 // host.h is C only: the one the page needs, as declared there
 int rt_restart_game(void);
@@ -59,6 +60,28 @@ static int merge_lines(bool ahead) {
         merge_line(kind,line);
     }
     return i;
+}
+
+// What the map overlay did this run (runtime/map_overlay.c, map_overlay_line): a line per map mod (its entries, those lost to a higher
+// mod), the lines about mods or entries left out (orange), and, once the enabled mods' map pieces differ from what the
+// map was put together from, that they apply after a restart. Shown once the overlay was built with pieces, or when a
+// map mod was turned on later. Looked at once a second (map_overlay_changed reads the pieces files' sizes and times).
+static void map_pieces() {
+    static double next;static bool stale;static int state;
+    double now=ImGui::GetTime();
+    if(now>=next){state=map_overlay_state();stale=map_overlay_changed()!=0;next=now+1.0;}
+    char line[400];
+    int out=0;
+    if(state!=1&&!stale&&!map_overlay_line(0,line,sizeof line,&out))return;
+    ImGui::Spacing();ImGui::SeparatorText(menu_text(UI_MODS_MAP_PIECES));
+    ImGui::PushTextWrapPos(0);
+    if(stale){ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.82f,0.1f,1));ImGui::TextUnformatted(menu_text(UI_MODS_MAP_STALE));ImGui::PopStyleColor();}
+    for(int i=0;map_overlay_line(i,line,sizeof line,&out);++i){
+        if(out)ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(1.0f,0.7f,0.4f,1));   // something not used: orange, as a merge's
+        ImGui::TextUnformatted(line);
+        if(out)ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
 }
 
 // The game-file mods that are on, highest priority first as romfs-enabled.txt lists them (runtime/romfs_mods.c,
@@ -340,6 +363,7 @@ static bool library(float scale,bool focus_first) {
         ImGui::PopID();ImGui::EndTable();
     }
     mod_priority(v,idle);
+    map_pieces();
     return focused;
 }
 

@@ -44,6 +44,10 @@ __attribute__((weak)) int romfs_mods_move(const char *id, int up) {
 __attribute__((weak)) int romfs_mods_tables_changed(void) { return test_changed; }
 static int test_file_checks;   // romfs_mods_check_files calls: one per refresh, never one per row
 __attribute__((weak)) void romfs_mods_check_files(void) { test_file_checks++; }
+// runtime/map_overlay.c's Mods tab lines: no map pieces in this test
+__attribute__((weak)) int map_overlay_state(void) { return 0; }
+__attribute__((weak)) int map_overlay_line(int, char *, size_t, int *) { return 0; }
+__attribute__((weak)) int map_overlay_changed(void) { return 0; }
 static int test_ahead, premerges;   // romfs_mods_premerge_state; calls of romfs_mods_premerge
 static const char *test_next[4];
 static int test_nnext;

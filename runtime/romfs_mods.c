@@ -29,6 +29,7 @@
 #include "cfg.h"
 #include "fs.h"
 #include "host.h"
+#include "map_overlay.h"
 #include "platform/platform.h"
 
 #define LIST_CAP 4096          // bytes of romfs-enabled.txt
@@ -658,6 +659,12 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     if (!strncmp(one, "ev/title/", 9)) __atomic_store_n(&in_world, 0, __ATOMIC_RELAXED);
     else if (!strcmp(one, "gimmick/world_info.bin") || !strncmp(one, "map/mapcoli/", 12))
         __atomic_store_n(&in_world, 1, __ATOMIC_RELAXED);
+    // The world map's files, when an enabled mod has map pieces: served by runtime/map_overlay.c (map_overlay_claims),
+    // ahead of any mod's whole copy
+    if (map_overlay_claims(one)) {
+        one[strlen(one) + 1] = 0;
+        return (uint64_t)(uintptr_t)one;
+    }
     if (!__atomic_load_n(&nfiles, __ATOMIC_RELAXED)) return list;
     if (is_table(one)) {
         // A data table is claimed only once there is a file to serve for it: the merge (or the reuse of one made

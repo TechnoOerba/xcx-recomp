@@ -1174,6 +1174,14 @@ PlatFile *plat_file_open(const char *path) {
     return h == INVALID_HANDLE_VALUE ? NULL : (PlatFile *)h;
 }
 
+PlatFile *plat_file_open_shared(const char *path) {
+    wchar_t w[WPATH];
+    if (!widen(path, w, WPATH)) return NULL;
+    HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+    return h == INVALID_HANDLE_VALUE ? NULL : (PlatFile *)h;
+}
+
 PlatFile *plat_file_open_unbuffered(const char *path) {
     wchar_t w[WPATH];
     if (!widen(path, w, WPATH)) return NULL;

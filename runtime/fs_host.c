@@ -24,6 +24,7 @@
 
 #include "fs.h"
 #include "host.h"
+#include "map_overlay.h"
 #include "platform/platform.h"
 #include "romfs_mods.h"
 #include "romfs_path.h"
@@ -963,6 +964,11 @@ static uint32_t open_file(uint64_t *out, const char *path, int mode) {
     char p[PATH_CAP];
     int kind = M_FREE;
     if (romfs_owns(path)) {
+        // The world map from the game's copy and the enabled mods' map pieces (runtime/map_overlay.c, map_overlay_open)
+        if (mode == FS_OPEN_READ && out && map_overlay_open(path, out)) {
+            fs_trace("map", path);
+            return 0;
+        }
         // An enabled loose mod's file comes before the RomFS image (runtime/romfs_mods.c), read-only like the RomFS
         if (mode != FS_OPEN_READ || !romfs_mod_file(path, p, sizeof p)) return romfs_open(out, path, mode);
         fs_trace("mod", path);
@@ -997,6 +1003,7 @@ static uint32_t open_file(uint64_t *out, const char *path, int mode) {
 
 static uint32_t read_file(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size) {
     if (romfs_handle(h)) return romfs_read(out, h, offset, buffer, size);
+    if (map_overlay_handle(h)) return map_overlay_read(out, h, offset, buffer, size);
     PlatFile *f;
     int mode;
     if (!out || offset < 0 || (!buffer && size) || !file_of(h, &f, &mode)) return FS_R_INVALID_ARGUMENT;
@@ -1044,6 +1051,7 @@ static uint32_t write_file(uint64_t h, int64_t offset, const void *buffer, uint6
 
 static uint32_t file_size(int64_t *out, uint64_t h) {
     if (romfs_handle(h)) return romfs_size(out, h);
+    if (map_overlay_handle(h)) return map_overlay_size(out, h);
     PlatFile *f;
     PlatFileId id;
     if (!out || !file_of(h, &f, NULL) || !plat_file_id(f, &id)) return FS_R_INVALID_ARGUMENT;
@@ -1073,6 +1081,10 @@ static uint32_t flush_file(uint64_t h) {
 static void close_file(uint64_t h) {
     if (romfs_handle(h)) {
         romfs_close(h);
+        return;
+    }
+    if (map_overlay_handle(h)) {
+        map_overlay_close(h);
         return;
     }
     if (!file_of(h, NULL, NULL)) rt_fatal("fs: close of invalid file handle %#llx", (unsigned long long)h);
@@ -1124,7 +1136,8 @@ static uint32_t rename_file(const char *from, const char *to) {
 
 static uint32_t entry_type(int *out, const char *path) {
     if (romfs_owns(path)) {
-        if (out && romfs_mod_file(path, NULL, 0)) {   // a loose mod's file (runtime/romfs_mods.c)
+        if (out && (map_overlay_serves(path) || romfs_mod_file(path, NULL, 0))) {   // a served map file or a loose
+                                                                                      // mod's file (romfs_mods.c)
             *out = FS_ENTRY_FILE;
             return 0;
         }

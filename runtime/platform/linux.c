@@ -1184,6 +1184,8 @@ PlatFile *plat_file_open(const char *path) {
     return fd < 0 ? NULL : (PlatFile *)(intptr_t)(fd + 1);
 }
 
+PlatFile *plat_file_open_shared(const char *path) { return plat_file_open(path); }   // renames never block here
+
 PlatFile *plat_file_open_unbuffered(const char *path) {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECT);
     return fd < 0 ? NULL : (PlatFile *)(intptr_t)(fd + 1);

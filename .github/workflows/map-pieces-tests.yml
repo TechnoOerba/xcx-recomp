@@ -1,0 +1,61 @@
+# Map mods as pieces on Linux and Windows: runtime/map_overlay.c serving a small made-up map from its game copy and
+# two mods' pieces, checked byte for byte against tools/map_pieces.py (tests/map_overlay_test.py through
+# tests/map_overlay_check.c), then a compile of the overlay with the real zstd header and of the files that call it.
+# No game files: the test makes its own map. Windows builds with MSYS2 UCRT64 clang, Linux with the runner's clang.
+name: Map pieces tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            clang: clang
+          - runner: windows-2025
+            clang: C:\msys64\ucrt64\bin\clang.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # A core update (pacman, bash, msys2-runtime) makes the first -Syu close MSYS2 before it installs anything, so
+      # update twice, then install.
+      - if: runner.os == 'Windows'
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-zstd"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y libzstd-dev
+      - name: Tests
+        shell: bash
+        env:
+          XCX_CLANG: ${{ matrix.clang }}
+        run: |
+          export PATH="/c/msys64/ucrt64/bin:$PATH"
+          # The test skips itself without clang; here that would be a pass that tested nothing.
+          "$XCX_CLANG" --version
+          python tests/map_overlay_test.py -v
+      - name: Compile the overlay and its callers
+        shell: bash
+        env:
+          CLANG: ${{ matrix.clang }}
+        run: |
+          export PATH="/c/msys64/ucrt64/bin:$PATH"
+          # -Wall -Wextra with no warning in the overlay's own files (headers it includes from elsewhere may warn on
+          # some compilers; they are not this workflow's to judge)
+          out=$("$CLANG" -std=gnu11 -fsyntax-only -Wall -Wextra -Iruntime runtime/map_overlay.c 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          if grep -q "map_overlay\.[ch]:[0-9]*:[0-9]*: warning" <<< "$out"; then exit 1; fi
+          for f in runtime/romfs_mods.c runtime/fs_host.c; do
+            "$CLANG" -std=gnu11 -fsyntax-only -Wall -Werror=implicit-function-declaration -Iruntime "$f"
+          done

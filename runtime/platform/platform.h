@@ -321,6 +321,9 @@ PlatFile *plat_file_open(const char *path);               // read-only; NULL whe
 // The same without the OS's file cache (reads go to the disk into the buffer): offsets, sizes and buffers aligned to
 // the sector size.
 PlatFile *plat_file_open_unbuffered(const char *path);
+// The same as plat_file_open, but the file may be renamed or deleted while it is open (Windows: FILE_SHARE_DELETE;
+// the open handle keeps reading the old file): for files a run keeps open that their owner may replace meanwhile.
+PlatFile *plat_file_open_shared(const char *path);
 void plat_file_close(PlatFile *f);
 // Bytes read at off (0 at or past the end of the file), -1 on an I/O error, -2 when the OS refused to write into buf
 // (a read-only page).

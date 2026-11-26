@@ -40,6 +40,7 @@ void cfg_set(const char *name, const char *value) { (void)name; (void)value; }
 int cfg_save(void) { return 1; }
 
 const char *romfs_mount_name(void) { return "rom"; }
+int map_overlay_claims(const char *key) { (void)key; return 0; }   // no map pieces in this test
 
 int main(int argc, char **argv) {
     normalise();

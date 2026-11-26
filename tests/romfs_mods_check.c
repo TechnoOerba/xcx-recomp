@@ -28,6 +28,7 @@ int cfg_bool(const char *name) { return !strcmp(name, "XCX_BDAT_MERGE_AUTO") && 
 void cfg_set(const char *name, const char *value) { (void)name; (void)value; }
 int cfg_save(void) { return 1; }
 const char *romfs_mount_name(void) { return "rom"; }
+int map_overlay_claims(const char *key) { (void)key; return 0; }   // no map pieces in this test
 
 static int checks, failures;
 static void verify(int yes, const char *what) {

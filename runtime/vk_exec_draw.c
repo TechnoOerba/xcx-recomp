@@ -1871,10 +1871,13 @@ static uint64_t guest_fnv(const uint8_t *p, uint32_t n) {
 // not of our translation, which changes with the translator. One table and one memo for all of them, so a program is
 // hashed once, whichever row asks first. A miss (another game version) only leaves the game's own draw.
 // - The camera rain droplets (the Camera rain droplets row).
+// - The sky's clouds (the depth of field, vk_bokeh.c vk_bokeh_clouds): one program draws them in their own pass into the
+//   light target. A miss means no cloud mask: the clouds then count as sky and the Sky row decides for them.
 static const struct { uint64_t fs; uint32_t len; uint64_t vs; } FX_PROG[] = {
     {0x8eaffeb44d1e1319ull, 1024, 0xbcfbcf458a0c3bfdull},   // FX_RAIN: the camera rain droplets
+    {0x883703b13fd58ddeull, 512, 0xad39e80aac9a9174ull},    // FX_CLOUDS: the sky's clouds
 };
-enum { FX_NONE, FX_RAIN };
+enum { FX_NONE, FX_RAIN, FX_CLOUDS };
 
 static int fx_program(VkExec *ex) {   // FX_*; kept per program serial
     static struct { uint64_t serial; int8_t kind; } memo[4096];
@@ -1928,6 +1931,8 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (ex->in_pass && (w > ex->pass_w || h > ex->pass_h)) vk_exec_pass_end(ex);
         if (!ex->in_pass) ex->rt_resolved = 0;
     }
+    // the depth of field copies the light target before the clouds go on (it may end the open pass)
+    if (ex->prog && vk_bokeh_wants_clouds() && fx_program(ex) == FX_CLOUDS) vk_bokeh_clouds(ex);
     if (!ex->in_pass) ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
     vk_exec_pass_begin(ex);
     VkRect2D sc = vk_exec_scissor(ex);
@@ -2035,6 +2040,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         ex->recorded++;
         B.st = s, B.st_valid = 1;
     }
+    vk_bokeh_draw(ex);         // the scene projection, while far bokeh is on (vk_bokeh.c)
     vk_dlss_draw(ex, count);   // the scene camera and the jitter (vk_dlss.c)
     vk_mvsurvey_draw(ex);
     vk_mvprev_draw(ex);

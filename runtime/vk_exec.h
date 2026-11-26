@@ -123,6 +123,12 @@ void vk_exec_inline_end(int reopen);
 // vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
 // buffers): the replay continues in a new one (vk_sync_split).
 void vk_exec_draw_new_cb(void);
+// vk_bokeh.c (XCX_BOKEH): far bokeh as the game's scaling pass begins, the projection from the scene draws, per present.
+void vk_bokeh_pass(VkExec *ex);
+void vk_bokeh_draw(VkExec *ex);
+void vk_bokeh_frame(void);
+int vk_bokeh_wants_clouds(void);         // the next cloud draw should be marked (vk_exec_draw.c)
+void vk_bokeh_clouds(VkExec *ex);        // a cloud draw, before its pass begins
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
 // vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
 void vk_exec_bc_gone(VkImage image);

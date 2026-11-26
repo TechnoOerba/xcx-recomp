@@ -88,6 +88,12 @@
 # Camera rain droplets: 1 (default) keeps the round droplets the game draws just in front of the camera in rain; 0
 # leaves them out (the falling rain stays). Changes take effect at once.
 # rain_droplets = 1
+# Depth of field during play, softening what is far away: off (default), horizon (from about 800 m), vista (from
+# about 300 m) or portrait (from about 100 m). Changes take effect at once.
+# bokeh = off
+# With bokeh on: bokeh_sky = 1 blurs the sky too, and bokeh_clouds = 1 the clouds; 0 (default) keeps each sharp.
+# bokeh_sky = 0
+# bokeh_clouds = 0
 
 [game]
 # 1 turns cheats on: the F1 menu gets its Cheats tab, and the cheats switched on there run. 0 (default) keeps every

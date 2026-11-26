@@ -741,6 +741,23 @@ static void row_dawn_dusk(void) {
     opt_choice_list("XCX_DARK_NIGHTS", UI_MENU_DARK_NIGHTS, dn_values, dn_names, 3, UI_MENU_DARK_NIGHTS_DESC);
 }
 
+// Depth of field during play (vk_bokeh.c): off, then from the faintest step to the strongest.
+static void row_bokeh() {
+    static const char *values[] = {"off", "horizon", "vista", "portrait"};
+    const char *names[] = {menu_text(UI_MENU_OFF), menu_text(UI_MENU_BOKEH_HORIZON), menu_text(UI_MENU_BOKEH_VISTA),
+                           menu_text(UI_MENU_BOKEH_PORTRAIT)};
+    opt_choice_list("XCX_BOKEH", UI_MENU_BOKEH, values, names, 4, UI_MENU_BOKEH_DESC);
+    const char *bv = cfg_value("XCX_BOKEH");   // Sky and Clouds: Sharp or Soft, sub-rows shown while it is on
+    if (!strcmp(bv, "horizon") || !strcmp(bv, "vista") || !strcmp(bv, "portrait")) {   // as vk_bokeh.c reads it
+        static const UiTextId sky[] = {UI_MENU_BOKEH_SKY_SHARP, UI_MENU_BOKEH_SKY_SOFT};
+        opt_indent_next();
+        opt_choice("XCX_BOKEH_SKY", UI_MENU_BOKEH_SKY, sky, 2, UI_MENU_BOKEH_SKY_DESC);
+        static const UiTextId clouds[] = {UI_MENU_BOKEH_CLOUDS_SHARP, UI_MENU_BOKEH_CLOUDS_SOFT};
+        opt_indent_next();
+        opt_choice("XCX_BOKEH_CLOUDS", UI_MENU_BOKEH_CLOUDS, clouds, 2, UI_MENU_BOKEH_CLOUDS_DESC);
+    }
+}
+
 // Graphics: what the game draws and how sharp it is: the console mode the game draws for (docked or handheld), the 3D
 // scene's size and upscaling, texture filtering, and how far the world's detail reaches.
 static void tab_graphics(float scale) {
@@ -773,6 +790,8 @@ static void tab_graphics(float scale) {
     if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);
     static const UiTextId rain[] = {UI_MENU_OFF, UI_MENU_ON};   // a list like its neighbors (arrows), cfg.c's 0|1
     opt_choice("XCX_RAIN_DROPLETS", UI_MENU_RAIN_DROPLETS, rain, 2, UI_MENU_RAIN_DROPLETS_DESC);
+    if (!fx_ok) opt_disable_next(UI_MENU_NEEDS_GAME_200);   // like its neighbours: only 2.0.0 was checked
+    row_bokeh();
     opt_end();
 }
 

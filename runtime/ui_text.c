@@ -155,6 +155,20 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PICTURE_FIT_KEEP] = "Keep (bars)", [UI_MENU_PICTURE_FIT_STRETCH] = "Stretch",
     [UI_MENU_WORLD_GROUP] = "World detail",
     [UI_MENU_EFFECTS_GROUP] = "Effects",
+    [UI_MENU_BOKEH] = "Depth of field",
+    [UI_MENU_BOKEH_DESC] = "Adds a depth of field during play: what is far away softens, like a camera focused on the "
+                           "scene around you, and distant lights turn into round bokeh discs. Horizon softens only the "
+                           "horizon; Vista keeps a few hundred metres sharp; Portrait starts at about a hundred "
+                           "metres. Off is the game's original look. Cutscenes get it too; the HUD is never blurred.",
+    [UI_MENU_BOKEH_HORIZON] = "Horizon", [UI_MENU_BOKEH_VISTA] = "Vista", [UI_MENU_BOKEH_PORTRAIT] = "Portrait",
+    [UI_MENU_BOKEH_SKY] = "Sky",
+    [UI_MENU_BOKEH_SKY_DESC] = "Sharp keeps space, the moons and the stars crisp while the land in the distance "
+                               "softens into them. Soft blurs the sky along with everything else far away. Applies at once.",
+    [UI_MENU_BOKEH_SKY_SHARP] = "Sharp", [UI_MENU_BOKEH_SKY_SOFT] = "Soft",
+    [UI_MENU_BOKEH_CLOUDS] = "Clouds",
+    [UI_MENU_BOKEH_CLOUDS_DESC] = "Sharp keeps the moving clouds crisp, also where they pass in front of far land. Soft "
+                                  "blurs them like everything else far away, also over a sharp sky. Applies at once.",
+    [UI_MENU_BOKEH_CLOUDS_SHARP] = "Sharp", [UI_MENU_BOKEH_CLOUDS_SOFT] = "Soft",
     [UI_MENU_RAIN_DROPLETS] = "Camera rain droplets",
     [UI_MENU_RAIN_DROPLETS_DESC] = "In rain the game draws round droplets just in front of the camera. They follow your "
                                    "view and land on distant ledges as big blobs. Off hides them; the falling rain and "
@@ -589,6 +603,19 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_PICTURE_FIT_KEEP] = "Сохранять (полосы)", [UI_MENU_PICTURE_FIT_STRETCH] = "Растягивать",
     [UI_MENU_WORLD_GROUP] = "Детализация мира",
     [UI_MENU_EFFECTS_GROUP] = "Эффекты",
+    [UI_MENU_BOKEH] = "Глубина резкости",
+    [UI_MENU_BOKEH_DESC] = "Глубина резкости в игре: даль смягчается, огни становятся боке. «Горизонт»: "
+                           "только горизонт. «Панорама»: резко на сотни метров. «Портрет»: примерно со ста метров. "
+                           "«Выкл.»: как в оригинале. Действует и в роликах; интерфейс не размывается.",
+    [UI_MENU_BOKEH_HORIZON] = "Горизонт", [UI_MENU_BOKEH_VISTA] = "Панорама", [UI_MENU_BOKEH_PORTRAIT] = "Портрет",
+    [UI_MENU_BOKEH_SKY] = "Небо",
+    [UI_MENU_BOKEH_SKY_DESC] = "«Резкое» оставляет космос, луны и звёзды чёткими, а дальняя земля мягко "
+                               "переходит в них. «Мягкое» размывает небо вместе со всем далёким. Действует сразу.",
+    [UI_MENU_BOKEH_SKY_SHARP] = "Резкое", [UI_MENU_BOKEH_SKY_SOFT] = "Мягкое",
+    [UI_MENU_BOKEH_CLOUDS] = "Облака",
+    [UI_MENU_BOKEH_CLOUDS_DESC] = "«Резкие» оставляют плывущие облака чёткими, и там, где они проходят перед "
+                                  "дальней землёй. «Мягкие» размывают их, как всё далёкое. Действует сразу.",
+    [UI_MENU_BOKEH_CLOUDS_SHARP] = "Резкие", [UI_MENU_BOKEH_CLOUDS_SOFT] = "Мягкие",
     [UI_MENU_RAIN_DROPLETS] = "Капли дождя у камеры",
     [UI_MENU_RAIN_DROPLETS_DESC] = "В дождь игра рисует круглые капли прямо перед камерой. Они следуют за взглядом и "
                                    "крупными пятнами ложатся на дальние уступы. «Выкл.» их скрывает; сам дождь и брызги "

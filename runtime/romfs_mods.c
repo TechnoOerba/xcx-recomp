@@ -235,6 +235,9 @@ static uint32_t world_loads;    // world files loaded after a title file: one pe
 int romfs_mods_at_title(void) { return __atomic_load_n(&at_title, __ATOMIC_RELAXED); }
 uint32_t romfs_mods_world_loads(void) { return __atomic_load_n(&world_loads, __ATOMIC_RELAXED); }
 
+static int (*claim_also)(const char *key);
+void romfs_mods_claim_also(int (*claims)(const char *key)) { __atomic_store_n(&claim_also, claims, __ATOMIC_RELEASE); }
+
 uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
     maybe_reload();
     int files = __atomic_load_n(&nfiles, __ATOMIC_RELAXED) != 0;
@@ -250,7 +253,8 @@ uint64_t romfs_mod_declines(uint64_t list, uint64_t path) {
                __atomic_exchange_n(&at_title, 0, __ATOMIC_RELAXED)) {
         __atomic_add_fetch(&world_loads, 1, __ATOMIC_RELAXED);
     }
-    if (!files || !lookup(one, NULL, 0)) return list;
+    int (*also)(const char *) = __atomic_load_n(&claim_also, __ATOMIC_ACQUIRE);
+    if (!files || (!lookup(one, NULL, 0) && !(also && also(one)))) return list;   // also: romfs_mods_claim_also
     one[strlen(one) + 1] = 0;
     if (__atomic_fetch_add(&claim_logs, 1, __ATOMIC_RELAXED) < 64) rt_log("romfs mods: %s from a mod", one);
     return (uint64_t)(uintptr_t)one;

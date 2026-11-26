@@ -47,7 +47,7 @@ REWARD_LOOKUPS = {0x85686c: 0, 0x855fd0: 19}   # mov x8, xzr -> the register hol
 # Region Intel (hold ZL on the Segments tab): 12 rows, 11 regions + Mira, filled by main+0x84edd0 into the panel
 # (allocated 0x19a8 bytes at main+0x840a50, rows of 0x38 bytes from panel+0x1708), shown by a list (panel+0xb38) with
 # one widget per "mc_List%02d" node of the menu layout, at most 12 (the list keeps them inline at list+0x1c0, 0x48
-# each, count at list+0x520). When a mod region exists, runtime/regions.c gives the panel room for 16 rows and 16
+# each, count at list+0x520). When a mod region exists, runtime/regions.c gives the panel room for 12 + 48 rows and
 # widgets past its end: the alloc size, the list's widget block and count (all their uses, below), the widget limit,
 # the fill (mod regions before Mira, as many as the layout has rows for), the row callback and the destructor.
 INTEL_ALLOC_SIZE = 0x840a50        # mov w0, #0x19a8
@@ -108,6 +108,11 @@ SHORTCUT_WORDS = {SHORTCUT_ALLOC_SIZE: 0x5280ff00, SHORTCUT_ALLOC_CALL: 0x942e7f
 # main+0x84e390), a list (panel+0x508) of up to 11 widgets inline (0x48 at list+0x1c0, count at list+0x4d8) through the
 # row function main+0x85057c (cmp w2, #10). Its own copy of the list template: the sites below mirror INTEL's.
 MI_ROW = 0x85057c
+# The fill main+0x84e390 has the mission manager count the current missions per region into a sorted tree
+# (main+0xd51bc: nodes {left +0, right +8, u32 region +0x1c, u32 count +0x20}), then reads the 11 regions' counts from
+# it. After `ldr x1, [sp, #8]` (the tree's root, where the paths with and without a mission manager join; x19 = the
+# panel) the generated C lets runtime/regions.c read the mod regions' counts from the same tree.
+MI_TREE = 0x84e3f0
 MI_MAX = 0x670674                       # mov w4, #11; x19 = the list
 MI_COUNT_LOADS = {0x6706c0: (21, 0), 0x670780: (27, 19), 0x67078c: (8, 19), 0x6707cc: (8, 19), 0x671624: (20, 19),
                   0x67168c: (8, 0), 0x671768: (9, 0), 0x67177c: (8, 0), 0x671dc8: (20, 19), 0x671e78: (20, 19)}
@@ -115,7 +120,7 @@ MI_COUNT_STORES = {0x670570: (31, 19), 0x670700: (31, 19), 0x6707d4: (8, 19), 0x
                    0x671df8: (31, 19), 0x671eac: (31, 19)}
 MI_BLOCK_ADDS = {0x6706c8: (20, 0), 0x67162c: (0, 19), 0x6716a0: (8, 0), 0x67176c: (8, 0), 0x67178c: (9, 0),
                  0x671dd0: (0, 19), 0x671e80: (0, 19)}     # add xd, xn, #0x1c0 (#0x178: the last widget)
-MI_WORDS = {MI_ROW: 0x7100285f, MI_MAX: 0x52800164,
+MI_WORDS = {MI_ROW: 0x7100285f, MI_MAX: 0x52800164, MI_TREE: 0xf94007e1,
             0x6706c0: 0xf9426c15, 0x670780: 0xf9426e7b, 0x67078c: 0xf9426e68, 0x6707cc: 0xf9426e68,
             0x671624: 0xf9426e74, 0x67168c: 0xf9426c08, 0x671768: 0xf9426c09, 0x67177c: 0xf9426c08,
             0x671dc8: 0xf9426e74, 0x671e78: 0xf9426e74,
@@ -284,6 +289,8 @@ def after(mod, address):
         return f'ST32(c->sp + {post[1]:#x}, (uint32_t)region_loop_value(c->x[{post[0]}]));'
     if off == SEG_SIZE:
         return 'c->x[0] = region_mgr_size(c->x[0]);'
+    if off == MI_TREE:
+        return 'region_mi_missions(c->x[1]);'
     if off == RW_ALLOC_SIZE:
         return 'c->x[0] = region_rw_size(c->x[0]);'
     if off == RW_ZONE:

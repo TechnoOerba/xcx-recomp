@@ -25,6 +25,7 @@
 #include "fs.h"
 #include "host.h"
 #include "mod_state.h"
+#include "region_layout.h"
 #include "platform/platform.h"
 #include "romfs_mods.h"
 #include "romfs_path.h"
@@ -967,9 +968,11 @@ static uint32_t open_file(uint64_t *out, const char *path, int mode) {
     char p[PATH_CAP];
     int kind = M_FREE;
     if (romfs_owns(path)) {
-        // An enabled loose mod's file comes before the RomFS image (runtime/romfs_mods.c), read-only like the RomFS
-        if (mode != FS_OPEN_READ || !romfs_mod_file(path, p, sizeof p)) return romfs_open(out, path, mode);
-        fs_trace("mod", path);
+        // An enabled loose mod's file comes before the RomFS image (runtime/romfs_mods.c), read-only like the RomFS; a
+        // panel layout while mod regions exist is served with a row for each (runtime/region_layout.c)
+        if (mode == FS_OPEN_READ && region_layout_file(path, p, sizeof p)) fs_trace("regions", path);
+        else if (mode != FS_OPEN_READ || !romfs_mod_file(path, p, sizeof p)) return romfs_open(out, path, mode);
+        else fs_trace("mod", path);
         if (!out) return FS_R_INVALID_ARGUMENT;
     } else {
         fs_trace(mode & FS_OPEN_WRITE ? "write" : "read", path);
@@ -1141,7 +1144,8 @@ static uint32_t rename_file(const char *from, const char *to) {
 
 static uint32_t entry_type(int *out, const char *path) {
     if (romfs_owns(path)) {
-        if (out && romfs_mod_file(path, NULL, 0)) {   // a loose mod's file (runtime/romfs_mods.c)
+        // a loose mod's file (runtime/romfs_mods.c), or a panel layout served with rows for mod regions
+        if (out && (romfs_mod_file(path, NULL, 0) || region_layout_file(path, NULL, 0))) {
             *out = FS_ENTRY_FILE;
             return 0;
         }

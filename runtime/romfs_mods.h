@@ -8,6 +8,10 @@
 // ended by an empty string) for the path operation on path (a guest string): a list holding just that path when an
 // enabled mod has a file for it, so the game opens rom:/<path> instead; else list unchanged.
 uint64_t romfs_mod_declines(uint64_t list, uint64_t path);
+// Another part of the runtime's claims on those lookups: claims(key) (the path as the lookup has it: lowercase, no
+// mount) returns 1 for a path the game should open through rom:/ although no mod has it, because that part serves it
+// (runtime/region_layout.c, set by runtime/regions.c when the first mod region appears). Set once; NULL = none.
+void romfs_mods_claim_also(int (*claims)(const char *key));
 
 // The host path of an enabled mod's file for a RomFS path ("rom:/chr/..." or "chr/..."), copied to out (may be NULL);
 // 0 when none.

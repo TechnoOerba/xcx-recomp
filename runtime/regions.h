@@ -42,7 +42,7 @@ uint64_t region_reward_region(uint64_t panel, uint64_t vanilla);
 
 // Region Intel (hold ZL on the Segments tab) lists 11 regions and Mira in 12 rows, one per "mc_List%02d" node of its
 // menu layout, and has room for exactly 12. When a mod region exists as the panel is made, these give the panel room
-// for 16 rows and widgets past its end, and the fill puts the mod regions (in id order) between the game's 11 and
+// for 12 + 48 rows and widgets past its end, and the fill puts the mod regions (in id order) between the game's 11 and
 // Mira, as many as the layout has rows for (a layout with 12 rows: none; the panel is still made bigger, unused). With no mod
 // region every function leaves the game's values. Called by the generated C:
 // size: after the panel's allocation size is set (the game's size in, the size to allocate out);
@@ -63,7 +63,7 @@ void region_intel_free(Cpu *c);
 
 
 // Map Shortcuts (X on the map) lists 8 fixed entries. When a mod region exists as the panel is made, the panel's
-// list moves past its end with room for 16 (size / alloced / init / count / set_count / block / max, as for Region
+// list moves past its end with room for 8 + 48 (size / alloced / init / count / set_count / block / max, as for Region
 // Intel above), and each mod region (id order) becomes an entry after the 8th, as many as the layout has rows for.
 // The entry functions take over the game's function of the same job for such an entry and return 1, else return 0:
 // name (w1 = entry, x8 = string out), row (the row callback), select (the pick), can_jump / jump (the map's: a mod
@@ -131,7 +131,13 @@ void region_mi_set_count(uint64_t list, uint64_t count);
 uint64_t region_mi_block(uint64_t list, uint64_t vanilla);
 uint64_t region_mi_max(uint64_t list, uint64_t vanilla);
 int region_mi_row(Cpu *c);
+// After the Map tab's fill built its mission count tree (root = the tree's root): the mod regions' counts.
+void region_mi_missions(uint64_t root);
 // At the entry of main+0x1823e8 ("region past 24": not a field region): a far region answers 0 (1 returned).
 int region_field_test(Cpu *c);
 // The discovery flag to set on entering region (the game's 6148 + id in vanilla): a far region's FLD_FieldNameList flg.
 uint64_t region_flag(Cpu *c, uint64_t region, uint64_t vanilla);
+
+// ---- Panel rows made from the loaded layout: runtime/region_layout.h
+#include "region_layout.h"
+

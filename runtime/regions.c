@@ -19,6 +19,7 @@
 #include "regions.h"
 #include "cfg.h"
 #include "host.h"
+#include "romfs_mods.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -49,8 +50,11 @@ static uint32_t region_id(uint32_t slot);
 
 static int is_mod(uint32_t slot) { return slot < VSLOTS && mod_bits[slot >> 3] >> (slot & 7) & 1; }
 
+static int layout_claims(const char *key) { return region_layout_file(key, NULL, 0); }
+
 static void set_mod(uint32_t slot) {
     if (slot >= VSLOTS || is_mod(slot)) return;
+    if (!mod_regions) romfs_mods_claim_also(layout_claims);   // the panel layouts get rows from now on
     mod_bits[slot >> 3] |= (uint8_t)(1u << (slot & 7));
     uint32_t k = mod_regions;
     while (k > 0 && region_id(mod_order[k - 1]) > region_id(slot)) { mod_order[k] = mod_order[k - 1]; k--; }
@@ -216,8 +220,9 @@ static void log_rows(volatile int *logged, const char *panel, int64_t layout_row
     *logged = 1;
     int64_t room = layout_rows - game_rows;
     if (room < (int64_t)mod_regions)
-        rt_log("regions: %s: rows for %lld of %u mod region(s); the others are left out (a layout with more rows shows "
-               "them, up to the panel's limit)", panel, (long long)(room > 0 ? room : 0), (uint32_t)mod_regions);
+        rt_log("regions: %s: rows for %lld of %u mod region(s); the others are left out (the panel has rows for as "
+               "many as fit on the screen, runtime/region_layout.c)", panel, (long long)(room > 0 ? room : 0),
+               (uint32_t)mod_regions);
 }
 
 uint64_t region_loop_value(uint64_t slot) { return slot < VSLOTS ? region_id((uint32_t)slot) : slot; }
@@ -702,14 +707,17 @@ int region_reward_jump(Cpu *c) {
 // The panel (allocated with 0x19a8 bytes, main+0x840a50) keeps 12 rows of 0x38 bytes from +0x1708 {u32 region, f32
 // rate in percent, name string at +8}, the last one Mira (region 0). Its list (+0xb38) holds one widget per layout node
 // mc_List01.. inline at list+0x1c0 (0x48 bytes each) with the count right after at list+0x520: room for 12. With a mod
-// region the panel is allocated bigger: rows 12-15 follow the game's 12, then a block of 16 widgets, its count, a tag
-// and how many mod rows are shown. Every use of the list's block and count goes to the new place (recomp/regions.py),
-// only for the list whose tag matches; zeroed memory is an empty string for the game's string type.
+// region the panel is allocated bigger: rows for up to MOD_ROWS_MAX mod regions follow the game's 12, then a block of
+// widgets for them all, its count, a tag and how many mod rows are shown. Every use of the list's block and count goes
+// to the new place (recomp/regions.py), only for the list whose tag matches; zeroed memory is an empty string for the
+// game's string type.
 #define RI_SIZE 0x19a8
 #define RI_ROWS 0x1708
 #define RI_ROW 0x38
-#define RI_GAME_ROWS 12
-#define RI_MAX_ROWS 16
+#define RI_GAME_ROWS REGION_INTEL_GAME_ROWS
+// Mod regions a panel's lists have room for (runtime/region_layout.c gives its layout as many rows as fit on screen).
+#define MOD_ROWS_MAX 48
+#define RI_MAX_ROWS (RI_GAME_ROWS + MOD_ROWS_MAX)
 #define RI_LIST 0xb38
 #define RI_OLD_BLOCK 0x1c0
 #define RI_WIDGET 0x48
@@ -776,16 +784,17 @@ static Pending ri_pend, bp_pend, mi_pend, sc_pend;
 // 0xd0 bytes from +0x12a0 {u32 region, the region's battle probe entries (12 bytes each) from +8, count at +0xc8},
 // filled by main+0x84dee0 for regions 2, 4, 5, 7, 6 from the game data's per-region record (main+0x32594c), shown by a
 // list (+0x88) of up to 5 "mc_List%02d" widgets inline at list+0x1c0 (0x48 bytes each, count at list+0x328) through
-// the row function main+0x84e084 (rows 0-4). With a mod region the same bigger panel also holds 4 more blocks and the
-// list's 16 widgets, its count, a tag and how many mod rows are shown; rows 5.. are the mod regions (id order).
+// the row function main+0x84e084 (rows 0-4). With a mod region the same bigger panel also holds a block per mod region
+// and the list's widgets for them all, its count, a tag and how many mod rows are shown; rows 5.. are the mod regions
+// (id order).
 #define BP_BLOCKS 0x12a0
 #define BP_BLOCK 0xd0
-#define BP_GAME_ROWS 5
+#define BP_GAME_ROWS REGION_FN_GAME_ROWS
 #define BP_EXTRA (RI_EXT_END)                                    // panel offset of the mod regions' blocks
 #define BP_LIST 0x88
 #define BP_OLD_BLOCK 0x1c0
 #define BP_WIDGET 0x48
-#define BP_MAX_ROWS 16
+#define BP_MAX_ROWS (BP_GAME_ROWS + MOD_ROWS_MAX)
 #define BP_WIDGETS (BP_EXTRA + (BP_MAX_ROWS - BP_GAME_ROWS) * BP_BLOCK - BP_LIST)   // list-relative
 #define BP_COUNT (BP_WIDGETS + BP_MAX_ROWS * BP_WIDGET)
 #define BP_TAG (BP_COUNT + 8)
@@ -793,14 +802,16 @@ static Pending ri_pend, bp_pend, mi_pend, sc_pend;
 #define BP_PANEL_END (BP_LIST + BP_SHOWN + 8)
 // The Map tab's Region Intel ("Mission Info", hold ZL on the Map tab) is a third list in the same panel: up to 11 rows
 // {u32 region, u32 mission count} at +0x16b0, filled by main+0x84e390, shown by a list (+0x508) of up to 11
-// "mc_List%02d" widgets inline (0x48 bytes at list+0x1c0, count at list+0x4d8; layout ui/image/04010_parts02.wilay,
-// which has 12 rows) through the row function main+0x85057c (rows 0-10). With a mod region the bigger panel also holds
-// that list's 16 widgets, its count and a tag; rows 11.. are the mod regions (id order), with no missions.
+// "mc_List%02d" widgets inline (0x48 bytes at list+0x1c0, count at list+0x4d8) through the row function main+0x85057c
+// (rows 0-10). Its rows come from Region Intel's layout, ui/image/04010_parts05.wilay (12 rows: the 11 and Mira's,
+// which this view hides; runtime/region_layout.c adds the mod regions' rows before Mira's). With a mod region the
+// bigger panel also holds that list's widgets (as many as Region Intel's), its count and a tag; rows 11.. are the mod
+// regions (id order), with their mission counts (region_mi_missions).
 #define MI_LIST 0x508
 #define MI_OLD_BLOCK 0x1c0
 #define MI_WIDGET 0x48
 #define MI_GAME_ROWS 11
-#define MI_MAX_ROWS 16
+#define MI_MAX_ROWS RI_MAX_ROWS                // the same layout as Region Intel's (Mira's row hidden here)
 #define MI_BLOCK (BP_PANEL_END - MI_LIST)                         // list-relative
 #define MI_COUNT (MI_BLOCK + MI_MAX_ROWS * MI_WIDGET)
 #define MI_TAG (MI_COUNT + 8)
@@ -932,15 +943,16 @@ void region_intel_free(Cpu *c) {
 // ---- Map Shortcuts (X on the map, "Select Target Area")
 // The panel (0x7f8 bytes, main+0x841850) shows 8 fixed entries through a list (+0x1b8) of up to 8 "mc_List%02d"
 // widgets inline at list+0x1c0 (0x58 bytes each), count at list+0x480. With a mod region the panel is allocated
-// bigger and the list's widgets moved past its end, as for Region Intel; entry 8 and up are the mod regions (id order),
-// as many as the layout has rows for. Such an entry is named after its region, checked like Primordia's entry and,
-// when picked, posts the map the same "show region" command the continents' entries post, with the mod region.
+// bigger and the list's widgets moved past its end (room for MOD_ROWS_MAX more), as for Region Intel; entry 8 and up
+// are the mod regions (id order), as many as the layout has rows for. Such an entry is named after its region, checked
+// like Primordia's entry and, when picked, posts the map the same "show region" command the continents' entries post,
+// with the mod region.
 #define SC_SIZE 0x7f8
 #define SC_LIST 0x1b8
 #define SC_OLD_BLOCK 0x1c0
 #define SC_WIDGET 0x58
-#define SC_GAME_ROWS 8
-#define SC_MAX_ROWS 16
+#define SC_GAME_ROWS REGION_SHORTCUTS_GAME_ROWS
+#define SC_MAX_ROWS (SC_GAME_ROWS + MOD_ROWS_MAX)
 #define SC_BLOCK (SC_SIZE - SC_LIST)                              // list-relative
 #define SC_COUNT (SC_BLOCK + SC_MAX_ROWS * SC_WIDGET)
 #define SC_TAG (SC_COUNT + 8)
@@ -1170,8 +1182,31 @@ uint64_t region_mi_block(uint64_t list, uint64_t vanilla) {
 }
 uint64_t region_mi_max(uint64_t list, uint64_t vanilla) { return mi_on(list) ? MI_MAX_ROWS : vanilla; }
 
+// The mission counts of the mod regions (by slot), from the tree the Map tab's fill has the mission manager build
+// (main+0x84e390 -> main+0xd51bc: a sorted tree of {region, count}, missions of any region id). Read after the tree is
+// built (x1 = its root), each fill; a region with no missions has no node (0).
+static uint32_t mi_missions[VSLOTS];
+
+void region_mi_missions(uint64_t root) {
+    for (uint32_t j = 0; j < mod_regions; j++) {
+        uint32_t slot = mod_order[j], id = region_id(slot), n = 0;
+        uint64_t node = root;
+        for (int steps = 0; node && steps < 64; steps++) {   // a balanced tree of the game's regions: a few steps
+            uint32_t key = LD32(node + 0x1c);
+            if (key == id) { n = LD32(node + 0x20); break; }
+            node = LD64(node + (key > id ? 0 : 8));
+        }
+        static volatile uint8_t logged[VSLOTS];   // once per region a boot
+        if (n && !logged[slot]) {
+            logged[slot] = 1;
+            rt_log("regions: Region Intel (Map tab): mod region %u has %u mission(s)", id, n);
+        }
+        mi_missions[slot] = n;
+    }
+}
+
 // main+0x85057c: x0 = context (+8 = the panel), x1 = row widget, w2 = row. Row 11 + k is mod region k (id order), as
-// many as the layout has rows for: its name and no missions.
+// many as the layout has rows for: its name and its missions.
 int region_mi_row(Cpu *c) {
     uint32_t row = (uint32_t)c->x[2];
     if (row < MI_GAME_ROWS) return 0;
@@ -1190,10 +1225,20 @@ int region_mi_row(Cpu *c) {
         rt_call(c, MI_SET_TEXT, 2, widget, str);
         rt_call(c, RW_FREE_STR, 1, str);
         c->sp = sp;
-        rt_call(c, MI_SET_COUNT, 2, widget, 0ull);
+        rt_call(c, MI_SET_COUNT, 2, widget, (uint64_t)mi_missions[region]);
         static volatile int logged;
         if (!logged) { logged = 1; rt_log("regions: Region Intel (Map tab): mod region %u in row %u", region_id(region), row); }
     }
     c->x[0] = 1;
     return 1;
+}
+
+// ---- Rows for the panels' layouts (runtime/region_layout.c)
+uint32_t region_mod_count(void) { return mod_regions; }
+
+uint32_t region_panel_rows(RegionPanel panel) {
+    uint32_t room = panel == REGION_PANEL_INTEL       ? RI_MAX_ROWS - RI_GAME_ROWS
+                    : panel == REGION_PANEL_SHORTCUTS ? SC_MAX_ROWS - SC_GAME_ROWS
+                                                      : BP_MAX_ROWS - BP_GAME_ROWS;
+    return mod_regions < room ? mod_regions : room;
 }

@@ -80,7 +80,9 @@ what is in `mods/`:
   of them have are merged instead (`runtime/bdat_merge.c`), table by table and row by row against the game's own
   copy, the higher mod winning where two change the same thing; the rules are in [bdat-merge.md](bdat-merge.md). The
   merged file and a report of every change left out or settled by priority go to `<profile>/bdat-merge/`, and the
-  Mods tab shows them; `tests/bdat_merge_test.py` covers the rules.
+  Mods tab shows them; `tests/bdat_merge_test.py` covers the rules. The world raster (`zone/zone0001.atr`) and a
+  zone's placement files (`gimmick/<zone>/arrangement_*.gimk`) of several mods are combined too, cell by cell and
+  label by label ([mod-ids.md](mod-ids.md)).
 
 Saves are never touched. The game uses a game-file mod's copy the next time it loads the file, so data read at
 start-up (the bdat tables) needs a restart.

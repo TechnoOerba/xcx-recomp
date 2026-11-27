@@ -1,7 +1,8 @@
 # Merging data tables from several mods
 
 Game-file mods change the game's data by shipping a whole `bdat/common.bdat` (and `bdat/<language>/common_ms.bdat`
-for text). When two or more enabled mods have the same one, the game merges them (`runtime/bdat_merge.c`) instead of
+for text). When two or more enabled mods have the same one (or one mod whose numbers were moved, [mod-ids.md](mod-ids.md)),
+the game merges them (`runtime/bdat_merge.c`) instead of
 using only the top mod's copy. The merged file and a report of what happened go to `<profile>/bdat-merge/`.
 
 The merge follows four aims, in this order of weight when they pull apart:
@@ -16,6 +17,10 @@ The merge follows four aims, in this order of weight when they pull apart:
    the Mods tab. The point is understanding what to expect, not necessarily acting on it.
 
 ## What a mod changed
+
+First, each content mod's copy gets the numbers it was handed out ([mod-ids.md](mod-ids.md)): its region ids, mod
+flags, reward indices and named new rows, which another mod may have picked too, are moved to numbers of its own,
+and rows whose number is their row id are put at those ids. What follows compares the copies as they are then.
 
 Each mod's copy is compared with the game's own file, table by table. Tables are matched by their name; rows are
 matched as follows.
@@ -63,10 +68,22 @@ Per table:
   higher mod's row is kept. Keys stay unique: a renamed or added key that another row already has gives way to the
   higher mod's row, and the lower change is left out.
 - **Row numbers.** Rows that end up at another number than in a mod's own copy are reported for that mod: its other
-  tables may point at them by number (text ids, for one).
+  tables may point at them by number (text ids, for one). Not for the tables the game searches by a column of
+  theirs, their region (`FLD_WeatherRefer`, `FLD_ZoneEnvSe`, `MNU_MapZoneInfo`, `MNU_ZoneNameConvert`,
+  `SEG_ExploreReward`) or a location id (the map marks, `097D1D32`), where a row's number means nothing. A row whose id matters is named in its mod's `mod.json` and put at its own id instead.
+- **Values two mods' rows share.** Where rows two mods add hold the same value in a column in which each of the game's
+  rows has a value of its own (an event flag, a site number), the lower mod gets a caveat: the two may clash there.
+- **Spare game rows** that two content mods both take over (a FrontierNav site's rows, a camp slot): the lower mod's
+  edits to that row are left out whole ([mod-ids.md](mod-ids.md), "What can't be moved").
 
-A mod whose file has another list of tables is not merged: if it is the top mod its whole file is used (with the
-other mods' changes to that file left out), otherwise its changes to that file are left out. A file that isn't a data
+**New tables.** A table that is not in the game's file (a mod region's `SEG_TerminalZone<id>`, for one) is kept: from
+a mod's full copy whose list is the game's with new tables among it, or from a JSON table that names itself with a
+`"table"` key. Two mods adding a table of the same name: the higher one's is used, and the lower one's is left out.
+New tables come after the game's in the merged file, by name hash.
+
+A mod whose file has another list of tables (some of the game's tables missing or in another order; new tables
+alone don't count) is not merged: if it is the top mod its whole file is used (with the other mods' changes to that
+file left out), otherwise its changes to that file are left out. A file that isn't a data
 table file at all is left out wherever it is, and reported. A mod file that can't be read from disk (a read error, not
 its contents) stops that file's merge: the top mod's whole file is used, with the other mods' changes to it left out,
 or the game's own copy when the mods have only JSON tables of it, as when the merge can't be made at all.
@@ -90,7 +107,9 @@ that mod is the only one.
 
 Only whole tables are read: a JSON file whose rows aren't numbered one after another (a table with only some of its
 rows), that isn't valid JSON, has a value that doesn't fit its column, or names a table the game's file doesn't have
-is left out and reported. If a mod has only JSON tables and none of it can be used, the game gets its own copy.
+(without a `"table"` key of its own) is left out and reported. An integer cell may hold `"@kind:name"`, and the
+`"table"` key a name ending in one: the number the mod was given for that name ([mod-ids.md](mod-ids.md)); a name its
+`mod.json` doesn't declare leaves the table out. If a mod has only JSON tables and none of it can be used, the game gets its own copy.
 
 ## The report
 

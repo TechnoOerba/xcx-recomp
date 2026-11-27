@@ -24,22 +24,28 @@ still there when they are turned on again.
   {
     "id": "ashen-shoal",
     "version": "1",
-    "regions": [24, 25],
+    "regions": [ { "name": "ashen-shoal", "id": 24 }, { "name": "ashen-reef", "id": 25 } ],
     "flags":   [ { "name": "discovered/ashen-reef", "type": 1, "id": 49153 } ],
     "rewards": [ { "name": "ashen-reef/5", "index": 32788 } ]
   }
   ```
 
-  The state is stored by mod id and name, not by number, so a later version of the mod may renumber its flags and
-  rewards and keep the player's progress, as long as the names stay. `id` defaults to the folder's name; like folder
+  The recomp gives every region, flag and reward a number of its own ([mod-ids.md](mod-ids.md)): `id` and `index` are
+  the numbers the mod's files use (optional for flags and rewards that the mod's JSON tables name as `@flag:` and
+  `@reward:`), and another mod that picked the same ones doesn't take them. The state is stored by mod id and name,
+  not by number, so a later version of the mod may renumber its flags and rewards and keep the player's progress, as
+  long as the names stay. `mod.json` may also name new rows and FrontierNav sites (`rows`, `sites`, [mod-ids.md](mod-ids.md)); `regions` may still
+  be a list of bare numbers, as older files have it. `id` defaults to the folder's name; like folder
   ids it is lower case letters, digits, `.`, `_` and `-`, at most 63 bytes. Names are at most 95 bytes, with no
   quote, backslash or control character (UTF-8 is fine). `regions` lists the map regions that are the mod's own land
-  (see "Leaving a mod's land"), up to 16. `type` is the game's flag type (the first argument of its flag test). A
+  (see "Leaving a mod's land"), up to 16, by the numbers they were given. `type` is the game's flag type (the first argument of its flag test). A
   mod.json that breaks a rule, or isn't JSON (nested at most 32 deep), is left out with a log line; its saved state is
   kept.
-- A number used by two mods, or twice in one, goes to the first; the log says which was left out. A number outside the
-  ranges above is left out too. Flags and rewards in the mods' ranges that no enabled mod declares still work and are
-  kept, under the owner `_undeclared`.
+- A number another mod uses is handed out anew ([mod-ids.md](mod-ids.md)) and the mod's tables are rewritten to match;
+  the log says which moved. A number outside the ranges above, a name declared twice in one mod, or a second name with
+  the same number: left out, with a log line. A `mod.json` in this form (regions as names, rows, sites) needs a build with
+  the hand-out: an older one reads it as not JSON and uses none of it. Flags and rewards in the mods' ranges that no enabled mod declares still work and are kept, under the owner
+  `_undeclared`.
 - The mod state never changes the game's own flags or marks.
 
 ## The file

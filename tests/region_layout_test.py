@@ -382,11 +382,15 @@ class RegionLayout(unittest.TestCase):
         self.assertEqual(res['added'], 2)
         L = Layout(out)
         rows = L.top_rows()
-        for r in (1, 2):
+        for r in range(1, 5):                                        # the old rows and the new ones, once each
             y = L.floats(L.node(rows['mc_List%02d' % r][1])[2], 2)[1]
-            self.assertAlmostEqual(y, (r - 2) * STEP + 2 * d, places=5)
+            self.assertAlmostEqual(y, (r - 2) * STEP + 2 * d, places=5, msg=r)
+        last = (5 - 2) * STEP + MIRA_GAP - STEP + 2 * d             # the special row, kept last
+        self.assertAlmostEqual(L.floats(L.node(rows['mc_List05'][1])[2], 2)[1], last, places=5)
         sy = L.floats(L.node(1)[3], 2)[1]
         self.assertAlmostEqual(sy, 1 + 2 * (STEP + d) / h, places=4)
+        res, out = self.run_check(build(), 2, move_up=1, also=('band=%g' % band,))   # as Map Shortcuts runs
+        self.assertAlmostEqual(Layout(out).floats(Layout(out).node(0)[2], 2)[1], 0.25 - 2 * (STEP + d), places=5)
         _, plain = self.run_check(build(), 2)                        # no band: the rows stay where they were
         self.assertAlmostEqual(Layout(plain).floats(Layout(plain).node(Layout(plain).top_rows()['mc_List01'][1])[2], 2)[1],
                                -STEP, places=5)

@@ -90,7 +90,7 @@ region every hook returns what the game had.
   per mod region and is served from `<profile>/region-layouts/`: the last row and its child components copied one row
   step on, a special last row (Mira's, hidden in the Map tab's mission view by a track of its placement node) kept
   last, Region Intel's divider line above each row (`rect_LineNN`) added the same way, the window one row taller per
-  row; Map Shortcuts moves up a row per row (it reaches the screen's bottom) and its rows move down by what its
+  row (Map Shortcuts': see its header band below); Map Shortcuts moves up a row per row (it reaches the screen's bottom) and its rows move down by what its
   window's header band (part of the window's picture) grows as the window stretches, the FrontierNav panel widens once
   for a longer name. A panel taller than the screen's band is scaled down as a whole,
   to half size at the least. With no mod region nothing is served.

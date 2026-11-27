@@ -24,8 +24,10 @@
 // - mc_Top gets one more display item, frame and tree slot; the window and its blur grow by one row through their
 //   open-animation scale keys (their shown size is the rect's size times the key), moved by half the growth so the top
 //   edge stays;
-// - per layout: Map Shortcuts' panel moves up one row (it already reaches the screen's bottom), the FN tab's panel is
-//   made a little wider once (room for a longer region name: the window, the icon columns and their header).
+// - per layout: Map Shortcuts' panel moves up one row (it already reaches the screen's bottom), and since its window's
+//   header band is part of the window's picture and stretches with it, its rows also move down by the band's growth
+//   and the window and the move up grow by as much (RegionLayoutKind.band); the FN tab's panel is made a little wider
+//   once (room for a longer region name: the window, the icon columns and their header).
 // Nothing else in the file changes; the open and close animations need no change (seen in game).
 #include "region_layout.h"
 #include <math.h>
@@ -348,6 +350,7 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
         }
     }
     double grow = row >= 0 ? row + d : row - d;   // how much taller the panel gets
+    // (divider lines, below, don't take d: only Map Shortcuts has a band, and it has no lines)
     // Region Intel's divider lines: rects rect_Line01.. in mc_Top, each just above its row, the last one (above the
     // special row) on a node like that row's. One more line, the same way as the row: the line that stops being last
     // gets an ordinary node where it is, and the new line takes the special one, one row further on.

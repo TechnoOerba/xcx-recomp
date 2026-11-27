@@ -99,15 +99,18 @@ int romfs_mods_priority(char (*ids)[65], int cap) {
 
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
-    const char *names[4] = {"wismhd", "winvhe", "wismda", "winvda"};
+    const char *names[5] = {"wismhd", "winvhe", "wismda", "winvda", "ma00a_grd"};
     // not a map file: never claimed, and nothing built for it
     int other = map_overlay_claims("map/ma9990.wiefp") || map_overlay_claims("bdat/common.bdat");
     printf("other %d built %d\n", other, map_overlay_state());
     printf("claims %d\n", map_overlay_claims("map/ma9990.wismda"));
     printf("state %d\n", map_overlay_state());
-    for (int k = 0; k < 4; k++) {
+    printf("claims-coli %d %d\n", map_overlay_claims("map/mapcoli/ma00a_grd.wihkar"),
+           map_overlay_claims("map/mapcoli/ma02a_grd.wihkar"));
+    for (int k = 0; k < 5; k++) {
         char path[64], out[2048];
-        snprintf(path, sizeof path, "rom:/map/ma9990.%s", names[k]);
+        if (k < 4) snprintf(path, sizeof path, "rom:/map/ma9990.%s", names[k]);
+        else snprintf(path, sizeof path, "rom:/Map/MapColi/MA00A_GRD.wihkar");   // any case, as the game may ask
         uint64_t h;
         if (!map_overlay_open(path, &h)) {
             printf("closed %s\n", names[k]);
@@ -138,7 +141,8 @@ int main(int argc, char **argv) {
         map_overlay_read(&got, h, 0, once, (uint64_t)size + 100);
         if (got != (uint64_t)size || memcmp(all, once, (size_t)size)) printf("FAIL whole read of %s\n", names[k]);
         map_overlay_close(h);
-        snprintf(out, sizeof out, "%s/ma9990.%s", argv[1], names[k]);
+        if (k < 4) snprintf(out, sizeof out, "%s/ma9990.%s", argv[1], names[k]);
+        else snprintf(out, sizeof out, "%s/%s.wihkar", argv[1], names[k]);
         plat_file_write(out, all, (size_t)size);
         printf("size %s %lld\n", names[k], (long long)size);
         free(all);

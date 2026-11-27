@@ -52,6 +52,85 @@ def group_chunk(texture):
     return xbc1(bytes(d), 'group')
 
 
+def tag_sec(tag, flags, payload):
+    return struct.pack('>I4s', (8 + len(payload)) | (flags << 30), tag.encode()) + payload
+
+
+def coli_file(data, items, patches, entries):
+    """A made-up region collision file: a '1RAS' archive whose first entry is a tagfile (SDKV, DATA, TYPE, INDX) of
+    data, items [(type, offset, count)] and patches [(type, [offsets])]; entries: the archive's other entries, each
+    padded to pad bytes as given [(bytes, pad)]."""
+    item = b''.join(struct.pack('<III', *i) for i in items)
+    ptch = b''.join(struct.pack('<II', t, len(p)) + struct.pack('<%dI' % len(p), *p) for t, p in patches)
+    tag = tag_sec('TAG0', 0, tag_sec('SDKV', 0, b'20230200') + tag_sec('DATA', 1, data) +
+                  tag_sec('TYPE', 0, b'made-up types, never read') +
+                  tag_sec('INDX', 0, tag_sec('ITEM', 0, item) + tag_sec('PTCH', 0, ptch)))
+    blobs = [(tag, 128)] + entries
+    head = bytearray(160 + 64 * len(blobs))
+    head[:16] = b'1RAS' + struct.pack('<III', 0, 0x101, len(blobs))
+    head += bytes(-len(head) % 128)
+    body, pos = bytearray(), len(head)
+    for i, (b, pad) in enumerate(blobs):
+        b = b + bytes(-len(b) % pad)
+        struct.pack_into('<II', head, 160 + 64 * i, pos, len(b))
+        head[168 + 64 * i:176 + 64 * i] = (b'ent%d' % i).ljust(8, b'\0')
+        body += b
+        pos += len(b)
+    body += bytes(-pos % 2048)
+    struct.pack_into('<I', head, 4, len(head) + len(body))
+    return bytes(head + body)
+
+
+# the made-up collision: a root (item 1) pointing at the body array (item 2: two 32-byte bodies, each pointing at its
+# shape, item 3, and the name "ground", item 4), the shape after the array
+COLI_ITEMS = [(0, 0, 0), (2 | 0x10 << 24, 0, 1), (5 | 0x20 << 24, 16, 2), (7 | 0x10 << 24, 80, 1),
+              (8 | 0x20 << 24, 112, 6)]
+COLI_PATCHES = [(2, [0]), (5, [16, 48]), (8, [24, 56])]
+COLI_ENTRIES = [(b'IDM\0' + b'm' * 36, 64), (b'IDV\0' + b'v' * 124, 128)]
+
+
+def coli_data():
+    d = bytearray(128)
+    struct.pack_into('<Q', d, 0, 2)
+    for i in range(2):
+        struct.pack_into('<QQ4f', d, 16 + 32 * i, 3, 4, 1.0 + i, 2.0, 3.0, 0.0)
+    d[80:112] = struct.pack('<I', 16) + b'game shape' + bytes(18)
+    d[112:118] = b'ground'
+    return bytes(d)
+
+
+def coli_add(shapes, extra=None):
+    """The made-up collision with one body per shape (32 bytes each, a copy of body 0 pointing at its shape), made
+    the way the collision tool adds land: the body array grows in place, everything after it moves, the shapes go to
+    the end with an item each. extra: (patch type, offset in the first shape, item) of one more pointer field."""
+    d, items, patches = bytearray(coli_data()), [list(i) for i in COLI_ITEMS], [[t, list(p)] for t, p in COLI_PATCHES]
+    ins, delta = 16 + 32 * 2, 32 * len(shapes)
+    recs = b''.join(bytes(d[16:48]) for _ in shapes)
+    d = d[:ins] + recs + d[ins:]
+    for it in items[1:]:
+        if it[1] >= ins:
+            it[1] += delta
+    items[2][2] += len(shapes)
+    for p in patches:
+        p[1] = [o + delta if o >= ins else o for o in p[1]]
+    d += bytes(-len(d) % 16)
+    for j, sh in enumerate(shapes):
+        at = len(d)
+        d += sh + bytes(-len(sh) % 16)
+        struct.pack_into('<Q', d, ins + 32 * j, len(items))
+        items.append([7 | 0x10 << 24, at, 1])
+        patches[1][1].append(ins + 32 * j)
+        patches[2][1].append(ins + 32 * j + 8)
+        if extra and j == 0:
+            t, off, target = extra
+            struct.pack_into('<Q', d, at + off, target)
+            patches.append([t, [at + off]])
+    for p in patches:
+        p[1].sort()
+    return coli_file(bytes(d), [tuple(i) for i in items], [(t, p) for t, p in patches],
+                     [(b, 128) for b, _ in COLI_ENTRIES])
+
+
 class Game:
     """The made-up map: map header + data and nav header + data, and the archive holding them."""
 
@@ -109,9 +188,12 @@ class Game:
         files = {'wismhd': self.hd, 'wismda': self.da, 'winvhe': self.vh, 'winvda': self.vd}
         for ext, b in files.items():
             (folder / ('ma9990.' + ext)).write_bytes(b)
-        # the archive: an entry nobody asks for first, then the four; 16-byte alignment
+        self.coli = coli_file(coli_data(), COLI_ITEMS, COLI_PATCHES, COLI_ENTRIES)
+        (folder / 'ma00a_grd.wihkar').write_bytes(self.coli)
+        # the archive: an entry nobody asks for first, then the four, then the collision; 16-byte alignment
         entries = [('/other/file.bin', b'x' * 33, 33)] + [('/map/ma9990.' + e, b, len(b) if e.endswith('hd') or
                                                           e.endswith('he') else 0) for e, b in files.items()]
+        entries.append(('/map/mapcoli/ma00a_grd.wihkar', self.coli, 0))
         arh = bytearray(b'arh2' + struct.pack('<III', len(entries), 16, 0))
         ard = bytearray()
         for path, data, un in entries:
@@ -185,6 +267,17 @@ EDGES = [
      "pieces.txt line 4: entry number 305 doesn't fit in 1 bytes"),
     ('newer', "xcx-map-pieces 2\n", {}, 'pieces.txt line 1: map pieces of a newer format (version 2)'),
 ]
+# Collision: mods left out whole for one reason (each with a copy of low's bodies file, b.bin, unless it brings its own)
+COLI_MADE = "xcx-map-pieces 1\nmade-from mapcoli/ma00a_grd {cn} {ch:016x}\n"
+COLI_EDGES = [
+    ('coli-old', "xcx-map-pieces 1\nmade-from mapcoli/ma00a_grd {cn} 0123456789abcdef\nbodies mapcoli/ma00a_grd b.bin {bn}\n",
+     None, "made for another game version (its mapcoli/ma00a_grd differs from this game's)"),
+    ('coli-size', COLI_MADE + "bodies mapcoli/ma00a_grd b.bin 7\n", None, "pieces.txt line 3: b.bin is not the line's size"),
+    ('coli-magic', COLI_MADE + "bodies mapcoli/ma00a_grd b.bin 40\n", b'XCXA' + bytes(36),
+     'b.bin: not a collision bodies file (XCXB version 1)'),
+    ('coli-none', "xcx-map-pieces 1\nmade-from mapcoli/ma09a_grd 1 0123456789abcdef\nbodies mapcoli/ma09a_grd b.bin {bn}\n",
+     None, 'this game has no map/mapcoli/ma09a_grd.wihkar it can read'),
+]
 
 
 class MapOverlayTest(unittest.TestCase):
@@ -252,27 +345,52 @@ class MapOverlayTest(unittest.TestCase):
         edited = self.tmp / 'edited'
         edited.mkdir()
         edited_top(g, edited)
+        # collision: the top mod adds two bodies, the low one a third whose shape also points at the root (a patch
+        # type the game's file doesn't have)
+        (edited / 'top' / 'mapcoli').mkdir(parents=True)
+        (edited / 'top' / 'mapcoli' / 'ma00a_grd.wihkar').write_bytes(coli_add([b'top shape A'.ljust(32, b'.'),
+                                                                                b'top shape B'.ljust(48, b'.')]))
+        (edited / 'low' / 'mapcoli').mkdir(parents=True)
+        (edited / 'low' / 'mapcoli' / 'MA00A_GRD.wihkar').write_bytes(coli_add([b'low shape'.ljust(32, b'.')],
+                                                                               extra=(9, 16, 1)))
+        tool = [sys.executable, str(ROOT / 'tools/map_pieces.py')]
         top = mods / 'top' / 'romfs' / 'map' / 'ma9990.pieces'
         top.mkdir(parents=True)
-        r = subprocess.run([sys.executable, str(ROOT / 'tools/map_pieces.py'), 'make', str(top), '--game', str(g.dir),
-                            '--map', str(edited / 'hd'), str(edited / 'da'), '--nav', str(edited / 'vh'),
-                            str(edited / 'vd')], capture_output=True, text=True)
+        edits = ['--game', str(g.dir), '--map', str(edited / 'hd'), str(edited / 'da'), '--nav', str(edited / 'vh'),
+                 str(edited / 'vd'), '--coli', str(edited / 'top' / 'mapcoli' / 'ma00a_grd.wihkar')]
+        r = subprocess.run(tool + ['make', str(top)] + edits, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         text = (top / 'pieces.txt').read_text()
         self.assertIn('add wismhd texture n0', text)
         self.assertIn('fix group-1-52.xbc1 204 u16 texture +n0 3', text)   # the texture list
         self.assertIn('fix group-1-52.xbc1 98 u16 texture +n0 3', text)    # stream list B (base 64 + 34)
         self.assertNotIn('65535', text)
-        r = subprocess.run([sys.executable, str(ROOT / 'tools/map_pieces.py'), 'verify', str(top), '--game', str(g.dir),
-                            '--map', str(edited / 'hd'), str(edited / 'da'), '--nav', str(edited / 'vh'),
-                            str(edited / 'vd')], capture_output=True, text=True)
+        self.assertIn('bodies mapcoli/ma00a_grd bodies-ma00a_grd.bin', text)
+        r = subprocess.run(tool + ['verify', str(top)] + edits, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('ok:', r.stdout)
+        self.assertIn('mapcoli/ma00a_grd: built', r.stdout)
+        # a collision change that isn't only added bodies can't be pieces, and make says so
+        changed = bytearray(g.coli)
+        changed[changed.index(b'game shape')] ^= 1
+        (edited / 'ma00a_grd.wihkar').write_bytes(bytes(changed))
+        r = subprocess.run(tool + ['make', str(self.tmp / 'nope'), '--game', str(g.dir), '--coli',
+                                   str(edited / 'ma00a_grd.wihkar')], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('ship this collision file whole', r.stderr)
+        # the low mod's bodies, made by the tool on their own; its other pieces are written by hand below
+        lowcoli = self.tmp / 'lowcoli'
+        r = subprocess.run(tool + ['make', str(lowcoli), '--game', str(g.dir), '--coli',
+                                   str(edited / 'low' / 'mapcoli' / 'MA00A_GRD.wihkar')], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        coli_lines = [ln for ln in (lowcoli / 'pieces.txt').read_text().splitlines() if 'mapcoli/' in ln]
+        bodies = (lowcoli / 'bodies-ma00a_grd.bin').read_bytes()
         # in folders named with other case: found as romfs_mods.c finds mod files (it matters on Linux)
         low = mods / 'low' / 'romfs' / 'Map' / 'MA9990.pieces'
         low.mkdir(parents=True)
         (low / 'pieces.txt').write_text(LOW.format(hd_n=len(g.hd), hd_h=mp.xxh64(g.hd), vh_n=len(g.vh),
-                                                   vh_h=mp.xxh64(g.vh)))
+                                                   vh_h=mp.xxh64(g.vh)) + '\n'.join(coli_lines) + '\n')
+        (low / 'bodies-ma00a_grd.bin').write_bytes(bodies)
         (low / 'pv.xbc1').write_bytes(xbc1(b'vertex data' * 109))
         (low / 'tex.xbc1').write_bytes(xbc1(b'low texture' * 54))
         (low / 'g0.xbc1').write_bytes(group_chunk(3))
@@ -292,26 +410,54 @@ class MapOverlayTest(unittest.TestCase):
             for fn in files:
                 (d / fn).write_bytes(xbc1(b'x' * 300))
             edges.append(d)
+        cn, ch = len(g.coli), mp.xxh64(g.coli)
+        for name, text, own, _ in COLI_EDGES:
+            d = mods / name / 'romfs' / 'map' / 'ma9990.pieces'
+            d.mkdir(parents=True)
+            (d / 'pieces.txt').write_text(text.format(cn=cn, ch=ch, bn=len(bodies)))
+            (d / 'b.bin').write_bytes(own if own is not None else bodies)
+            edges.append(d)
         whole = mods / 'whole' / 'romfs' / 'map'
-        whole.mkdir(parents=True)
+        (whole / 'mapcoli').mkdir(parents=True)
         (whole / 'ma9990.wismhd').write_bytes(g.hd)
-        order = ['top', 'bad', 'low', 'old'] + [e[0] for e in EDGES] + ['whole']
+        (whole / 'mapcoli' / 'ma00a_grd.wihkar').write_bytes(g.coli)
+        (whole / 'mapcoli' / 'ma02a_grd.wihkar').write_bytes(g.coli)   # no pieces for it: loads as before
+        names = [e[0] for e in EDGES] + [e[0] for e in COLI_EDGES]
+        order = ['top', 'bad', 'low', 'old'] + names + ['whole']
         (mods / 'romfs-enabled.txt').write_text(''.join(m + '\n' for m in order))
         out = self.run_check(mods, self.tmp / 'out', touch=low / 'pieces.txt')
         self.assertIn('state 1', out)
         self.assertIn('other 0', out)
+        self.assertIn('claims-coli 1 0', out)   # ma00a_grd served, ma02a_grd (no bodies for it) not claimed
         # the reference gets every enabled mod with pieces, in the same order, and must leave out the same ones
-        heads, layout, report, gsize = mp.combine(str(g.dir), [str(top), str(bad), str(low), str(old)] +
-                                                  [str(e) for e in edges])
+        heads, layout, report, gsize, built = mp.combine(str(g.dir), [str(top), str(bad), str(low), str(old)] +
+                                                         [str(e) for e in edges])
         out_ref = sorted(r.split(':')[0] for r in report if 'map pieces left out' in r)
-        self.assertEqual(out_ref, sorted(['bad', 'old'] + [e[0] for e in EDGES]), report)
+        self.assertEqual(out_ref, sorted(['bad', 'old'] + names), report)
         lost = "low: terrain 0 is top's (a higher mod); low's change to it is left out"
         self.assertEqual([r for r in report if 'higher mod' in r], [lost], report)
-        for name, _, _, why in EDGES:   # each twin says the same about each
+        for name, _, _, why in EDGES + COLI_EDGES:   # each twin says the same about each
             self.assertTrue(any(r.startswith('%s: map pieces left out: %s' % (name, why)) for r in report),
                             (name, report))
             self.assertIn('line! %s: map pieces left out: %s' % (name, why), out)
         served = self.tmp / 'out'
+        # collision: the game's two bodies, then top's two, then low's; every byte as the tool builds it
+        self.assertEqual((served / 'ma00a_grd.wihkar').read_bytes(), built['ma00a_grd'][0])
+        self.assertEqual(built['ma00a_grd'][1:], (3, 2))
+        v = mp.coli_view(built['ma00a_grd'][0])
+        self.assertEqual(v['items'][2][2], 5)
+        bodies_at = v['items'][2][1]
+        firsts = [struct.unpack_from('<Q', v['data'], bodies_at + 32 * i)[0] for i in range(5)]
+        self.assertEqual(firsts, [3, 3, 5, 6, 7])   # the game's shape, top's two new items, low's one
+        shape = v['items'][7]
+        self.assertEqual(v['data'][shape[1]:shape[1] + 9], b'low shape')
+        self.assertEqual(struct.unpack_from('<Q', v['data'], shape[1] + 16)[0], 1)   # low's own pointer field
+        self.assertEqual(v['patches'][-1], [9, [shape[1] + 16]])
+        self.assertIn('line low: 7 map entries (2 added), 1 lost to higher mods; 1 collision body', out)
+        self.assertIn('line top: ', out)
+        self.assertIn('2 collision bodies', out)
+        self.assertIn('line! whole: its whole map/mapcoli/ma00a_grd.wihkar is left out', out)
+        self.assertNotIn('ma02a_grd', out)
         for f in ('wismhd', 'winvhe'):
             self.assertEqual((served / ('ma9990.' + f)).read_bytes(), heads[f], f)
             data = bytearray(mp.readb(mp.game_file(str(g.dir), mp.DATA[f])))

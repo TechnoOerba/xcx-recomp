@@ -6,16 +6,20 @@ map/ma9990.winvhe + .winvda (the enemy navmesh). A map mod made the usual way (a
 data file and repoint the header) is a whole header plus a data file of ~1 GB. Pieces are what it changed, keyed by
 header table and entry, with the data those entries point at as files of their own:
 
-  python tools/map_pieces.py make OUT --game GAME [--map HD SRC] [--nav HD SRC]
+  python tools/map_pieces.py make OUT --game GAME [--map HD SRC] [--nav HD SRC] [--coli WIHKAR]...
       OUT: the mod's pieces folder (<mod>/romfs/map/ma9990.pieces). GAME: a folder with the game's own ma9990.wismhd,
-      .wismda, .winvhe and .winvda (unpacked; map__ma9990.* names work too). HD: the edited header; SRC: the edited
-      data file, or a folder of chunk-<offset>.xbc1 / .bin files holding everything past the game's end.
-  python tools/map_pieces.py verify OUT --game GAME [--map HD SRC] [--nav HD SRC]
+      .wismda, .winvhe and .winvda (unpacked; map__ma9990.* names work too), and for --coli the game's collision files
+      (<name>.wihkar or map__mapcoli__<name>.wihkar). HD: the edited header; SRC: the edited data file, or a folder of
+      chunk-<offset>.xbc1 / .bin files holding everything past the game's end. WIHKAR: an edited collision file
+      (map/mapcoli/<name>.wihkar) that adds bodies to the game's: its bodies become a bodies-<name>.bin piece.
+  python tools/map_pieces.py verify OUT --game GAME [--map HD SRC] [--nav HD SRC] [--coli WIHKAR]...
       builds the header from the game's and the pieces (as the game will), and checks every entry against the edited
-      header and every piece's bytes against the edited data. Prints the built headers' xxh64, which the game logs.
+      header and every piece's bytes against the edited data, and each collision file built from the game's and the
+      bodies against the edited one, byte for byte. Prints the built files' xxh64, which the game logs.
   python tools/map_pieces.py combine --game GAME MOD... [--out DIR]
       MOD: a pieces folder, the top (winning) mod first. Prints what each mod keeps and loses, and the headers' xxh64;
-      --out writes the built headers and each data file's layout (piece offsets), never the data itself.
+      --out writes the built headers and collision files and each data file's layout (piece offsets), never the
+      data itself.
 
 No game data is in this file: only where the tables are (header words) and their entry sizes.
 """
@@ -314,6 +318,22 @@ def cmd_make(a):
         mh = readb(opt[0])
         lines.append('made-from %s %d %016x' % (f, len(gh), xxh64(gh)))
         make_file(f, gh, gsize, mh, Source(opt[1]), lines, files)
+    for path in a.coli or ():
+        name = coli_name(path)
+        game = game_coli(a.game, name)
+        if game is None:
+            sys.exit('no %s.wihkar (or map__mapcoli__%s.wihkar) in %s' % (name, name, a.game))
+        try:
+            piece = coli_split(game, readb(path))
+        except Unsplittable as e:
+            sys.exit('%s: %s; ship this collision file whole (it loads while no enabled mod adds bodies to it as '
+                     'pieces)' % (path, e))
+        fn = 'bodies-%s.bin' % name
+        files[fn] = bodies_bytes(piece)
+        lines.append('made-from mapcoli/%s %d %016x' % (name, len(game), xxh64(game)))
+        lines.append('bodies mapcoli/%s %s %d' % (name, fn, len(files[fn])))
+        print('mapcoli/%s: %d bodies, %d items, %d pointer fields, %d bytes of shapes' % (
+            name, piece['count'], len(piece['items']), len(piece['ptrs']), len(piece['tail'])))
     # each file written beside its place and moved over it: a game that has the old one open keeps reading the old one
     # (until its next start), never a file half rewritten
     def put(fn, data):
@@ -329,6 +349,261 @@ def cmd_make(a):
             os.remove(os.path.join(a.out, old))
     print('%s: %d lines, %d files, %d bytes of pieces' % (a.out, len(lines), len(files),
                                                         sum(len(b) for b in files.values())))
+
+
+# ---- collision: a region's map/mapcoli/<name>.wihkar ('1RAS' archive around a Havok tagfile), as bodies a mod adds
+MAX_COLI = 8
+MAX_COLI_FILE = 256 << 20
+COLI_CHARS = set('abcdefghijklmnopqrstuvwxyz0123456789_')
+
+
+class Unsplittable(Exception):
+    """A mod's collision file changes more than adding bodies: it can't be pieces."""
+
+
+def _sec(b, o, end, tag):
+    """(size, flags) of the tagfile section at o (header included), or None when it isn't tag or doesn't fit."""
+    if o + 8 > end or b[o + 4:o + 8] != tag.encode():
+        return None
+    w = struct.unpack_from('>I', b, o)[0]
+    size = w & 0x3FFFFFFF
+    return (size, w >> 30) if size >= 8 and o + size <= end else None
+
+
+def coli_view(b):
+    """The parts of a collision file, as runtime/map_overlay.c coli_view finds them; None for any other layout."""
+    n = len(b)
+    if n < 160 or b[:4] != b'1RAS':
+        return None
+    nent = u32(b, 12)
+    if not nent or nent > 64 or 160 + 64 * nent > n:
+        return None
+    ents = [struct.unpack_from('<II', b, 160 + 64 * i) for i in range(nent)]
+    if any(o + s > n or o < 160 + 64 * nent for o, s in ents):
+        return None
+    t = ents[0][0]
+    top = _sec(b, t, t + ents[0][1], 'TAG0')
+    if not top:
+        return None
+    end, o, v = t + top[0], t + 8, {'ents': ents, 'top_flags': top[1]}
+    s = _sec(b, o, end, 'SDKV')
+    if not s:
+        return None
+    v['sdkv'] = b[o:o + s[0]]
+    o += s[0]
+    s = _sec(b, o, end, 'DATA')
+    if not s:
+        return None
+    v['data'], v['data_flags'] = b[o + 8:o + s[0]], s[1]
+    o += s[0]
+    s = _sec(b, o, end, 'TYPE')
+    if not s:
+        return None
+    v['type'] = b[o:o + s[0]]
+    o += s[0]
+    ix = _sec(b, o, end, 'INDX')
+    if not ix or o + ix[0] != end:
+        return None
+    v['indx_flags'], iend, io = ix[1], o + ix[0], o + 8
+    s = _sec(b, io, iend, 'ITEM')
+    if not s or (s[0] - 8) % 12:
+        return None
+    v['items'] = [list(struct.unpack_from('<III', b, io + 8 + 12 * i)) for i in range((s[0] - 8) // 12)]
+    v['item_flags'] = s[1]
+    io += s[0]
+    s = _sec(b, io, iend, 'PTCH')
+    if not s or io + s[0] != iend:
+        return None
+    v['ptch_flags'], pb, p, v['patches'] = s[1], b[io + 8:io + s[0]], 0, []
+    while p + 8 <= len(pb):
+        ti, cnt = struct.unpack_from('<II', pb, p)
+        if p + 8 + 4 * cnt > len(pb):
+            return None
+        v['patches'].append([ti, list(struct.unpack_from('<%dI' % cnt, pb, p + 8))])
+        p += 8 + 4 * cnt
+    return v if v['items'] else None
+
+
+def coli_split(game, mod):
+    """The bodies a mod's whole collision file adds to the game's: {'array', 'esize', 'count', 'recs', 'items',
+    'ptrs', 'tail'}, or Unsplittable when it changes anything else. Checked by building it back (coli_build) and
+    comparing byte for byte, so a mod is pieces only when the pieces give exactly its file."""
+    g, m = coli_view(game), coli_view(mod)
+    if not g or not m:
+        raise Unsplittable('not a collision file this tool reads (1RAS + a Havok tagfile)')
+    if len(g['ents']) != len(m['ents']):
+        raise Unsplittable('a different number of archive entries')
+    for i in range(1, len(g['ents'])):   # the same bytes; a rewrite pads each entry to 128 (the game's may pad less)
+        a = game[g['ents'][i][0]:sum(g['ents'][i])]
+        b = mod[m['ents'][i][0]:sum(m['ents'][i])]
+        if len(b) < len(a) or b != a + bytes(len(b) - len(a)):
+            raise Unsplittable('archive entry %d differs' % i)
+    if (g['sdkv'], g['type']) != (m['sdkv'], m['type']):
+        raise Unsplittable('the type table differs')
+    gi, mi, ng = g['items'], m['items'], len(g['items'])
+    if len(mi) < ng:
+        raise Unsplittable('fewer items than the game')
+    grown = [k for k in range(1, ng) if mi[k] != gi[k] and (mi[k][0], mi[k][1]) == (gi[k][0], gi[k][1])
+             and mi[k][2] > gi[k][2]]
+    if len(grown) != 1:
+        raise Unsplittable('not exactly one array grows')
+    kb = grown[0]
+    _, boff, bcnt = gi[kb]
+    added = mi[kb][2] - bcnt
+    gd, md = g['data'], m['data']
+    for es in range(8, 4097, 8):   # the element size: where the game's data after the array reappears
+        ins, delta = boff + es * bcnt, es * added
+        if ins <= len(gd) and md[:ins] == gd[:ins] and md[ins + delta:ins + delta + len(gd) - ins] == gd[ins:]:
+            break
+    else:
+        raise Unsplittable("the game's data is not kept around one run of new elements")
+    end = len(gd) + delta
+    tail_at = end + (-end % 16)
+    if any(md[end:tail_at]):
+        raise Unsplittable('the padding before the added data is not zero')
+    for k in range(1, ng):
+        if k != kb and mi[k] != [gi[k][0], gi[k][1] + (delta if gi[k][1] >= ins else 0), gi[k][2]]:
+            raise Unsplittable('game item %d changed' % k)
+    items = []
+    for t, off, cnt in mi[ng:]:
+        if ins <= off <= ins + delta:
+            items.append((t, 0, off - ins, cnt))
+        elif off >= tail_at:
+            items.append((t, 1, off - tail_at, cnt))
+        else:
+            raise Unsplittable("a new item points into the game's data")
+    old = {}
+    for ti, p in g['patches']:
+        old.setdefault(ti, set()).update(o + (delta if o >= ins else 0) for o in p)
+    ptrs = []
+    for ti, p in m['patches']:
+        for o in p:
+            if o in old.get(ti, ()):
+                continue
+            v = struct.unpack_from('<Q', md, o)[0]
+            if v >= len(mi):
+                raise Unsplittable('a pointer past the items')
+            target = (1 << 31) | (v - ng) if v >= ng else v
+            if ins <= o and o + 8 <= ins + delta:
+                ptrs.append((ti, 0, o - ins, target))
+            elif o >= tail_at:
+                ptrs.append((ti, 1, o - tail_at, target))
+            else:
+                raise Unsplittable("a new pointer field in the game's data")
+    piece = {'array': kb, 'esize': es, 'count': added, 'recs': md[ins:ins + delta], 'items': items, 'ptrs': ptrs,
+             'tail': md[tail_at:]}
+    if coli_build(game, [piece]) != mod:
+        raise Unsplittable('built back from the game and the bodies, it is not the same file')
+    return piece
+
+
+def bodies_bytes(p):
+    """A bodies file (runtime/map_overlay.c, "Collision"): 'XCXB', 1, the counts, then records, items, pointers,
+    tail."""
+    return (b'XCXB' + struct.pack('<7I', 1, p['array'], p['esize'], p['count'], len(p['items']), len(p['ptrs']),
+                                  len(p['tail'])) + p['recs'] + b''.join(struct.pack('<4I', *i) for i in p['items']) +
+            b''.join(struct.pack('<4I', *q) for q in p['ptrs']) + p['tail'])
+
+
+def read_bodies(name, data):
+    """A bodies file read and checked as runtime/map_overlay.c coli_bodies does; Left otherwise."""
+    if len(data) > MAX_COLI_FILE:
+        raise Left("%s is too big or can't be read" % name)
+    if len(data) < 32 or data[:4] != b'XCXB' or u32(data, 4) != 1:
+        raise Left('%s: not a collision bodies file (XCXB version 1)' % name)
+    array, esize, count, ni, nptr, tail = struct.unpack_from('<6I', data, 8)
+    recs = esize * count
+    if 32 + recs + 16 * ni + 16 * nptr + tail != len(data):
+        raise Left("%s: its counts don't add up to its length" % name)
+    if not esize or not count or esize % 8 or esize > 4096:
+        raise Left('%s: its element size or count is out of range' % name)
+    at = 32 + recs
+    items = [struct.unpack_from('<4I', data, at + 16 * k) for k in range(ni)]
+    ptrs = [struct.unpack_from('<4I', data, at + 16 * ni + 16 * k) for k in range(nptr)]
+    size = (recs, tail)
+    if any(r > 1 or o > size[r] for _, r, o, _ in items) or \
+            any(r > 1 or o + 8 > size[r] or (v >> 31 and v & 0x7fffffff >= ni) for _, r, o, v in ptrs):
+        raise Left('%s: an item or pointer outside its bodies' % name)
+    return {'array': array, 'esize': esize, 'count': count, 'recs': data[32:32 + recs], 'items': items,
+            'ptrs': ptrs, 'tail': data[at + 16 * ni + 16 * nptr:]}
+
+
+def coli_build(game, pieces):
+    """The game's collision file with each piece's bodies, top mod first, as runtime/map_overlay.c coli_build: the
+    body array grows in place, the game's data after it moves along, each tail goes to the end (16-aligned)."""
+    g = coli_view(game)
+    gi, ng = g['items'], len(g['items'])
+    kb, es = pieces[0]['array'], pieces[0]['esize']
+    _, boff, bcnt = gi[kb]
+    ins = boff + es * bcnt
+    delta = sum(len(p['recs']) for p in pieces)
+    data, rec_at, tail_at = bytearray(g['data'][:ins]), [], []
+    for p in pieces:
+        rec_at.append(len(data))
+        data += p['recs']
+    data += g['data'][ins:]
+    for p in pieces:
+        data += bytes(-len(data) % 16)
+        tail_at.append(len(data))
+        data += p['tail']
+    data += bytes(-len(data) % 16)
+    items = [list(i) for i in gi]
+    for k in range(1, ng):
+        if items[k][1] >= ins:
+            items[k][1] += delta
+    items[kb][2] += sum(p['count'] for p in pieces)
+    first_new = []
+    for j, p in enumerate(pieces):
+        first_new.append(len(items))
+        for t, r, off, cnt in p['items']:
+            items.append([t, (tail_at[j] if r else rec_at[j]) + off, cnt])
+    lists = [[ti, [o + delta if o >= ins else o for o in pl]] for ti, pl in g['patches']]
+    where = {}
+    for i, (ti, _) in enumerate(lists):
+        where.setdefault(ti, i)
+    for j, p in enumerate(pieces):
+        for ti, r, off, target in p['ptrs']:
+            at = (tail_at[j] if r else rec_at[j]) + off
+            struct.pack_into('<Q', data, at, first_new[j] + (target & 0x7fffffff) if target >> 31 else target)
+            if ti not in where:
+                where[ti] = len(lists)
+                lists.append([ti, []])
+            lists[where[ti]][1].append(at)
+
+    def sec(tag, flags, payload):
+        return struct.pack('>I4s', (8 + len(payload)) | (flags << 30), tag.encode()) + payload
+    item = b''.join(struct.pack('<III', *i) for i in items)
+    ptch = b''.join(struct.pack('<II', ti, len(pl)) + struct.pack('<%dI' % len(pl), *sorted(pl)) for ti, pl in lists)
+    tag = sec('TAG0', g['top_flags'], g['sdkv'] + sec('DATA', g['data_flags'], bytes(data)) + g['type'] +
+              sec('INDX', g['indx_flags'], sec('ITEM', g['item_flags'], item) + sec('PTCH', g['ptch_flags'], ptch)))
+    ents = g['ents']
+    hdr = bytearray(game[:ents[0][0]])
+    body, pos = bytearray(), len(hdr)
+    for i, bl in enumerate([tag] + [game[o:o + s] for o, s in ents[1:]]):
+        bl = bytes(bl) + bytes(-len(bl) % 128)
+        struct.pack_into('<II', hdr, 160 + 64 * i, pos, len(bl))
+        body += bl
+        pos += len(bl)
+    body += bytes(-pos % 2048)
+    struct.pack_into('<I', hdr, 4, len(hdr) + len(body))
+    return bytes(hdr) + bytes(body)
+
+
+def game_coli(game, name):
+    """The game's copy of map/mapcoli/<name>.wihkar in the --game folder, or None."""
+    for rel in ('%s.wihkar' % name, 'map__mapcoli__%s.wihkar' % name, os.path.join('mapcoli', '%s.wihkar' % name)):
+        p = os.path.join(game, rel)
+        if os.path.isfile(p):
+            return readb(p)
+    return None
+
+
+def coli_name(path):
+    """mapcoli/<name> for a collision file's path (its name as the archive keys it: lowercase)."""
+    base = os.path.basename(path).lower()
+    if not base.endswith('.wihkar') or not 0 < len(base) - 7 < 33 or set(base[:-7]) - COLI_CHARS:
+        sys.exit('%s: not a map/mapcoli/<name>.wihkar file name' % path)
+    return base[:-7]
 
 
 # ---- reading pieces and combining (the same rules as runtime/map_overlay.c)
@@ -390,6 +665,19 @@ def parse(folder, game_hash):
     """(ops, adds) of a pieces folder, checked as runtime/map_overlay.c parse checks them; Left('pieces.txt line N:
     ...') for the first bad line. game_hash: {header: (size, xxh64)} of the game's headers."""
     ops, adds, names, made, uses = [], [], set(), set(), set()
+    coli = {}   # name -> {'made': (size, xxh64) or None, 'bodies': (file, size, line) or None}, in first-seen order
+
+    def coli_use(s):
+        if not s.startswith('mapcoli/'):
+            return None
+        s = s[8:]
+        if not 0 < len(s) < 33 or set(s) - COLI_CHARS:
+            return None
+        if s not in coli:
+            if len(coli) == MAX_COLI:
+                return None
+            coli[s] = {'made': None, 'bodies': None}
+        return coli[s]
     raw = readb(os.path.join(folder, 'pieces.txt'))
     first = True
     for n, line in enumerate(raw.split(b'\n'), 1):
@@ -415,6 +703,21 @@ def parse(folder, game_hash):
             if tok[1] != '1':
                 bad('map pieces of a newer format (version %s); this build reads version 1' % tok[1][:20])
             first = False
+        elif tok[0] == 'made-from' and len(tok) == 4 and tok[1].startswith('mapcoli/'):
+            u = coli_use(tok[1])
+            if u is None:
+                bad('collision file %s: a name of [a-z0-9_], and at most %d files' % (tok[1][:48], MAX_COLI))
+            if number(tok[2]) is None or len(tok[3]) != 16 or any(c not in '0123456789abcdefABCDEF' for c in tok[3]):
+                bad('made-from <hd> <size> <xxh64>')
+            u['made'] = (number(tok[2]), int(tok[3], 16))
+        elif tok[0] == 'bodies':
+            u = coli_use(tok[1]) if len(tok) == 4 else None
+            if u is None or not safe_path(tok[2]) or number(tok[3]) is None:
+                bad('bodies mapcoli/<name> <file> <size>')
+            if u['bodies']:
+                bad('a second bodies line for %s' % tok[1][:48])
+            u['bodies'] = (tok[2], number(tok[3]), n)
+            ops.append(('bodies', tok[1][8:], tok[2], n))
         elif tok[0] == 'made-from':
             if len(tok) != 4 or tok[1] not in FILES or number(tok[2]) is None or len(tok[3]) != 16 or \
                     any(c not in '0123456789abcdefABCDEF' for c in tok[3]):
@@ -486,7 +789,10 @@ def parse(folder, game_hash):
     for f in FILES:
         if f in uses and f not in made:
             raise Left('pieces.txt has no made-from line for %s' % f)
-    return ops, adds
+    for name, u in coli.items():
+        if u['bodies'] and not u['made']:
+            raise Left('pieces.txt has no made-from line for mapcoli/%s' % name)
+    return ops, adds, {k: v for k, v in coli.items() if v['bodies']}
 
 
 def check_files(folder, ops):
@@ -494,7 +800,7 @@ def check_files(folder, ops):
     otherwise."""
     info = {}
     for op in ops:
-        name = op[5] if op[0] == 'chunk' else op[1] if op[0] == 'fix' else None
+        name = op[5] if op[0] == 'chunk' else op[1] if op[0] == 'fix' else op[2] if op[0] == 'bodies' else None
         if name is None or name in info:
             continue
         path = find_ci(folder, name)
@@ -530,6 +836,17 @@ def check_files(folder, ops):
         if why:
             raise Left('pieces.txt line %d: %s %s' % (op[-1], name, why))
     return info
+
+
+def check_bodies(info, coli):
+    """{name: bodies} of the mod's bodies lines, each file checked as runtime/map_overlay.c check_files does."""
+    out = {}
+    for name, u in coli.items():
+        fn, size, line = u['bodies']
+        if len(info[fn]['data']) != size:
+            raise Left("pieces.txt line %d: %s is not the line's size" % (line, fn))
+        out[name] = dict(read_bodies(fn, info[fn]['data']), made=u['made'], file=fn)
+    return out
 
 
 def mod_id(folder):
@@ -633,19 +950,79 @@ def combine(game, mods):
     """mods: pieces folders, top first. The same rules as runtime/map_overlay.c: a mod is used whole or left out (a bad
     line, a file that is missing or doesn't match its line, an entry this game's header lacks, a number too big for its
     field, a size limit), an entry two mods change is the higher one's. Returns (headers {f: bytes}, layout {f:
-    [(offset, len, folder, file, bytes, patched)]}, report lines, game data sizes)."""
+    [(offset, len, folder, file, bytes, patched)]}, report lines, game data sizes, collision {name: (file, bodies,
+    mods)}). Collision bodies never clash: every kept mod's are in, top mod first."""
     gh = {f: bytearray(readb(game_file(game, f))) for f in FILES}
     gsize = {f: os.path.getsize(game_file(game, DATA[f])) for f in FILES}
     ghash = {f: (len(gh[f]), xxh64(bytes(gh[f]))) for f in FILES}
-    report, parsed, used = [], [], []
+    report, parsed, used, bodies = [], [], [], []
     for m in mods:
         try:
-            ops, adds = parse(m, ghash)
-            parsed.append((ops, adds, check_files(m, ops)))
+            ops, adds, coli = parse(m, ghash)
+            info = check_files(m, ops)
+            b = check_bodies(info, coli)
+            parsed.append((ops, adds, info))
+            bodies.append(b)
             used.append(m)
         except Left as e:
             report.append('%s: map pieces left out: %s' % (mod_id(m), e.args[0]))
     mods = used
+    # collision: the game's copy of each file the mods add bodies to, then each mod's bodies checked against it
+    colis = {}
+
+    def drop(k, why):
+        report.append('%s: map pieces left out: %s' % (mod_id(mods[k]), why))
+        del mods[k], parsed[k], bodies[k]
+    k = 0
+    while k < len(mods):
+        why = None
+        for name in bodies[k]:
+            if name in colis:
+                continue
+            if len(colis) == MAX_COLI:
+                why = 'more than %d collision files in all' % MAX_COLI
+                break
+            raw = game_coli(game, name)
+            colis[name] = {'game': raw, 'bad': raw is None or coli_view(raw) is None, 'first': None, 'grow': 0}
+            if not colis[name]['bad']:
+                colis[name].update(view=coli_view(raw), hash=xxh64(raw))
+        if why:
+            drop(k, why)
+        else:
+            k += 1
+    k = 0
+    while k < len(mods):
+        why, add = None, {}
+        for name, b in bodies[k].items():
+            c, fn = colis[name], b['file']
+            if c['bad']:
+                why = 'this game has no map/mapcoli/%s.wihkar it can read' % name
+                break
+            if b['made'] != (len(c['game']), c['hash']):
+                why = "made for another game version (its mapcoli/%s differs from this game's)" % name
+                break
+            gi = c['view']['items']
+            fits = 0 < b['array'] < len(gi) and gi[b['array']][1] + b['esize'] * gi[b['array']][2] <= \
+                len(c['view']['data']) and all(v >> 31 or v < len(gi) for _, _, _, v in b['ptrs'])
+            if not fits:
+                why = "%s: its bodies don't fit this game's mapcoli/%s" % (fn, name)
+                break
+            if c['first'] and (b['array'], b['esize']) != (c['array'], c['esize']):
+                why = "%s: its bodies are for another body array than %s's" % (fn, c['first'])
+                break
+            add[name] = len(b['recs']) + len(b['tail']) + 16 + 12 * len(b['items']) + 4 * len(b['ptrs']) + 8
+            if len(c['game']) + c['grow'] + add[name] + 4096 > MAX_COLI_FILE:
+                why = 'its collision bodies would make mapcoli/%s too big' % name
+                break
+        if why:
+            drop(k, why)
+            continue
+        for name, b in bodies[k].items():
+            c = colis[name]
+            if not c['first']:
+                c.update(first=mod_id(mods[k]), array=b['array'], esize=b['esize'])
+            c['grow'] += add[name]
+        k += 1
     while True:
         lost = []
         try:
@@ -654,9 +1031,13 @@ def combine(game, mods):
         except Left as e:
             k, why = e.args
             report.append('%s: map pieces left out: %s' % (mod_id(mods[k]), why))
-            del mods[k]
-            del parsed[k]
+            del mods[k], parsed[k], bodies[k]
     report += lost
+    built = {}   # name -> (file, bodies, mods), each collision file a kept mod adds bodies to
+    for name, c in colis.items():
+        pieces = [b[name] for b in bodies if name in b]
+        if pieces and not c['bad']:
+            built[name] = (coli_build(c['game'], pieces), sum(p['count'] for p in pieces), len(pieces))
     heads, off = {}, {n: (count[n] or (0, 0))[1] for n in T}
     for f in FILES:
         h = bytearray(gh[f])
@@ -697,7 +1078,7 @@ def combine(game, mods):
     for (k, f, fn), p in sorted(placed.items(), key=lambda kv: kv[1]):
         blob, patched = blobs[(k, f, fn)]
         layout[f].append((p, len(blob), mods[k], fn, blob, patched))
-    return {f: bytes(h) for f, h in heads.items()}, layout, report, gsize
+    return {f: bytes(h) for f, h in heads.items()}, layout, report, gsize, built
 
 
 def patch(blob, fixes):
@@ -725,7 +1106,7 @@ def patch(blob, fixes):
 
 
 def cmd_verify(a):
-    heads, layout, report, gsize = combine(a.game, [a.out])
+    heads, layout, report, gsize, built = combine(a.game, [a.out])
     bad = 0
     for f, opt in (('wismhd', a.map), ('winvhe', a.nav)):
         if not opt:
@@ -762,6 +1143,14 @@ def cmd_verify(a):
                     bad += 1
         print('%s: built %d bytes, xxh64 %016x; data %d + %d bytes in %d pieces' % (
             f, len(h), xxh64(h), gsize[f], sum(n for _, n, *_ in layout[f]), len(layout[f])))
+    for path in a.coli or ():
+        name = coli_name(path)
+        got = built.get(name)
+        if got is None or got[0] != readb(path):
+            print('FAIL mapcoli/%s: built from the game and the bodies, it is not %s' % (name, path))
+            bad += 1
+        else:
+            print('mapcoli/%s: built %d bytes, xxh64 %016x; %d bodies' % (name, len(got[0]), xxh64(got[0]), got[1]))
     for r in report:
         print(r)
     if bad:
@@ -770,7 +1159,7 @@ def cmd_verify(a):
 
 
 def cmd_combine(a):
-    heads, layout, report, gsize = combine(a.game, a.mods)
+    heads, layout, report, gsize, built = combine(a.game, a.mods)
     for r in report:
         print(r)
     for f in FILES:
@@ -780,6 +1169,10 @@ def cmd_combine(a):
                                                                                          xxh64(blob)))
         print('%s: %d bytes, xxh64 %016x; data %d + %d bytes in %d pieces' % (
             f, len(heads[f]), xxh64(heads[f]), gsize[f], sum(n for _, n, *_ in layout[f]), len(layout[f])))
+    for name, (data, n, k) in built.items():
+        print('mapcoli/%s: %d bytes, xxh64 %016x; %d bod%s from %d mod%s' % (name, len(data), xxh64(data), n,
+                                                                            'y' if n == 1 else 'ies', k,
+                                                                            '' if k == 1 else 's'))
     if a.out:
         os.makedirs(a.out, exist_ok=True)
         for f in FILES:
@@ -788,6 +1181,9 @@ def cmd_combine(a):
             with open(os.path.join(a.out, '%s.layout.txt' % DATA[f]), 'w', newline='\n') as w:
                 for p, n, m, fn, _, _ in layout[f]:
                     w.write('%d %d %s/%s\n' % (p, n, m, fn))
+        for name, (data, _, _) in built.items():
+            with open(os.path.join(a.out, '%s.wihkar' % name), 'wb') as w:
+                w.write(data)
 
 
 def main():
@@ -799,6 +1195,7 @@ def main():
         p.add_argument('--game', required=True)
         p.add_argument('--map', nargs=2, metavar=('HD', 'SRC'))
         p.add_argument('--nav', nargs=2, metavar=('HD', 'SRC'))
+        p.add_argument('--coli', action='append', metavar='WIHKAR')
     p = sub.add_parser('combine')
     p.add_argument('--game', required=True)
     p.add_argument('mods', nargs='+')

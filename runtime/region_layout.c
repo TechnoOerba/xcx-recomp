@@ -5,9 +5,10 @@
 // fills. runtime/regions.c gives every mod region a row after the game's (the panels' lists are moved past their
 // panel's end with room for more), so a layout needs a row node per mod region. Instead of each mod shipping an edited
 // layout (two mods would then clash on the same file), the rows are added here when the game opens one of those
-// layouts and mod regions exist: the file the game would have read (a mod's copy, else the game's own) is read, rows
-// are added to it, and the result is served from <profile>/region-layouts/ in its place. With no mod region nothing is
-// served and the game reads its file as it is.
+// layouts and mod regions exist: the file the game would have read (a mod's copy, else the game's own; a mod's copy
+// that brings region rows of its own is set aside for the game's) is read, rows are added to it, and the result is
+// served from <profile>/region-layouts/ in its place. With no mod region nothing is served and the game reads its file
+// as it is.
 //
 // The layouts are LAGP files (version 10003): a header with section offsets, a section of placement nodes (64-byte
 // entries, each pointing at small arrays of position and scale keys) and a section of components (movie clips such as
@@ -97,15 +98,24 @@ static int lagp_ok(const Buf *b) {
            rd32(b, 0x18) < b->n && rd32(b, 0x3c) < b->n;
 }
 
-// The (x, y) position keys of node i: their file offset and how many. The original arrays lie in order, so a node's
-// keys run up to its next array; an array this file appended (a cloned row's) has the count recorded when it was
-// written (keys[i]); an appended array this code didn't write counts as one key.
+// How many keys (8 bytes each) the array at a placement node's field `at` holds (2 = position, 3 = scale). The one
+// rule for every key array read here: an array this code appended has the count it recorded (recorded, nonzero);
+// any other runs up to the node's next array (a node's arrays lie in order), and a node's last array holds one key.
+static uint32_t keys_of(const uint8_t node[64], uint16_t recorded, int at) {
+    if (recorded) return recorded;
+    uint32_t f[8], end = 0;
+    memcpy(f, node, 32);
+    for (int j = at + 1; j < 8; j++)
+        if (f[j] > f[at] && (!end || f[j] < end)) end = f[j];
+    return end ? (end - f[at]) / 8 : 1;
+}
+
+// The (x, y) position keys of node i: their file offset and how many (keys_of; keys[i] = the count recorded for a
+// position array this code wrote).
 static size_t node_xy(const Lagp *L, const uint8_t (*nodes)[64], const uint16_t *keys, uint32_t i, uint32_t *n) {
-    uint32_t f2, f3;
+    uint32_t f2;
     memcpy(&f2, nodes[i] + 8, 4);
-    memcpy(&f3, nodes[i] + 12, 4);
-    uint32_t end = f3 > f2 ? f3 : f2 + 8;
-    *n = keys[i] ? keys[i] : (end - f2) / 8;
+    *n = keys_of(nodes[i], keys[i], 2);
     return L->u4 + f2;
 }
 
@@ -187,11 +197,12 @@ int region_layout_rows(const uint8_t *data, size_t n) {
     if (!lagp_ok(&L.b)) return -1;
     L.u4 = rd32(&L.b, 0x18);
     L.u13 = rd32(&L.b, 0x3c);
-    static Comp c[MAXC];   // callers hold the layout lock (one layout at a time)
+    Comp *c = malloc(MAXC * sizeof *c);
+    if (!c) return -1;
     int nc = comps_of(&L, c), rows = 0;
-    if (nc < 0) return -1;
     for (int i = 0; i < nc; i++) rows += row_number(comp_name(&L, &c[i])) > 0;
-    return rows;
+    free(c);
+    return nc < 0 ? -1 : rows;
 }
 
 typedef struct {
@@ -199,8 +210,8 @@ typedef struct {
     Display top, kid;
     uint32_t fr[MAXC][2], fk[MAXC][2];
     Rect r[MAXC];
-    uint8_t nodes[MAXC + 2][64];
-    uint16_t keys[MAXC + 2];
+    uint8_t nodes[MAXC + 4][64];
+    uint16_t keys[MAXC + 4];
     uint32_t ti[MAXC + 2][8];
     uint16_t idx[MAXC + 2];
 } Work;
@@ -210,7 +221,7 @@ typedef struct {
 static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *const *widen_also) {
     Buf *b = &L->b;
     uint32_t noff = rd32(b, L->u4 + 4), nn = rd32(b, L->u4 + 8);
-    if (nn + 2 > MAXC || !in_range(b, L->u4 + noff, (size_t)nn * 64)) return 0;
+    if (nn + 4 > MAXC || !in_range(b, L->u4 + noff, (size_t)nn * 64)) return 0;
     for (uint32_t i = 0; i < nn; i++) memcpy(W->nodes[i], b->d + L->u4 + noff + 64 * i, 64);
     int nc = comps_of(L, W->c);
     if (nc < 3) return 0;
@@ -294,6 +305,45 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
     memcpy(W->nodes[count] + 8, &rel, 4);
     W->keys[count] = (uint16_t)k;
     int row_node = (int)count++;
+    // Region Intel's divider lines: rects rect_Line01.. in mc_Top, each just above its row, the last one (above the
+    // special row) on a node like that row's. One more line, the same way as the row: the line that stops being last
+    // gets an ordinary node where it is, and the new line takes the special one, one row further on.
+    int line_last = -1, line_prev = -1, line_plain = -1, line_node = -1;
+    {
+        char ln[24], lp[24];
+        snprintf(ln, sizeof ln, "rect_Line%02d", lastn);
+        snprintf(lp, sizeof lp, "rect_Line%02d", lastn - 1);
+        for (int i = 0; i < nr; i++) {
+            const char *s = cstr(b, L->u13 + W->r[i].name);
+            if (!strcmp(s, ln)) line_last = i;
+            if (!strcmp(s, lp)) line_prev = i;
+        }
+    }
+    if (line_last >= 0 && line_prev >= 0) {
+        uint32_t al = W->r[line_last].node, ap = W->r[line_prev].node;
+        if (al >= nn || ap >= nn) return 0;
+        if (memcmp(W->nodes[al], W->nodes[ap], 4)) {
+            o = node_xy(L, W->nodes, W->keys, ap, &k);
+            if (!in_range(b, o, 8)) return 0;
+            float xy[2] = {(float)rdf(b, o), (float)(rdf(b, o + 4) + row)};
+            memcpy(W->nodes[count], W->nodes[ap], 64);
+            rel = (uint32_t)(append(b, xy, 8, 4) - L->u4);
+            memcpy(W->nodes[count] + 8, &rel, 4);
+            W->keys[count] = 1;
+            line_plain = (int)count++;
+        }
+        memcpy(W->nodes[count], W->nodes[al], 64);
+        o = node_xy(L, W->nodes, W->keys, al, &k);
+        if (k > 64 || !in_range(b, o, (size_t)k * 8)) return 0;
+        for (uint32_t j = 0; j < k; j++) {
+            keys[2 * j] = (float)rdf(b, o + 8 * j);
+            keys[2 * j + 1] = (float)(rdf(b, o + 8 * j + 4) + row);
+        }
+        rel = (uint32_t)(append(b, keys, 8 * (size_t)k, 4) - L->u4);
+        memcpy(W->nodes[count] + 8, &rel, 4);
+        W->keys[count] = (uint16_t)k;
+        line_node = (int)count++;
+    }
     at = append(b, W->nodes, 64 * (size_t)count, 16);
     wr32(b, L->u4 + 4, (uint32_t)(at - L->u4));
     wr32(b, L->u4 + 8, count);
@@ -303,21 +353,21 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
         const char *s = cstr(b, L->u13 + W->r[i].name);
         if (strcmp(s, "rect_Window") && strcmp(s, "rect_Blur")) continue;
         if (W->r[i].node >= count || W->r[i].w == 0 || W->r[i].h == 0) return 0;
-        uint32_t f[12];
-        memcpy(f, W->nodes[W->r[i].node], 48);
-        // The window's and blur's scale keys run from f[3] to f[6] (the node's next array), and its position track has
-        // as many keys: so in the game's three layouts (checked against the files; the same count as our layout tool
-        // uses, so the output matches it byte for byte). Other layouts aren't asked for.
-        uint32_t n = f[6] > f[3] ? (f[6] - f[3]) / 8 : 1;
-        if (n > 64 || !in_range(b, L->u4 + f[3], 8 * (size_t)n) || !in_range(b, L->u4 + f[2], 8 * (size_t)n)) return 0;
-        for (uint32_t j = 0; j < n; j++) {
-            size_t so = L->u4 + f[3] + 8 * j, po = L->u4 + f[2] + 8 * j;
-            double sx = rdf(b, so), sy = rdf(b, so + 4);
-            wrf(b, so, sx + widen / W->r[i].w);
-            wrf(b, so + 4, sy + fabs(row) / W->r[i].h);
-            double x = rdf(b, po), y = rdf(b, po + 4);
-            wrf(b, po, x + widen / 2);
-            wrf(b, po + 4, y + row / 2);
+        uint32_t f[12], nd = W->r[i].node;
+        memcpy(f, W->nodes[nd], 48);
+        uint32_t ns = keys_of(W->nodes[nd], 0, 3), np = keys_of(W->nodes[nd], W->keys[nd], 2);
+        if (!f[3] || ns > 64 || np > 64 || !in_range(b, L->u4 + f[3], 8 * (size_t)ns) ||
+            !in_range(b, L->u4 + f[2], 8 * (size_t)np))
+            return 0;
+        for (uint32_t j = 0; j < ns; j++) {
+            size_t so = L->u4 + f[3] + 8 * j;
+            wrf(b, so, rdf(b, so) + widen / W->r[i].w);
+            wrf(b, so + 4, rdf(b, so + 4) + fabs(row) / W->r[i].h);
+        }
+        for (uint32_t j = 0; j < np; j++) {
+            size_t po = L->u4 + f[2] + 8 * j;
+            wrf(b, po, rdf(b, po) + widen / 2);
+            wrf(b, po + 4, rdf(b, po + 4) + row / 2);
         }
     }
     if (widen != 0) {   // the rows' child columns (shared placement nodes) and named rects move right by widen
@@ -405,6 +455,18 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
     T->it[T->n] = (Item){0, (uint16_t)T->n, (uint16_t)li, (uint32_t)n_inst};
     T->n++;
     T->l[0][T->nl[0]++] = (uint16_t)(T->n - 1);
+    int i_ll = -1, i_lp = -1;
+    if (line_node >= 0) {   // and one more line instance (rects are mc_Top's kind 1 items, in its second list)
+        for (int j = 0; j < T->n; j++) {
+            if (T->it[j].kind != 1) continue;
+            if (T->it[j].ref == line_last) i_ll = j;
+            if (T->it[j].ref == line_prev) i_lp = j;
+        }
+        if (i_ll < 0 || i_lp < 0 || T->n + 1 >= MAXC || T->nl[1] + 1 >= MAXC) return 0;
+        T->it[T->n] = (Item){1, (uint16_t)T->n, (uint16_t)nr, 0};
+        T->n++;
+        T->l[1][T->nl[1]++] = (uint16_t)(T->n - 1);
+    }
     {
         size_t body = 12 * (size_t)T->n, lsz[3] = {2 * (size_t)T->nl[0], 2 * (size_t)T->nl[1], 2 * (size_t)T->nl[2]};
         uint32_t l_off[3] = {(uint32_t)(64 + body), 0, 0};
@@ -433,11 +495,41 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
     W->fr[nf][0] = flag_new;
     W->fr[nf][1] = (uint32_t)row_node << 16 | 0xffff;   // low half as the rows' own frames have it (not traced)
     nf++;
+    if (line_node >= 0) {
+        uint32_t line_flags = W->fr[i_ll][0], low = W->fr[i_ll][1] & 0xffff;
+        W->fr[i_ll][0] = W->fr[i_lp][0];
+        if (line_plain >= 0) W->fr[i_ll][1] = (uint32_t)line_plain << 16 | (W->fr[i_lp][1] & 0xffff);
+        W->fr[nf][0] = line_flags;
+        W->fr[nf][1] = (uint32_t)line_node << 16 | low;
+        nf++;
+    }
     {
         uint32_t hdr[2] = {8, (uint32_t)nf};
         size_t fo = append(b, hdr, 8, 4);
         append(b, W->fr, 8 * (size_t)nf, 1);
         top.e[1] = (uint32_t)(fo - L->u13);
+    }
+    if (line_node >= 0) {   // mc_Top's rect table with the new line: the last line's entry, on its node, named for the row
+        size_t rb = L->u13 + top.e[4];
+        uint32_t rc = rd32(b, rb), ro = rd32(b, rb + 4);
+        if (rc != (uint32_t)nr || !in_range(b, rb + ro, 32 * (size_t)rc)) return 0;
+        uint8_t *tab = malloc(8 + 32 * ((size_t)rc + 1));
+        if (!tab) return 0;
+        uint32_t h[2] = {rc + 1, 8};
+        memcpy(tab, h, 8);
+        memcpy(tab + 8, b->d + rb + ro, 32 * (size_t)rc);
+        memcpy(tab + 8 + 32 * (size_t)rc, b->d + rb + ro + 32 * (size_t)line_last, 32);
+        char nm[24];
+        snprintf(nm, sizeof nm, "rect_Line%02d", lastn + 1);
+        uint32_t name = (uint32_t)(append(b, nm, strlen(nm) + 1, 1) - L->u13), nd = (uint32_t)line_node;
+        memcpy(tab + 8 + 32 * (size_t)rc, &name, 4);
+        memcpy(tab + 8 + 32 * (size_t)rc + 4, &nd, 4);
+        if (line_plain >= 0) {
+            uint32_t pn = (uint32_t)line_plain;
+            memcpy(tab + 8 + 32 * (size_t)line_last + 4, &pn, 4);
+        }
+        top.e[4] = (uint32_t)(append(b, tab, 8 + 32 * ((size_t)rc + 1), 4) - L->u13);
+        free(tab);
     }
     if (nc + nmade > MAXC) return 0;
     W->c[top_i] = top;
@@ -502,21 +594,25 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
 #define BAND_TOP 0.05
 #define BAND_BOTTOM 0.525
 
-static uint32_t span(const uint32_t *f, int at) {   // keys of the array at f[at]: up to the next array the node has
-    uint32_t end = 0;
-    for (int j = at + 1; j < 8; j++)
-        if (f[j] > f[at] && (!end || f[j] < end)) end = f[j];
-    return end ? (end - f[at]) / 8 : 1;
-}
+typedef struct { Comp c[MAXC]; Rect r[MAXC]; uint32_t fr[MAXC][2]; } FitWork;
+static double fit(Lagp *L, FitWork *F, int apply);
 
 double region_layout_fit(uint8_t *data, size_t n, int apply) {
-    Lagp Lv = {{data, n, n, 0}, 0, 0}, *L = &Lv;
-    if (!lagp_ok(&L->b)) return 0;
-    L->u4 = rd32(&L->b, 0x18);
-    L->u13 = rd32(&L->b, 0x3c);
-    static Comp c[MAXC];   // callers hold the layout lock
-    static Rect r[MAXC];
-    static uint32_t fr[MAXC][2];
+    Lagp L = {{data, n, n, 0}, 0, 0};
+    if (!lagp_ok(&L.b)) return 0;
+    L.u4 = rd32(&L.b, 0x18);
+    L.u13 = rd32(&L.b, 0x3c);
+    FitWork *F = malloc(sizeof *F);
+    if (!F) return 0;
+    double s = fit(&L, F, apply);
+    free(F);
+    return s;
+}
+
+static double fit(Lagp *L, FitWork *F, int apply) {
+    Comp *c = F->c;
+    Rect *r = F->r;
+    uint32_t (*fr)[2] = F->fr;
     int nc = comps_of(L, c), ti = -1, mi = -1;
     if (nc < 0) return 0;
     for (int i = 0; i < nc; i++) {
@@ -529,10 +625,11 @@ double region_layout_fit(uint8_t *data, size_t n, int apply) {
     for (int i = 0; i < nr; i++) if (!strcmp(cstr(&L->b, L->u13 + r[i].name), "rect_Window")) wi = i;
     if (wi < 0 || tn >= nn || r[wi].node >= nn || !in_range(&L->b, L->u4 + noff, (size_t)nn * 64)) return 0;
     uint32_t tf[12], wf[12];
-    memcpy(tf, L->b.d + L->u4 + noff + 64 * tn, 48);
+    const uint8_t *tnode = L->b.d + L->u4 + noff + 64 * tn;
+    memcpy(tf, tnode, 48);
     memcpy(wf, L->b.d + L->u4 + noff + 64 * r[wi].node, 48);
     size_t tp = L->u4 + tf[2], ts = tf[3] ? L->u4 + tf[3] : 0, wp = L->u4 + wf[2], ws = wf[3] ? L->u4 + wf[3] : 0;
-    uint32_t tpn = span(tf, 2), tsn = tf[3] ? span(tf, 3) : 0;
+    uint32_t tpn = keys_of(tnode, 0, 2), tsn = tf[3] ? keys_of(tnode, 0, 3) : 0;
     if (!in_range(&L->b, tp, 8 * (size_t)tpn) || (ts && !in_range(&L->b, ts, 8 * (size_t)tsn)) ||
         !in_range(&L->b, wp, 8) || (ws && !in_range(&L->b, ws, 8)))
         return 0;
@@ -576,7 +673,7 @@ int region_layout_grow(uint8_t **data, size_t *n, int rows, const RegionLayoutKi
         if (!k) break;
         keep = k;
         memcpy(keep, L.b.d, n0);
-        uint16_t keys[MAXC + 2];
+        uint16_t keys[MAXC + 4];
         memcpy(keys, W->keys, sizeof keys);
         if (add_row(&L, W, kind->move_up, widen, kind->widen_also) && !L.b.bad) continue;
         memcpy(L.b.d, keep, n0);                   // L.b.d holds at least n0 bytes: it only grows
@@ -701,15 +798,26 @@ static void make(int li, const char *key, int want, int from_mod, const char *sr
         d = game_copy(key, &n);
     }
     int have = d ? region_layout_rows(d, n) : -1, added = 0;
-    if (!d || have < 0 || (from_mod && have >= want)) {
-        // the usual path: the mod's copy (it has the rows, or rows can't be added to it) or the game's own
+    if (from_mod && have > kind->game_rows) {
+        // a mod's copy with rows of its own for regions (made by hand or by the old layout tool, before rows were made
+        // here): two such mods would clash on the file, and the rows are made here for every mod region anyway, so it
+        // is set aside and the game's copy used. A mod's copy with the game's row count (a mod that changes the panel
+        // itself) keeps its changes and gets the rows.
+        rt_log("regions: %s: a mod's copy brings %d rows of its own; it is not used (rows for mod regions are made "
+               "from the game's copy)", key, have);
+        free(d);
+        d = game_copy(key, &n);
+        from_mod = 0;
+        have = d ? region_layout_rows(d, n) : -1;
+    }
+    if (!d || have < 0) {
+        // the usual path: the copy the game would read anyway
         if (!d)
             rt_log("regions: %s: the %s copy can't be read; no rows for mod regions in this panel", key,
                    from_mod ? "mod's" : "game's");
-        else if (have < 0)
+        else
             rt_log("regions: %s: the %s copy is not a layout rows can be added to; used as it is", key,
                    from_mod ? "mod's" : "game's");
-        if (from_mod) made[li].state = -1;   // the mod's own file is served by the usual path in every case
         free(d);
         return;
     }

@@ -117,9 +117,11 @@ region every hook returns what the game had.
   screen's object, whose fields after it are used throughout the map code. Mod regions past the 19th have no hexagons
   drawn there (their survey rate, rewards and panel rows are unaffected); the log says so once.
 - Region Intel (Segments, Map and FrontierNav tabs) and Map Shortcuts have rows for as many mod regions as fit on the
-  screen with the panel at half size or more (25 to 27 in each). A mod's own layout that already has enough rows is
-  used as it is, not fitted to the screen (up to 48 mod regions then). Mod regions go in id order; one past that is
-  left out of the panel, and the log says so once.
+  screen with the panel at half size or more (25 to 27 in each). Mod regions go in id order; one past that is left out
+  of the panel, and the log says so once.
+- A mod's own copy of one of the three panel layouts that brings region rows of its own (more rows than the game's) is
+  not used: the rows are made from the game's copy instead, so two region mods never clash on that file. A copy with
+  the game's row count (a mod that changes the panel itself) keeps its changes and gets the rows added.
 - The Enemy Index's "Region Found" filter has fixed checkboxes for the five continents and "Other"; enemies of a far
   region are listed under "Other".
 - A region whose hexagons the game can't find (no `SEG_TerminalZone<id>`) is not a mod region, even if other tables

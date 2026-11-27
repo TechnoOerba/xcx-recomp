@@ -41,7 +41,7 @@ All of it is data in the mod's `romfs/` ([installer.md](installer.md), game-file
   when a probe is installed there, after the game's own list for that site. A site that lies in one region can
   uncover hexagons of a neighboring far region this way.
 - Nothing for the panels: their rows are made when the game opens their layouts (see "Panel rows" below), so a
-  region mod ships no menu layout. A mod that does ship one with enough rows keeps it.
+  region mod ships no menu layout (a mod's own copy with region rows of its own is set aside, see Limits).
 - Missions count for the region their point lies in on the region map (the Map tab's Region Intel counts them by
   where they are), so a mod's missions on its region's cells count for it.
 
@@ -90,8 +90,9 @@ region every hook returns what the game had.
   per mod region and is served from `<profile>/region-layouts/`: the last row and its child components copied one row
   step on, a special last row (Mira's, hidden in the Map tab's mission view by a track of its placement node) kept
   last, Region Intel's divider line above each row (`rect_LineNN`) added the same way, the window one row taller per
-  row; Map Shortcuts moves up a row per row (it reaches the screen's bottom), the
-  FrontierNav panel widens once for a longer name. A panel taller than the screen's band is scaled down as a whole,
+  row; Map Shortcuts moves up a row per row (it reaches the screen's bottom) and its rows move down by what its
+  window's header band (part of the window's picture) grows as the window stretches, the FrontierNav panel widens once
+  for a longer name. A panel taller than the screen's band is scaled down as a whole,
   to half size at the least. With no mod region nothing is served.
 - The field-region test (`region > 24` means "no field") answers 0 for a far region; the discovery flag of a far
   region comes from its `flg`; a probe install also uncovers the hexagons its site names in `SEG_ProbeListZone<id>`.

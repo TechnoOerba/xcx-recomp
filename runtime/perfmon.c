@@ -2,8 +2,8 @@
 // the overlay is on); the per-frame waits from the perf counters prof_win.c keeps. The machine's numbers are sampled
 // twice a second on a thread of their own (some calls take milliseconds), which runs only while the overlay is full.
 // The OS calls sit behind platform.h (plat_cpu_load, plat_mem_info, plat_gpu_load). Temperature, power and clock come
-// from the GPU vendor's driver library, loaded at run time: NVML on NVIDIA, ADL's PM log on AMD; on a machine without
-// either their numbers stay -1.
+// from the GPU vendor's driver library, loaded at run time: NVML on NVIDIA, ADL's PM log on AMD (on Linux the amdgpu
+// driver's hwmon files instead); on a machine without either their numbers stay -1.
 //
 // Adapted from SavageWindRecomp's runtime/perfmon.c (https://github.com/Revivedx/SavageWindRecomp @
 // 575ad88e02f9a89a9a885d90039d48af33c982f4, MIT, Copyright (c) 2026 Revivedx and the Savage Wind Recomp contributors,
@@ -265,9 +265,44 @@ static void adl_sample(PerfStats *s) {
     if (v[ADL_PMLOG_CLK_GFXCLK].supported) s->gpu_clock_mhz = (float)v[ADL_PMLOG_CLK_GFXCLK].value;
 }
 #else
-static struct { int tried; } adl;
-static void adl_open(const char *hint, int bus) { (void)hint, (void)bus, adl.tried = 1; }
-static void adl_sample(PerfStats *s) { (void)s; }
+// Linux: the amdgpu driver's hwmon files stand in for ADL (no vendor library needed): power1_average (W; on an APU
+// such as the Steam Deck's it is the whole chip's package power, slowPPT), temp1_input (edge temperature) and
+// freq1_input (the graphics clock, sclk). The first DRM card with these files is taken; other vendors leave -1.
+static struct { int tried; char dir[160]; } adl;
+static void adl_open(const char *hint, int bus) {
+    (void)hint, (void)bus;
+    adl.tried = 1;
+    for (int card = 0; card < 8 && !adl.dir[0]; card++) {
+        for (int h = 0; h < 16; h++) {
+            char p[200];
+            snprintf(p, sizeof p, "/sys/class/drm/card%d/device/hwmon/hwmon%d/power1_average", card, h);
+            FILE *f = fopen(p, "r");
+            if (!f) continue;
+            fclose(f);
+            snprintf(adl.dir, sizeof adl.dir, "/sys/class/drm/card%d/device/hwmon/hwmon%d", card, h);
+            break;
+        }
+    }
+}
+
+static double sysfs_num(const char *name) {   // one number from the hwmon folder, or -1
+    char p[220];
+    snprintf(p, sizeof p, "%s/%s", adl.dir, name);
+    FILE *f = fopen(p, "r");
+    if (!f) return -1;
+    double v = -1;
+    if (fscanf(f, "%lf", &v) != 1) v = -1;
+    fclose(f);
+    return v;
+}
+
+static void adl_sample(PerfStats *s) {
+    if (!adl.dir[0]) return;
+    double w = sysfs_num("power1_average"), t = sysfs_num("temp1_input"), c = sysfs_num("freq1_input");
+    if (w >= 0) s->gpu_power_w = (float)(w / 1e6);       // microwatts
+    if (t >= 0) s->gpu_temp_c = (float)(t / 1000.0);     // millidegrees
+    if (c >= 0) s->gpu_clock_mhz = (float)(c / 1e6);     // hertz
+}
 #endif
 
 // ---- the machine sampler: runs while want is set, twice a second

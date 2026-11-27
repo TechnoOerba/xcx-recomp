@@ -58,6 +58,7 @@ static void *moving_realloc(void *p, size_t n) {
 static uint64_t fake_ns = 1000000000ull, step_ns = 16666667ull;
 uint64_t test_now_ns(void) { return fake_ns; }
 #include "../runtime/mod_state.c"
+#include "../runtime/mod_ids.c"
 #undef realloc
 #undef plat_now_ns
 
@@ -91,6 +92,39 @@ void rt_mods_shutdown(void) {}   // the platform layer's exit path
 const char *cfg_get(const char *name) { return getenv(name); }
 int fs_save_busy(void) { return busy; }
 const char *romfs_mods_dir(void) { return getenv("XCX_MOD_DIR"); }
+// runtime/mod_ids.c's profile (its records file) and bdat_merge.c's name hash
+const RtConfig *rt_config(void) {
+    static RtConfig c;
+    c.profile = getenv("XCX_PROFILE_DIR");
+    return &c;
+}
+uint32_t bdat_merge_name_hash(const char *s, size_t n) {
+    uint32_t h = 0, k;
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        memcpy(&k, s + i, 4);
+        k *= 0xcc9e2d51u;
+        k = (k << 15 | k >> 17) * 0x1b873593u;
+        h ^= k;
+        h = (h << 13 | h >> 19) * 5 + 0xe6546b64u;
+    }
+    k = 0;
+    switch (n & 3) {
+    case 3: k ^= (uint32_t)(uint8_t)s[i + 2] << 16; /* fall through */
+    case 2: k ^= (uint32_t)(uint8_t)s[i + 1] << 8; /* fall through */
+    case 1:
+        k ^= (uint8_t)s[i];
+        k *= 0xcc9e2d51u;
+        k = (k << 15 | k >> 17) * 0x1b873593u;
+        h ^= k;
+    }
+    h ^= (uint32_t)n;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    return h ^ (h >> 16);
+}
 // romfs_mods.c's list of enabled mods, read the way it reads it (one id per line), and its generation: here a hash of
 // the list file, so a changed file is a new generation as a rebuild would make it.
 static char *list_text(void) {

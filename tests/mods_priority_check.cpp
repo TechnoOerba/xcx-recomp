@@ -69,6 +69,7 @@ __attribute__((weak)) int bdat_merge_mod_lines(const char *id, int next, char (*
 }
 __attribute__((weak)) int romfs_mods_auto_merge(void) { return test_auto; }
 __attribute__((weak)) void romfs_mods_set_auto_merge(int on) { test_auto = on; }
+__attribute__((weak)) int mod_ids_status(int, char *, size_t, int *) { return 0; }
 __attribute__((weak)) int bdat_merge_next_status(int i, char *out, size_t cap, int *kind) {
     if (i < 0 || i >= test_nnext) return 0;
     snprintf(out, cap, "%s", test_next[i]);

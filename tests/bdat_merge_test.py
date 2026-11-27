@@ -234,7 +234,7 @@ class BdatMerge(unittest.TestCase):
         exe = cls.dir / ('bdat_merge_check' + ('.exe' if os.name == 'nt' else ''))
         rt = ROOT / 'runtime'
         subprocess.run([path, '-O1', '-Wall', '-Werror', f'-I{rt}', str(ROOT / 'tests/bdat_merge_check.c'),
-                        str(rt / 'bdat_merge.c'), '-o', str(exe)], check=True)
+                        str(rt / 'bdat_merge.c'), str(rt / 'gimk_merge.c'), '-o', str(exe)], check=True)
         cls.cmd = [str(exe)]
 
     @classmethod

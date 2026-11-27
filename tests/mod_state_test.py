@@ -313,11 +313,80 @@ class ModState(unittest.TestCase):
         out = self.run_script(f'set 1 {FLAG} 3', *self.save())
         logs = '\n'.join(out)
         self.assertIn('bad/mod.json: not readable as JSON', logs)
-        self.assertIn("dup's mine uses number", logs)           # isle declared it first
+        # a number another mod has (isle declared it first) or outside the mods' range: the hand-out gives another
+        self.assertIn(f'dup: flag "mine" moves from {FLAG} to', logs)
         self.assertIn('flag "low" (100) left out', logs)
         self.assertIn('long/mod.json: a name or id is longer', logs)
         self.assertIn("id isle is another enabled mod's", logs)
         self.assertEqual(self.state()['mods']['isle']['flags'], {'seen': 3})
+
+    # ---- the numbers handed out (runtime/mod_ids.c, docs/mod-ids.md)
+
+    def handed(self, *lines):
+        """One session with a profile folder (the records file): its output and the records file's lines."""
+        prof = Path(self.tmp.name) / 'profile'
+        prof.mkdir(exist_ok=True)
+        out = self.run_script(*lines, env={'XCX_PROFILE_DIR': str(prof)})
+        rec = prof / 'mod-ids.txt'
+        return out, [x for x in rec.read_text().splitlines() if not x.startswith('#')] if rec.exists() else []
+
+    def test_a_lower_mod_with_the_same_numbers_moves_and_keeps_its_new_ones(self):
+        self.mod('copy', {'id': 'copy', 'regions': [24], 'flags': [{'name': 'seen', 'type': 1, 'id': FLAG}],
+                          'rewards': [{'name': 'cache', 'index': REWARD}]})
+        self.enable('isle', 'copy')
+        out, rec = self.handed(f'set 1 {FLAG} 3', f'set 1 {0xC000} 4', *self.save())
+        logs = '\n'.join(out)
+        self.assertIn(f'mod ids: copy: flag "seen" moves from {FLAG} to {0xC000}', logs)   # the first free one
+        self.assertIn('mod ids: copy: region "#24" moves from 24 to 25', logs)
+        self.assertIn(f'flag - {0xC000} copy seen', rec)
+        self.assertEqual(self.state()['mods']['isle']['flags'], {'seen': 3})
+        self.assertEqual(self.state()['mods']['copy']['flags'], {'seen': 4})
+        # the next start, the other way round in priority: the numbers stay where they are
+        self.enable('copy', 'isle')
+        out, rec2 = self.handed(f'set 1 {0xC000} 5', *self.save(time=1001))
+        self.assertNotIn('moves from', '\n'.join(out))
+        self.assertEqual(sorted(rec2), sorted(rec))
+        self.assertEqual(self.state()['mods']['copy']['flags'], {'seen': 5})
+
+    def test_a_mod_that_is_off_keeps_its_numbers(self):
+        self.mod('copy', {'id': 'copy', 'flags': [{'name': 'seen', 'type': 1, 'id': FLAG}]})
+        self.enable('isle')
+        self.handed(f'get 1 {FLAG}')
+        self.enable('copy')   # isle off: its FLAG stays its own
+        out, rec = self.handed(f'get 1 {FLAG}')
+        self.assertIn(f'mod ids: copy: flag "seen" moves from {FLAG} to', '\n'.join(out))
+        self.assertIn(f'flag - {FLAG} isle seen', rec)
+
+    def test_names_without_numbers_get_the_first_free_ones(self):
+        self.mod('named', {'id': 'named', 'regions': [{'name': 'cove', 'id': 24}], 'flags': [{'name': 'a', 'type': 1}],
+                           'rewards': [{'name': 'r'}]})
+        self.enable('isle', 'named')
+        out, rec = self.handed(f'get 1 {FLAG}')
+        self.assertIn('region - 25 named cove', rec)          # isle has 24
+        self.assertIn(f'flag - {0xC000} named a', rec)        # isle's flags are FLAG and FLAG + 1 (0xC001, 0xC002)
+        self.assertIn(f'reward - {0x8000} named r', rec)
+
+    def test_a_damaged_records_file_is_kept_and_its_bad_lines_ignored(self):
+        prof = Path(self.tmp.name) / 'profile'
+        prof.mkdir(exist_ok=True)
+        (prof / 'mod-ids.txt').write_text(f'flag - 5 isle seen\nflag - {FLAG + 40} isle boss\ngarbage\n'
+                                          f'region - 300 isle #24\n')
+        self.enable('isle')
+        out, rec = self.handed(f'get 1 {FLAG}')
+        logs = '\n'.join(out)
+        self.assertIn('3 line(s) not read as records', logs)          # flag 5 and region 300: outside their ranges
+        self.assertTrue((prof / 'mod-ids.txt.bad').exists())
+        self.assertIn(f'flag - {FLAG} isle seen', rec)                 # its own number, not the game's flag 5
+        self.assertIn(f'flag - {FLAG + 40} isle boss', rec)            # a good record kept: boss keeps FLAG + 40
+        self.assertIn('region - 24 isle #24', rec)
+
+    def test_one_number_for_two_names_leaves_the_second_out(self):
+        self.mod('twice', {'id': 'twice', 'flags': [{'name': 'a', 'type': 1, 'id': FLAG + 60},
+                                                    {'name': 'b', 'type': 1, 'id': FLAG + 60}]})
+        self.enable('twice')
+        out, rec = self.handed(f'get 1 {FLAG}')
+        self.assertIn(f'flag "b" left out: its number {FLAG + 60} is "a"\'s too', '\n'.join(out))
+        self.assertEqual([x for x in rec if 'twice' in x], [f'flag - {FLAG + 60} twice a'])
 
     def test_hostile_manifests_are_refused(self):
         self.mod('deep', '{"id": "deep", "x": ' + '[' * 200000 + ']' * 200000 + '}')

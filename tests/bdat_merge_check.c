@@ -40,16 +40,60 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
+    if (argc >= 5 && (!strcmp(argv[1], "raster") || !strcmp(argv[1], "gimk"))) {
+        // raster GAME OUT name=file ... [--ids=FILE]: the world rasters combined (bdat_raster_combine)
+        // gimk GAME OUT name=file ...: a zone's placement files combined (bdat_gimk_combine)
+        int gimk = !strcmp(argv[1], "gimk");
+        BdatInput game = {0}, mods[64] = {{0}};
+        int n = 0;
+        const uint8_t *ids = NULL;
+        size_t ids_n = 0;
+        game.name = "game";
+        if (!(game.data = slurp(argv[2], &game.size))) return 1;
+        for (int a = 4; a < argc && n < 64; a++) {
+            const char *p = argv[a], *eq = strchr(p, '=');
+            if (!strncmp(p, "--ids=", 6)) {
+                if (!(ids = slurp(p + 6, &ids_n))) return 1;
+                continue;
+            }
+            if (!eq) return 1;
+            char *name = malloc((size_t)(eq - p) + 1);
+            memcpy(name, p, (size_t)(eq - p));
+            name[eq - p] = 0;
+            mods[n].name = name;
+            if (!(mods[n].data = slurp(eq + 1, &mods[n].size))) return 1;
+            n++;
+        }
+        for (int k = 0; ids && k < n; k++) mods[k].ids = bdat_merge_ids_from_json(ids, ids_n, mods[k].name, &mods[k].nids);
+        size_t out_n = 0;
+        char why[512];
+        uint8_t *out = gimk ? bdat_gimk_combine(&game, mods, n, &out_n, print_note, NULL, why, sizeof why)
+                            : bdat_raster_combine(&game, mods, n, &out_n, print_note, NULL, why, sizeof why);
+        if (!out) {
+            printf("unmergeable %s\n", why);
+            return 2;
+        }
+        FILE *f = fopen(argv[3], "wb");
+        if (!f || fwrite(out, 1, out_n, f) != out_n) return 1;
+        fclose(f);
+        return 0;
+    }
     if (argc >= 5 && !strcmp(argv[1], "merge")) {
         // name=file.bdat (the mod's full copy) or name=Table.json (one of its tables), any number per name; a mod's
         // priority is where its name first appears
         BdatInput base = {0}, mods[64] = {{0}};
         static BdatJson json[64][256];
         int n = 0;
+        const uint8_t *ids = NULL;   // --ids=FILE: the numbers handed out, per mod ({mod: [entry, ...]})
+        size_t ids_n = 0;
         base.name = "game";
         if (!(base.data = slurp(argv[2], &base.size))) return 1;
         for (int a = 4; a < argc; a++) {
             const char *p = argv[a], *eq = strchr(p, '=');
+            if (!strncmp(p, "--ids=", 6)) {
+                if (!(ids = slurp(p + 6, &ids_n))) return 1;
+                continue;
+            }
             if (!eq) return 1;
             char *name = malloc((size_t)(eq - p) + 1);
             memcpy(name, p, (size_t)(eq - p));
@@ -79,6 +123,7 @@ int main(int argc, char **argv) {
                 mods[k].size = sz;
             }
         }
+        for (int k = 0; ids && k < n; k++) mods[k].ids = bdat_merge_ids_from_json(ids, ids_n, mods[k].name, &mods[k].nids);
         size_t out_n = 0;
         BdatSummary s;
         char why[512];

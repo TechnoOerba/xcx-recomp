@@ -15,6 +15,16 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
     (void)mount; (void)key; (void)mods; (void)n; (void)out; (void)cap;
     return 0;
 }
+int bdat_merge_serve_whole(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out,
+                           size_t cap) {
+    (void)mount; (void)key; (void)mods; (void)n; (void)out; (void)cap;
+    return 0;
+}
+// No mod.json hand-out here (runtime/mod_ids.c): no mod's numbers move.
+int mod_ids_moved(const char *mod) {
+    (void)mod;
+    return 0;
+}
 static int prepared;   // merges made ahead (bdat_merge_auto, or Merge now)
 int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *mods, int n) {
     (void)mount; (void)key; (void)mods; (void)n;

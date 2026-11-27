@@ -85,10 +85,12 @@ region every hook returns what the game had.
 - Panel rows (`runtime/region_layout.c`): the panels build one row widget per row node `mc_List01`, `mc_List02`, ...
   of their menu layout (`ui/image/04010_parts05.wilay` for Region Intel on the Segments and Map tabs,
   `04010_parts04.wilay` for Map Shortcuts, `04030_frontiernet_parts08.wilay` for the FrontierNav tab). When the game
-  opens one of them and mod regions exist, the copy it would read (a mod's, else its own from its archive) gets a row
+  opens one of them and mod regions exist, the copy it would read (a mod's, else its own from its archive; see Limits
+  for a mod's copy that brings rows of its own) gets a row
   per mod region and is served from `<profile>/region-layouts/`: the last row and its child components copied one row
   step on, a special last row (Mira's, hidden in the Map tab's mission view by a track of its placement node) kept
-  last, the window one row taller per row; Map Shortcuts moves up a row per row (it reaches the screen's bottom), the
+  last, Region Intel's divider line above each row (`rect_LineNN`) added the same way, the window one row taller per
+  row; Map Shortcuts moves up a row per row (it reaches the screen's bottom), the
   FrontierNav panel widens once for a longer name. A panel taller than the screen's band is scaled down as a whole,
   to half size at the least. With no mod region nothing is served.
 - The field-region test (`region > 24` means "no field") answers 0 for a far region; the discovery flag of a far

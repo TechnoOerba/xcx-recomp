@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STEP = 0.024          # the rows' step
 MIRA_GAP = 0.03       # the special last row sits a bigger step below the one before it
 WIN = (-0.1, -0.05, 0.2, 0.1)   # the window rect: x, y, w, h
+LGAP = 0.01           # a divider line sits this far above its row (Region Intel's rect_LineNN)
 
 
 def clang():
@@ -30,11 +31,17 @@ def f32(v):
     return struct.unpack('<f', struct.pack('<f', v))[0]
 
 
-def build(rows=3, kid=False, top_frame=True):
+def row_y(r, rows):
+    """The y of row r (1-based) in a built layout: the last one is special (Mira's gap)."""
+    return (rows - 2) * STEP + MIRA_GAP - STEP if r == rows else (r - 2) * STEP
+
+
+def build(rows=3, kid=False, top_frame=True, lines=False):
     """A layout: components top, mc_Top, mc_ListNN..01 (each optionally followed by a child component mc_Kid), the
-    window rect in mc_Top, placement nodes for top (2 position + 2 scale keys), the window and each row."""
+    window rect in mc_Top, placement nodes for top (2 position + 2 scale keys), the window and each row. lines: a
+    divider line above each row as Region Intel has them (rects rect_LineNN, the last one on a special node)."""
     # ---- placement nodes: table at +64, arrays after it
-    nnodes = 2 + rows
+    nnodes = 2 + rows + (rows if lines else 0)
     arrays = bytearray()
     base = 64 + 64 * nnodes
 
@@ -55,6 +62,14 @@ def build(rows=3, kid=False, top_frame=True):
             nodes.append([3, 0, pos, nxt, 0, 0, nxt + 8, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         else:
             pos = arr([0.01, (r - 1) * STEP]); nxt = arr([0])
+            nodes.append([1, 0, pos, 0, 0, 0, nxt, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    for r in range(1, rows + 1) if lines else ():                                            # then rect_Line01..
+        y = row_y(r, rows) - LGAP
+        if r == rows:
+            pos = arr([0.01, y, 0.01, y - 0.001]); nxt = arr([0, 0])
+            nodes.append([3, 0, pos, nxt, 0, 0, nxt + 8, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        else:
+            pos = arr([0.01, y]); nxt = arr([0])
             nodes.append([1, 0, pos, 0, 0, 0, nxt, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     u4 = bytearray(struct.pack('<16I', 0, 64, nnodes, *[0] * 13))
     for n in nodes:
@@ -97,9 +112,15 @@ def build(rows=3, kid=False, top_frame=True):
             items = [(1, 0, 0, 0)] + [(0, 1 + k, comp_of_row[r], k) for k, r in enumerate(range(rows, 0, -1))]
             frames = [(1, 1 << 16 | 0xffff)] + [(0x201 if r == rows else 0x600, (1 + r) << 16 | 0xffff)
                                                 for r in range(rows, 0, -1)]
+            line_rows = list(range(rows, 0, -1)) if lines else []          # rect 1 + k = rect_Line(line_rows[k])
+            items += [(1, 1 + rows + k, 1 + k, 0) for k in range(len(line_rows))]
+            frames += [(0x201 if r == rows else 0x600, (1 + rows + r) << 16 | 0xffff) for r in line_rows]
             fr = put(struct.pack('<2I', 8, len(frames)) + b''.join(struct.pack('<2I', *f) for f in frames))
-            dl = put(display(items, [list(range(1, rows + 1)), [0], []]))
-            rc = put(struct.pack('<2I', 1, 8) + struct.pack('<2I4f2I', 0, 1, *WIN, 0, 0))
+            dl = put(display(items, [list(range(1, rows + 1)), [0] + [1 + rows + k for k in range(len(line_rows))],
+                                     []]))
+            rc = put(struct.pack('<2I', 1 + len(line_rows), 8) + struct.pack('<2I4f2I', 0, 1, *WIN, 0, 0) +
+                     b''.join(struct.pack('<2I4f2I', 0, 1 + rows + r, -0.1, -0.002, 0.2, 0.004, 0, 0)
+                              for r in line_rows))
             rect_name_at = rc + 8                    # named below, with the components
             ents.append([0, fr, 0, dl, rc, start, 0])
         elif name.startswith('mc_List'):
@@ -114,6 +135,8 @@ def build(rows=3, kid=False, top_frame=True):
     for i, name in enumerate(names):
         ents[i][6] = put(name.encode() + b'\0', 1)
     struct.pack_into('<I', u13, rect_name_at, put(b'rect_Window\0', 1))
+    for k, r in enumerate(range(rows, 0, -1) if lines else ()):
+        struct.pack_into('<I', u13, rect_name_at + 32 * (1 + k), put(b'rect_Line%02d\0' % r, 1))
     ct = put(b''.join(struct.pack('<7I', *e) for e in ents))
     # tree: item i = component i + 1; mc_Top's children are the rows (slots 1..rows), a row's children its kid
     n = len(names)
@@ -185,6 +208,29 @@ class Layout:
         frames = [struct.unpack_from('<2I', self.d, fb + foff + 8 * j) for j in range(fcnt)]
         self.assert_eq(len(items), len(frames))
         return {comps[it[2]][0]: (f[0], f[1] >> 16) for it, f in zip(items, frames) if it[0] == 0}
+
+    def top_lines(self):
+        """{line name: (frame flags, placement node)} from mc_Top's kind 1 items and its rect table."""
+        e = dict(self.comps())['mc_Top']
+        b = self.u13 + e[3]
+        cnt, at = self.u32(b), self.u32(b + 4)
+        items = [struct.unpack_from('<IHHI', self.d, b + at + 12 * j) for j in range(cnt)]
+        fb = self.u13 + e[1]
+        foff = self.u32(fb)
+        frames = [struct.unpack_from('<2I', self.d, fb + foff + 8 * j) for j in range(cnt)]
+        rb = self.u13 + e[4]
+        rcnt, roff = self.u32(rb), self.u32(rb + 4)
+        rects = [struct.unpack_from('<2I', self.d, rb + roff + 32 * j) for j in range(rcnt)]
+        out = {}
+        for it, f in zip(items, frames):
+            if it[0] != 1:
+                continue
+            s = self.u13 + rects[it[2]][0]
+            name = self.d[s:self.d.index(b'\0', s)].decode()
+            if name.startswith('rect_Line'):
+                self.assert_eq(rects[it[2]][1], f[1] >> 16)        # the rect and its frame name the same node
+                out[name] = (f[0], f[1] >> 16)
+        return out
 
     @staticmethod
     def assert_eq(a, b):
@@ -310,6 +356,23 @@ class RegionLayout(unittest.TestCase):
         res, out = self.run_check(data, 2, move_up=1)
         self.assertEqual((res['added'], res['after']), (0, 3))
         self.assertEqual(out, data)
+
+    def test_divider_lines_follow_the_rows(self):
+        # Region Intel: each new row gets a line just above it; the special line stays above the special last row
+        res, out = self.run_check(build(lines=True), 2)
+        self.assertEqual((res['added'], res['after'], res['lines']), (2, 5, 5))
+        L = Layout(out)
+        rows, lines = L.top_rows(), L.top_lines()
+        self.assertEqual(sorted(lines), ['rect_Line%02d' % r for r in range(1, 6)])
+        for r in range(1, 6):
+            fr, nr = rows['mc_List%02d' % r]
+            fl, nl = lines['rect_Line%02d' % r]
+            self.assertEqual(fl, fr, r)                              # special flags with the special row only
+            self.assertEqual(L.node(nl)[0], L.node(nr)[0], r)        # and its kind of node
+            ry, ly = L.floats(L.node(nr)[2], 2)[1], L.floats(L.node(nl)[2], 2)[1]
+            self.assertAlmostEqual(ry - ly, LGAP, places=5, msg=r)
+        res, _ = self.run_check(build(), 2)                          # no lines in the layout: none made
+        self.assertEqual(res['lines'], 0)
 
     def test_not_a_layout(self):
         res, out = self.run_check(b'NOTALAYOUT' * 10, 2)

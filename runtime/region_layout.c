@@ -205,6 +205,27 @@ int region_layout_rows(const uint8_t *data, size_t n) {
     return nc < 0 ? -1 : rows;
 }
 
+// Region Intel's divider lines: rect_LineNN rects in mc_Top's rect table.
+int region_layout_lines(const uint8_t *data, size_t n) {
+    Lagp L = {{(uint8_t *)data, n, n, 0}, 0, 0};
+    if (!lagp_ok(&L.b)) return -1;
+    L.u4 = rd32(&L.b, 0x18);
+    L.u13 = rd32(&L.b, 0x3c);
+    Comp *c = malloc(MAXC * sizeof *c);
+    Rect *r = malloc(MAXC * sizeof *r);
+    int lines = -1;
+    if (c && r) {
+        int nc = comps_of(&L, c), ti = nc < 0 ? -1 : find_comp(&L, c, nc, "mc_Top"), nr = ti < 0 ? -1 : rects_of(&L, &c[ti], r);
+        if (nr >= 0) {
+            lines = 0;
+            for (int i = 0; i < nr; i++) lines += !strncmp(cstr(&L.b, L.u13 + r[i].name), "rect_Line", 9);
+        }
+    }
+    free(c);
+    free(r);
+    return lines;
+}
+
 typedef struct {
     Comp c[MAXC];
     Display top, kid;
@@ -751,7 +772,8 @@ static const struct { const char *key; RegionLayoutKind kind; } layouts[] = {
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
 // Per layout, for the rows wanted and the source last asked about: 1 = a file to serve at path, -1 = nothing to serve
-// (the usual path: a mod's own copy already has the rows, or no copy could be read), 0 = not made yet.
+// (no copy could be read or rows added to it, or the file couldn't be written: the game reads what it would have read),
+// 0 = not made yet.
 static struct { int state, rows; char src[1100]; char path[1100]; } made[NLAYOUTS];   // under lock
 
 // The game's own copy: in its archive (where the game keeps these layouts), else a loose RomFS file.
@@ -830,6 +852,12 @@ static void make(int li, const char *key, int want, int from_mod, const char *sr
         if (sc > 0 && sc < 1)
             rt_log("regions: %s: the panel is drawn at %.0f%% to fit the screen with %d rows", key, sc * 100,
                    have + added);
+        // Region Intel draws a divider line above each row; a copy whose lines don't follow the rows' names (a mod's
+        // that renamed or dropped them) gets its rows without lines
+        int lines0 = region_layout_lines(d, n);
+        if (lines0 > 0 && lines0 < have + added)
+            rt_log("regions: %s: %d divider line(s) for %d rows: the copy's lines don't follow its rows' names, so the "
+                   "added rows have none", key, lines0, have + added);
     }
     char dir[1100], file[1100];
     const char *base = strrchr(key, '/');
@@ -846,7 +874,8 @@ static void make(int li, const char *key, int want, int from_mod, const char *sr
                from_mod ? "a mod's copy" : "the game's copy", have, mods, (double)(plat_now_ns() - t0) / 1e6);
     } else {
         rt_log("regions: %s: the layout with rows for mod regions can't be written under %s%s", key, cfg->profile,
-               served_before ? "; the one made before stays" : "; the game's own copy is used");
+               served_before ? "; the one made before stays" : from_mod ? "; the mod's copy is used as it is"
+                                                                         : "; the game's own copy is used");
     }
     free(d);
 }

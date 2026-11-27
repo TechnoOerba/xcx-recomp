@@ -2,7 +2,7 @@
 // without the file serving) on a layout file. Usage: region_layout_check IN OUT ROWS MOVE_UP WIDEN [FIT] [RECT...]
 // adds ROWS rows (the first one WIDEN wider, RECTs moving with its columns); FIT 1 then scales the panel into the
 // screen band, FIT 2 adds as many of ROWS as fit at half size or more (region_layout_grow_fit). Prints
-// "rows <before> added <n> after <rows> fit <scale>".
+// "rows <before> added <n> after <rows> fit <scale> lines <divider lines>".
 #include "region_layout.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +28,8 @@ int main(int argc, char **argv) {
         added = region_layout_grow(&d, &n, atoi(argv[3]), &k);
         fit = region_layout_fit(d, n, mode == 1);
     }
-    printf("rows %d added %d after %d fit %.4f\n", before, added, before >= 0 ? region_layout_rows(d, n) : -1, fit);
+    printf("rows %d added %d after %d fit %.4f lines %d\n", before, added, before >= 0 ? region_layout_rows(d, n) : -1,
+           fit, region_layout_lines(d, n));
     f = fopen(argv[2], "wb");
     if (!f) return 2;
     fwrite(d, 1, n, f);

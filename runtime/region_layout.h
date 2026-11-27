@@ -21,10 +21,11 @@ typedef struct {
     double widen;
     const char *const *widen_also;
 } RegionLayoutKind;
-// The functions below on a layout file in memory. region_layout_rows and region_layout_fit use static buffers: the
-// runtime calls them under the layout lock (region_layout_file).
+// The functions below work on a layout file in memory and keep no state between calls.
 // The mc_ListNN rows of a menu layout (LAGP), -1 when it isn't one.
 int region_layout_rows(const uint8_t *data, size_t n);
+// Region Intel's divider lines (rect_LineNN rects in mc_Top), -1 when it isn't a layout.
+int region_layout_lines(const uint8_t *data, size_t n);
 // Adds rows to the layout in *data (reallocated): the rows added (fewer when the layout's shape stops it; a row that
 // fails leaves the file as it was before that row).
 int region_layout_grow(uint8_t **data, size_t *n, int rows, const RegionLayoutKind *kind);

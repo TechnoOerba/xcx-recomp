@@ -374,6 +374,23 @@ class RegionLayout(unittest.TestCase):
         res, _ = self.run_check(build(), 2)                          # no lines in the layout: none made
         self.assertEqual(res['lines'], 0)
 
+    def test_header_band_moves_the_rows_down(self):
+        # Map Shortcuts: the window's header band stretches with it, so each row moves the rows down by its growth d
+        band, h = 0.01, WIN[3]
+        d = band * STEP / (h - band)
+        res, out = self.run_check(build(), 2, also=('band=%g' % band,))
+        self.assertEqual(res['added'], 2)
+        L = Layout(out)
+        rows = L.top_rows()
+        for r in (1, 2):
+            y = L.floats(L.node(rows['mc_List%02d' % r][1])[2], 2)[1]
+            self.assertAlmostEqual(y, (r - 2) * STEP + 2 * d, places=5)
+        sy = L.floats(L.node(1)[3], 2)[1]
+        self.assertAlmostEqual(sy, 1 + 2 * (STEP + d) / h, places=4)
+        _, plain = self.run_check(build(), 2)                        # no band: the rows stay where they were
+        self.assertAlmostEqual(Layout(plain).floats(Layout(plain).node(Layout(plain).top_rows()['mc_List01'][1])[2], 2)[1],
+                               -STEP, places=5)
+
     def test_not_a_layout(self):
         res, out = self.run_check(b'NOTALAYOUT' * 10, 2)
         self.assertEqual(res['rows'], -1)

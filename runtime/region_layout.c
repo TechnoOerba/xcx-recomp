@@ -239,7 +239,7 @@ typedef struct {
 
 // One more row (see the top of the file); 0 when the layout doesn't have the expected shape. A row can fail after it
 // changed bytes in place (the window's keys, the node table's place): region_layout_grow puts the file back then.
-static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *const *widen_also) {
+static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *const *widen_also, double band) {
     Buf *b = &L->b;
     uint32_t noff = rd32(b, L->u4 + 4), nn = rd32(b, L->u4 + 8);
     if (nn + 4 > MAXC || !in_range(b, L->u4 + noff, (size_t)nn * 64)) return 0;
@@ -326,6 +326,28 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
     memcpy(W->nodes[count] + 8, &rel, 4);
     W->keys[count] = (uint16_t)k;
     int row_node = (int)count++;
+    // A window whose header band is part of its picture (Map Shortcuts') stretches the band with its height: the band
+    // grows by band * the scale added. The rows move down by that growth (d) and the window grows by it too; d solves
+    // d = band * (row + d) / h, h the window rect's height.
+    double d = 0;
+    if (band > 0) {
+        for (int i = 0; i < nr; i++)
+            if (!strcmp(cstr(b, L->u13 + W->r[i].name), "rect_Window") && W->r[i].h > band)
+                d = band * fabs(row) / (W->r[i].h - band);
+        uint8_t moved[MAXC + 4] = {0};
+        for (int i = 0; i < nc; i++)
+            if (row_number(comp_name(L, &W->c[i])) > 0 && node_of[i] >= 0 && (uint32_t)node_of[i] < count)
+                moved[node_of[i]] = 1;
+        moved[row_node] = 1;
+        if (plain_node >= 0) moved[plain_node] = 1;
+        for (uint32_t nd = 0; nd < count; nd++) {
+            if (!moved[nd]) continue;
+            o = node_xy(L, W->nodes, W->keys, nd, &k);
+            if (k > 64 || !in_range(b, o, 8 * (size_t)k)) return 0;
+            for (uint32_t j = 0; j < k; j++) wrf(b, o + 8 * j + 4, rdf(b, o + 8 * j + 4) + (row >= 0 ? d : -d));
+        }
+    }
+    double grow = row >= 0 ? row + d : row - d;   // how much taller the panel gets
     // Region Intel's divider lines: rects rect_Line01.. in mc_Top, each just above its row, the last one (above the
     // special row) on a node like that row's. One more line, the same way as the row: the line that stops being last
     // gets an ordinary node where it is, and the new line takes the special one, one row further on.
@@ -383,12 +405,12 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
         for (uint32_t j = 0; j < ns; j++) {
             size_t so = L->u4 + f[3] + 8 * j;
             wrf(b, so, rdf(b, so) + widen / W->r[i].w);
-            wrf(b, so + 4, rdf(b, so + 4) + fabs(row) / W->r[i].h);
+            wrf(b, so + 4, rdf(b, so + 4) + fabs(grow) / W->r[i].h);
         }
         for (uint32_t j = 0; j < np; j++) {
             size_t po = L->u4 + f[2] + 8 * j;
             wrf(b, po, rdf(b, po) + widen / 2);
-            wrf(b, po + 4, rdf(b, po + 4) + row / 2);
+            wrf(b, po + 4, rdf(b, po + 4) + grow / 2);
         }
     }
     if (widen != 0) {   // the rows' child columns (shared placement nodes) and named rects move right by widen
@@ -415,7 +437,7 @@ static int add_row(Lagp *L, Work *W, int move_up, double widen, const char *cons
         if (ti < 0 || frames_of(L, &W->c[ti], W->fk) < 1 || (W->fk[0][1] >> 16) >= count) return 0;
         o = node_xy(L, W->nodes, W->keys, (uint32_t)(W->fk[0][1] >> 16), &k);
         if (k > 64 || !in_range(b, o, 8 * (size_t)k)) return 0;
-        for (uint32_t j = 0; j < k; j++) wrf(b, o + 8 * j + 4, rdf(b, o + 8 * j + 4) - row);
+        for (uint32_t j = 0; j < k; j++) wrf(b, o + 8 * j + 4, rdf(b, o + 8 * j + 4) - grow);
     }
 
     // clone the row and its children: a component's blocks run from its block (entry 5) to the next component's
@@ -696,7 +718,7 @@ int region_layout_grow(uint8_t **data, size_t *n, int rows, const RegionLayoutKi
         memcpy(keep, L.b.d, n0);
         uint16_t keys[MAXC + 4];
         memcpy(keys, W->keys, sizeof keys);
-        if (add_row(&L, W, kind->move_up, widen, kind->widen_also) && !L.b.bad) continue;
+        if (add_row(&L, W, kind->move_up, widen, kind->widen_also, kind->band) && !L.b.bad) continue;
         memcpy(L.b.d, keep, n0);                   // L.b.d holds at least n0 bytes: it only grows
         L.b.n = n0;
         L.b.bad = 0;
@@ -762,11 +784,13 @@ int region_layout_grow_fit(uint8_t **data, size_t *n, int rows, const RegionLayo
 static const char *const fn_widen[] = {"rect_TextIndex02", NULL};
 static const struct { const char *key; RegionLayoutKind kind; } layouts[] = {
     // Region Intel, on the Segments and Map tabs
-    {"ui/image/04010_parts05.wilay", {REGION_PANEL_INTEL, REGION_INTEL_GAME_ROWS, 0, 0.0, NULL}},
+    {"ui/image/04010_parts05.wilay", {REGION_PANEL_INTEL, REGION_INTEL_GAME_ROWS, 0, 0.0, NULL, 0.0}},
     // Map Shortcuts
-    {"ui/image/04010_parts04.wilay", {REGION_PANEL_SHORTCUTS, REGION_SHORTCUTS_GAME_ROWS, 1, 0.0, NULL}},
+    // its header band grows 0.0075 screen widths per unit of window scale (measured: 53 px at the game's 8 rows, about
+    // 104 px at 34, on a 2560 px wide screen)
+    {"ui/image/04010_parts04.wilay", {REGION_PANEL_SHORTCUTS, REGION_SHORTCUTS_GAME_ROWS, 1, 0.0, NULL, 0.0075}},
     // Region Intel on the FrontierNav tab
-    {"ui/image/04030_frontiernet_parts08.wilay", {REGION_PANEL_FN, REGION_FN_GAME_ROWS, 0, 0.016, fn_widen}},
+    {"ui/image/04030_frontiernet_parts08.wilay", {REGION_PANEL_FN, REGION_FN_GAME_ROWS, 0, 0.016, fn_widen, 0.0}},
 };
 #define NLAYOUTS ((int)(sizeof layouts / sizeof *layouts))
 

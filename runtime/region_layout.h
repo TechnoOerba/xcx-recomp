@@ -14,12 +14,15 @@ uint32_t region_mod_count(void);
 uint32_t region_panel_rows(RegionPanel panel);
 
 // A layout's rows (mc_ListNN components): whether the panel moves up a row per row added (it reaches the screen's
-// bottom), how much wider the first added row makes it and the rects that move right with its columns.
+// bottom), how much wider the first added row makes it and the rects that move right with its columns, and how much its
+// window's header band grows per unit of the window's height scale (Map Shortcuts': the band is part of the window's
+// picture and stretches with it, so the rows move down by that much; 0 for a window whose header keeps its size).
 typedef struct {
     RegionPanel panel;
     int game_rows, move_up;
     double widen;
     const char *const *widen_also;
+    double band;
 } RegionLayoutKind;
 // The functions below work on a layout file in memory and keep no state between calls.
 // The mc_ListNN rows of a menu layout (LAGP), -1 when it isn't one.

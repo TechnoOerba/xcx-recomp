@@ -20,6 +20,7 @@
 // which then stands in for the top mod's copy. When it can't be merged, the top mod's copy is served as before (or,
 // with only JSON tables, the game's own copy). The game reads them only at start-up, so a list changed later can be
 // merged ahead for the next start (romfs_mods_premerge).
+#include "mod_ids.h"
 #include "romfs_mods.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -49,7 +50,7 @@ typedef struct {
 
 // A data table merged since the last rebuild: its key and the file served for it (NULL: none).
 typedef struct { char *key, *path; } Merged;
-#define MERGED_CAP 16
+#define MERGED_CAP 128   // data tables, the raster, and a zone's placement files for every zone with mods
 #define STARTED_CAP 64         // data table files the game reads at start-up, with or without a mod's copy
 
 static PlatMutex lock = PLAT_MUTEX_INIT;   // guards files / nfiles (shared for lookups)
@@ -118,9 +119,20 @@ static int ends(const char *s, const char *tail) {
     return n > t && !strcmp(s + n - t, tail);
 }
 
-// A data table (bdat/....bdat) or a table of one as bdat-toolset JSON (bdat/.../<table>.json).
+// The world raster (which map region each cell is): region mods' copies are combined (docs/mod-ids.md).
+static int is_raster(const char *key) { return !strcmp(key, "zone/zone0001.atr"); }
+// A zone's placement file (gimmick/<zone>/arrangement_*.gimk): several mods' copies are combined label by label.
+static int is_gimk(const char *key) {
+    return !strncmp(key, "gimmick/", 8) && strstr(key, "/arrangement_") && ends(key, ".gimk");
+}
+// A whole file several mods' copies of are combined into one (bdat_merge_serve_whole).
+static int is_whole(const char *key) { return is_raster(key) || is_gimk(key); }
+
+// A data table (bdat/....bdat) or a table of one as bdat-toolset JSON (bdat/.../<table>.json), the raster or a
+// placement file.
 static int mergeable(const char *key) {
-    return !strncmp(key, "bdat/", 5) && strlen(key) > 10 && (ends(key, ".bdat") || ends(key, ".json"));
+    return (!strncmp(key, "bdat/", 5) && strlen(key) > 10 && (ends(key, ".bdat") || ends(key, ".json"))) ||
+           is_whole(key);
 }
 
 // The mod id of a host path <root>/<id>/romfs/..., into id.
@@ -561,8 +573,8 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     plat_mutex_lock_shared(&lock);
     ModFile *f = find(key);
     size_t lo = 0, hi = 0, nj = 0;
-    int table = !strncmp(key, "bdat/", 5) && ends(key, ".bdat");
-    if (table) {
+    int whole = is_whole(key), table = (!strncmp(key, "bdat/", 5) && ends(key, ".bdat")) || whole;
+    if (table && !whole) {
         json_range(key, &lo, &hi);
         for (size_t i = lo; i < hi; i++) nj += (size_t)is_json_of(files[i].key, strlen(key) - 4);
     }
@@ -571,6 +583,25 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
         return 0;
     }
     int merge = table && (nj || f->nalts >= 2);
+    if (table && !merge && mount && out && !is_gimk(key)) {   // (no number is moved in a placement file)
+        // one mod's copy: merged all the same when the numbers it was given aren't the ones its files use
+        // (runtime/mod_ids.c), asked outside the map's lock (the hand-out reads the enabled mods' mod.json files)
+        char one[80];
+        id_of(f->host, one, sizeof one);
+        plat_mutex_unlock_shared(&lock);
+        int moved = mod_ids_moved(one);
+        plat_mutex_lock_shared(&lock);
+        if (!(f = find(key))) {   // the map was rebuilt meanwhile, without it
+            plat_mutex_unlock_shared(&lock);
+            return 0;
+        }
+        nj = 0;   // and its JSON tables as the map has them now
+        if (!whole) {
+            json_range(key, &lo, &hi);
+            for (size_t i = lo; i < hi; i++) nj += (size_t)is_json_of(files[i].key, strlen(key) - 4);
+        }
+        merge = moved || f->nalts >= 2 || nj;
+    }
     if (!merge || !mount || !out) {
         // A table to merge, opened before the RomFS is mounted (no game copy to merge onto): the top mod's whole copy,
         // or the archive's when only JSON mods change it. Said once, since the merge waits for the mount.
@@ -603,7 +634,8 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     // the merge gets the caller's room for the path: one that doesn't fit is "not merged (no room for the path)" in
     // serve, which then leaves the top mod's whole copy below, instead of a merge made and then not served
     char path[ROMFS_MOD_PATH_CAP];
-    ok = ok && bdat_merge_serve(mount, key, in, nin, path, cap < sizeof path ? cap : sizeof path);
+    ok = ok && (whole ? bdat_merge_serve_whole(mount, key, in, nin, path, cap < sizeof path ? cap : sizeof path)
+                       : bdat_merge_serve(mount, key, in, nin, path, cap < sizeof path ? cap : sizeof path));
     const char *served = ok ? path : NULL;
     for (int i = 0; !served && i < nin; i++) served = in[i].full;   // not merged: the top mod's whole copy
     if (served && strlen(served) < cap) strcpy(out, served);
@@ -611,6 +643,9 @@ static int lookup(const char *key, char *out, size_t cap, const char *mount) {
     plat_mutex_lock(&lock);
     int known = 0;
     for (int i = 0; i < nmerged; i++) known |= !strcmp(merged[i].key, key);
+    static int memo_full_logged;
+    if (files_gen == gen && !known && nmerged == MERGED_CAP && !__atomic_exchange_n(&memo_full_logged, 1, __ATOMIC_RELAXED))
+        rt_log("romfs mods: more than %d merged files; %s is merged again at each open", MERGED_CAP, key);
     if (files_gen == gen && !known && nmerged < MERGED_CAP) {
         merged[nmerged].key = strdup(key);
         merged[nmerged].path = served ? strdup(served) : NULL;
@@ -977,7 +1012,7 @@ static void premerge_run(void *arg) {
         set_sig(keys[k], sig, t);
         plat_mutex_unlock_shared(&lock);
         // as the next start would: merged where there is something to merge; else one mod's copy or the game's own
-        if (ok && merge && mount[0]) bdat_merge_prepare(mount, keys[k], in, nin);
+        if (ok && (merge || (nin == 1 && mod_ids_moved(in[0].id))) && mount[0]) bdat_merge_prepare(mount, keys[k], in, nin);
         free_gathered(in, nin);
         done[nd].key = strdup(keys[k]);
         done[nd].path = strdup(sig);

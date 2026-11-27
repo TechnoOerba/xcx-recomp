@@ -9,6 +9,7 @@ extern "C" {
 #include "mod_library.h"
 #include "romfs_mods.h"
 #include "bdat_merge.h"
+#include "mod_ids.h"
 #include "ui_text.h"
 // host.h is C only: the one the page needs, as declared there
 int rt_restart_game(void);
@@ -59,6 +60,15 @@ static int merge_lines(bool ahead) {
         merge_line(kind,line);
     }
     return i;
+}
+
+// The numbers handed out to content mods this run (runtime/mod_ids.c): a line per mod with a mod.json, then the
+// numbers moved from the ones a mod's files use (yellow) and the names that got none (orange).
+static void id_lines() {
+    char line[320];int kind=0;
+    if(!mod_ids_status(0,line,sizeof line,&kind))return;
+    ImGui::Spacing();ImGui::TextDisabled("%s",menu_text(UI_MODS_IDS));PRIO_LINE('I',menu_text(UI_MODS_IDS));
+    for(int i=0;mod_ids_status(i,line,sizeof line,&kind);++i){PRIO_LINE(kind==2?'O':kind==1?'Y':'N',line);merge_line(kind==2?1:kind==1?2:0,line);}
 }
 
 // The game-file mods that are on, highest priority first as romfs-enabled.txt lists them (runtime/romfs_mods.c,
@@ -176,6 +186,7 @@ static void mod_priority(const ModLibView &v,bool idle) {
     // The merges were made at start-up and the game doesn't read its tables again, so once the list would make them
     // otherwise (romfs_mods_tables_changed) the lines say so first, instead of passing for the list as it is now, and
     // offer to merge the list as it is now ahead of the restart.
+    if(!stale){ImGui::PushTextWrapPos(0);id_lines();ImGui::PopTextWrapPos();}   // the list the game started with only
     if(merges||stale){
         ImGui::PushTextWrapPos(0);
         if(!stale){

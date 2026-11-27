@@ -38,6 +38,7 @@
 //
 // XCX_MOD_STATE=0 turns it all off (mod ids then reach the game's storage, as without this file).
 #include "mod_state.h"
+#include "mod_ids.h"
 #include "cfg.h"
 #include "dispatch.h"
 #include "fs.h"
@@ -292,70 +293,147 @@ static const Decl *decl_of(uint8_t kind, uint32_t type, uint32_t id) {
     return NULL;
 }
 
-static void read_manifest(const char *folder) {
+// ---- mod.json: what a mod declares (docs/mod-state.md, docs/mod-ids.md); the one reader of that file
+//   { "id": "ashen-shoal", "version": "2",
+//     "regions": [ { "name": "ashen-reef", "id": 25 }, 24, ... ],               (a bare number: an old file)
+//     "flags":   [ { "name": "discovered/ashen-reef", "type": 1, "id": 49153 }, ... ],   ("id" optional)
+//     "rewards": [ { "name": "ashen-reef/5", "index": 32788 }, ... ],                    ("index" optional)
+//     "rows":    [ { "table": "FLD_NameCondition", "name": "cond/ashen-reef", "id": 23,
+//                    "refs": ["FLD_FieldNameList.nameCondition"] }, ... ],
+//     "sites":   [ { "name": "fn/ashen-shoal", "id": 110 }, ... ] }                (FrontierNav site numbers)
+
+static const char *kind_name(int kind) { return bdat_id_kind_name(kind); }
+
+static int add_decl(ModManifest *m, int *cap, const ModIdDecl *d, const char *folder) {
+    for (int i = 0; i < m->n; i++)
+        if (m->decls[i].kind == d->kind && m->decls[i].table == d->table && d->has_local && m->decls[i].has_local &&
+            m->decls[i].local == d->local) {
+            // one number of its files for two names: the second would move it, and every use of it with it
+            rt_log("mods: %s/mod.json: %s \"%s\" left out: its number %u is \"%s\"'s too", folder,
+                   kind_name(d->kind), d->name, d->local, m->decls[i].name);
+            return 1;
+        }
+    for (int i = 0; i < m->n; i++)
+        if (m->decls[i].kind == d->kind && m->decls[i].table == d->table && !strcmp(m->decls[i].name, d->name)) {
+            rt_log("mods: %s/mod.json: a second %s \"%s\" left out", folder, kind_name(d->kind), d->name);
+            return 1;
+        }
+    m->decls = grow(m->decls, cap, m->n + 1, sizeof *m->decls);
+    m->decls[m->n++] = *d;
+    return 1;
+}
+
+void mod_manifest_free(ModManifest *m) {
+    free(m->decls);
+    m->decls = NULL;
+    m->n = 0;
+}
+
+int mod_manifest_read(const char *folder, ModManifest *m) {
     char path[1300];
-    if (snprintf(path, sizeof path, "%s/%s/mod.json", romfs_mods_dir(), folder) >= (int)sizeof path) return;
+    memset(m, 0, sizeof *m);
+    if (snprintf(path, sizeof path, "%s/%s/mod.json", romfs_mods_dir(), folder) >= (int)sizeof path) return 0;
     uint64_t size = 0;
     uint8_t *text = plat_file_read(path, &size);
-    if (!text) return;   // a mod without mod.json: nothing of its own in the mod state
-    Mod m;
-    memset(&m, 0, sizeof m);
-    snprintf(m.id, sizeof m.id, "%s", folder);
+    if (!text) return 0;   // a mod without mod.json: nothing of its own in the mod state
+    snprintf(m->id, sizeof m->id, "%s", folder);
     J j = {(const char *)text, (const char *)text + size, 0, 0};
-    const char *k, *s; int kn, n, first = 1, before = ndecls, long_name = 0, bad_name = 0;
+    const char *k, *s; int kn, n, first = 1, long_name = 0, bad_name = 0, cap = 0, nregions = 0;
     if (!jlit(&j, '{')) j.bad = 1;
     while (!j.bad && jmember(&j, &first, &k, &kn)) {
+        int kind = jeq(k, kn, "regions") ? BDAT_ID_REGION : jeq(k, kn, "flags") ? BDAT_ID_FLAG
+                 : jeq(k, kn, "rewards") ? BDAT_ID_REWARD : jeq(k, kn, "rows") ? BDAT_ID_ROW
+                 : jeq(k, kn, "sites") ? BDAT_ID_SITE : -1;
         if (jeq(k, kn, "id") && jstr(&j, &s, &n)) {
             bad_name |= !mod_id_ok(s, n);
-            long_name |= !jcopy(m.id, sizeof m.id, s, n);
+            long_name |= !jcopy(m->id, sizeof m->id, s, n);
         } else if (jeq(k, kn, "version") && jstr(&j, &s, &n)) {
             bad_name |= n && !plain(s, n);
-            long_name |= !jcopy(m.version, sizeof m.version, s, n);
-        }
-        else if (jeq(k, kn, "regions") && jlit(&j, '[')) {
-            if (!jlit(&j, ']')) {
-                do {
-                    uint32_t v = jnum(&j);
-                    if (m.nregions < MAX_REGIONS) m.regions[m.nregions++] = v;
-                    else rt_log("mods: %s/mod.json: region %u left out (%d regions at most)", folder, v, MAX_REGIONS);
-                } while (!j.bad && jlit(&j, ','));
-                if (!j.bad && !jlit(&j, ']')) j.bad = 1;
-            }
+            long_name |= !jcopy(m->version, sizeof m->version, s, n);
         } else if (jeq(k, kn, "features") && jlit(&j, '[')) {
             if (jlit(&j, ']')) continue;
             do {
                 if (!jstr(&j, &s, &n)) break;
                 bad_name |= !mod_id_ok(s, n);
-                if (m.nfeatures < MAX_FEATURES) long_name |= !jcopy(m.features[m.nfeatures++], sizeof m.features[0], s, n);
-                else rt_log("mods: %s/mod.json: a feature left out (%d features at most)", folder, MAX_FEATURES);
+                if (m->nfeatures < MOD_MANIFEST_FEATURES)
+                    long_name |= !jcopy(m->features[m->nfeatures++], sizeof m->features[0], s, n);
+                else rt_log("mods: %s/mod.json: a feature left out (%d features at most)", folder, MOD_MANIFEST_FEATURES);
             } while (!j.bad && jlit(&j, ','));
             if (!j.bad && !jlit(&j, ']')) j.bad = 1;
-        } else if ((jeq(k, kn, "flags") || jeq(k, kn, "rewards")) && jlit(&j, '[')) {
-            int reward = jeq(k, kn, "rewards");
+        } else if (kind >= 0 && jlit(&j, '[')) {
             if (jlit(&j, ']')) continue;
             do {
-                Decl d = {{0}, {0}, (uint8_t)(reward ? K_REWARD : K_FLAG), 0, 0};
-                const char *k2; int kn2, f2 = 1;
-                if (!jlit(&j, '{')) { j.bad = 1; break; }
-                while (!j.bad && jmember(&j, &f2, &k2, &kn2)) {
-                    if (jeq(k2, kn2, "name") && jstr(&j, &s, &n)) {
-                        bad_name |= !plain(s, n);
-                        long_name |= !jcopy(d.name, sizeof d.name, s, n);
+                ModIdDecl d;
+                memset(&d, 0, sizeof d);
+                d.kind = (uint8_t)kind;
+                int has_table = 0;
+                jws(&j);
+                if (kind == BDAT_ID_REGION && j.p < j.end && *j.p != '{') {   // an old file: the region's number only
+                    d.local = jnum(&j);
+                    d.has_local = 1;
+                    snprintf(d.name, sizeof d.name, "#%u", d.local);
+                } else {
+                    const char *k2; int kn2, f2 = 1;
+                    if (!jlit(&j, '{')) { j.bad = 1; break; }
+                    while (!j.bad && jmember(&j, &f2, &k2, &kn2)) {
+                        if (jeq(k2, kn2, "name") && jstr(&j, &s, &n)) {
+                            bad_name |= !plain(s, n) || s[0] == ' ' || s[n - 1] == ' ';   // the records file's rule
+                            long_name |= !jcopy(d.name, sizeof d.name, s, n);
+                        } else if (kind == BDAT_ID_FLAG && jeq(k2, kn2, "type")) {
+                            d.type = jnum(&j);
+                        } else if (jeq(k2, kn2, kind == BDAT_ID_REWARD ? "index" : "id")) {
+                            d.local = jnum(&j);
+                            d.has_local = 1;
+                        } else if (kind == BDAT_ID_ROW && jeq(k2, kn2, "table") && jstr(&j, &s, &n)) {
+                            bad_name |= !plain(s, n);
+                            d.table = bdat_merge_name_hash(s, (size_t)n);
+                            has_table = 1;
+                        } else if (kind == BDAT_ID_ROW && jeq(k2, kn2, "refs") && jlit(&j, '[')) {
+                            if (jlit(&j, ']')) continue;
+                            do {
+                                if (!jstr(&j, &s, &n)) break;
+                                const char *dot = NULL;
+                                for (int c = 0; c < n; c++)
+                                    if (s[c] == '.') dot = s + c;
+                                if (!dot || dot == s || dot == s + n - 1 || d.nrefs == MOD_ID_REFS) {
+                                    rt_log("mods: %s/mod.json: row ref \"%.*s\" left out (Table.column, at most %d)",
+                                           folder, n, s, MOD_ID_REFS);
+                                    continue;
+                                }
+                                d.refs[2 * d.nrefs] = bdat_merge_name_hash(s, (size_t)(dot - s));
+                                d.refs[2 * d.nrefs + 1] = bdat_merge_name_hash(dot + 1, (size_t)(s + n - dot - 1));
+                                d.nrefs++;
+                            } while (!j.bad && jlit(&j, ','));
+                            if (!j.bad && !jlit(&j, ']')) j.bad = 1;
+                        } else {
+                            jskip(&j);
+                        }
                     }
-                    else if (jeq(k2, kn2, "type")) d.type = jnum(&j);
-                    else if (jeq(k2, kn2, reward ? "index" : "id")) d.id = jnum(&j);
-                    else jskip(&j);
                 }
                 if (j.bad) break;
-                int range_ok = reward ? d.id >= MOD_REWARD_FIRST && d.id <= 0xffff : MOD_IS_FLAG(d.id);
-                if (d.name[0] && range_ok) {
-                    snprintf(d.owner, sizeof d.owner, "%s", m.id);
-                    decls = grow(decls, &capdecls, ndecls + 1, sizeof *decls);
-                    decls[ndecls++] = d;
-                } else {
-                    rt_log("mods: %s/mod.json: %s \"%s\" (%u) left out: no name, or a number outside the mods' range",
-                           folder, reward ? "reward" : "flag", d.name, d.id);
+                // a region's, a site's and a row's id is where they are in the mod's own files (its region row, the
+                // raster's bytes, its site's row, its row): without one there's nothing to move
+                int need_id = kind == BDAT_ID_ROW || kind == BDAT_ID_REGION || kind == BDAT_ID_SITE;
+                if (!d.name[0] || (need_id && !d.has_local) || (kind == BDAT_ID_ROW && !has_table)) {
+                    rt_log("mods: %s/mod.json: a %s left out: no name%s", folder, kind_name(kind),
+                           kind == BDAT_ID_ROW ? ", table or id" : need_id ? " or id" : "");
+                    continue;
                 }
+                if (d.has_local && kind != BDAT_ID_ROW &&
+                    (kind == BDAT_ID_REGION ? d.local < 24 || d.local > 255
+                     : kind == BDAT_ID_SITE ? d.local < MOD_SITE_FIRST || d.local > MOD_SITE_LOCAL_LAST
+                     : kind == BDAT_ID_FLAG ? !MOD_IS_FLAG(d.local) : d.local < MOD_REWARD_FIRST || d.local > 0xffff)) {
+                    // a number of the game's (or none at all): moving it would rewrite the game's own values
+                    rt_log("mods: %s/mod.json: %s \"%s\" (%u) left out: a number outside the mods' range", folder,
+                           kind_name(kind), d.name, d.local);
+                    continue;
+                }
+                if (kind == BDAT_ID_REGION && nregions >= MAX_REGIONS) {
+                    rt_log("mods: %s/mod.json: region \"%s\" left out (%d regions at most)", folder, d.name, MAX_REGIONS);
+                    continue;
+                }
+                nregions += kind == BDAT_ID_REGION;
+                add_decl(m, &cap, &d, folder);
             } while (!j.bad && jlit(&j, ','));
             if (!j.bad && !jlit(&j, ']')) j.bad = 1;
         } else {
@@ -368,25 +446,55 @@ static void read_manifest(const char *folder) {
                j.bad ? "not readable as JSON" : long_name ? "a name or id is longer than the mod state keeps"
                      : "an id that is not lower case letters, digits, '.', '_' or '-', or a name with a quote, "
                        "backslash or control character");
-        ndecls = before;
-        return;
+        mod_manifest_free(m);
+        return -1;
     }
-    // Two mods (or two entries) with one number: the first keeps it.
-    for (int i = before; i < ndecls; i++)
-        for (int k2 = 0; k2 < i; k2++)
-            if (decls[k2].kind == decls[i].kind && decls[k2].id == decls[i].id &&
-                (decls[i].kind == K_REWARD || decls[k2].type == decls[i].type)) {
-                rt_log("mods: %s's %s uses number %u, already %s's %s; left out", decls[i].owner, decls[i].name,
-                       decls[i].id, decls[k2].owner, decls[k2].name);
-                decls[i] = decls[--ndecls];
-                i--;
-                break;
-            }
+    return 1;
+}
+
+static void read_manifest(const char *folder) {
+    ModManifest mf;
+    if (mod_manifest_read(folder, &mf) != 1) return;
+    Mod m;
+    memset(&m, 0, sizeof m);
+    snprintf(m.id, sizeof m.id, "%s", mf.id);
+    snprintf(m.version, sizeof m.version, "%s", mf.version);
     if (mod_on(m.id)) {
         rt_log("mods: %s/mod.json: id %s is another enabled mod's; this one's state is left out", folder, m.id);
-        ndecls = before;
+        mod_manifest_free(&mf);
         return;
     }
+    for (int i = 0; i < mf.nfeatures && m.nfeatures < MAX_FEATURES; i++)
+        snprintf(m.features[m.nfeatures++], sizeof m.features[0], "%s", mf.features[i]);
+    int before = ndecls;
+    // the numbers the hand-out gave (runtime/mod_ids.c): every number here is the mod's own
+    for (int i = 0; i < mf.n; i++) {
+        const ModIdDecl *e = &mf.decls[i];
+        uint32_t num;
+        if (e->kind == BDAT_ID_ROW || e->kind == BDAT_ID_SITE) continue;   // the merge's alone
+        if (!mod_ids_number(m.id, e->kind, 0, e->name, &num)) {
+            rt_log("mods: %s's %s \"%s\" left out: it was given no number", m.id, kind_name(e->kind), e->name);
+            continue;
+        }
+        if (e->kind == BDAT_ID_REGION) {
+            if (m.nregions < MAX_REGIONS) m.regions[m.nregions++] = num;
+            continue;
+        }
+        Decl d = {{0}, {0}, (uint8_t)(e->kind == BDAT_ID_REWARD ? K_REWARD : K_FLAG), e->type, num};
+        snprintf(d.owner, sizeof d.owner, "%s", m.id);
+        snprintf(d.name, sizeof d.name, "%s", e->name);
+        // the hand-out never gives one number twice; a number of the other flag storage's kind is still one number
+        int clash = 0;
+        for (int k2 = 0; k2 < ndecls && !clash; k2++)
+            clash = decls[k2].kind == d.kind && decls[k2].id == d.id && (d.kind == K_REWARD || decls[k2].type == d.type);
+        if (clash) {
+            rt_log("mods: %s's %s uses number %u, already another mod's; left out", d.owner, d.name, d.id);
+            continue;
+        }
+        decls = grow(decls, &capdecls, ndecls + 1, sizeof *decls);
+        decls[ndecls++] = d;
+    }
+    mod_manifest_free(&mf);
     rt_log("mods: %s (%s, version %s): %d flag(s) and reward(s) in the mod state, %d region(s), %d feature(s)", m.id,
            folder, m.version[0] ? m.version : "-", ndecls - before, m.nregions, m.nfeatures);
     mods = grow(mods, &capmods, nmods + 1, sizeof *mods);
@@ -987,7 +1095,10 @@ void mod_state_update(void) {
     plat_mutex_lock(&lock);
     init_once();
     uint64_t gd = LD64(GAMEDATA_PTR);
-    if (list) follow_enabled_list(list);
+    if (list) {
+        mod_ids_refresh();   // the hand-out's reads and write outside the lock the game's flag calls wait on
+        follow_enabled_list(list);
+    }
     if (sample && active()) {
         // Twice a second in the world: the leader's position while outside every mod region, the spot to go back to.
         // A sample counts once the next one is outside too: right after a warp or a fast travel the position is the

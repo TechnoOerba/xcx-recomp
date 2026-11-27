@@ -84,6 +84,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MODS_PRIORITY_NOTE] = "Game-file mods that are on, highest priority first. Where two have the same file, the "
                               "higher one's copy is used. Data tables (bdat) that several of them change are merged, "
                               "and where two set the same value the higher one's is kept.",
+    [UI_MODS_IDS] = "Numbers given to content mods (moved ones in yellow, names that got none in orange; kept in mod-ids.txt in the profile folder)",
     [UI_MODS_UP] = "Up",
     [UI_MODS_DOWN] = "Down",
     [UI_MODS_MERGES] = "Data tables as merged when the game started (every line is in the report next to the merged file, in the profile folder's bdat-merge)",
@@ -541,6 +542,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MODS_PRIORITY_OF] = "Приоритет %d из %d в списке приоритета модов ниже.",
     [UI_MODS_DETAILS_HINT] = "Показывает или скрывает строки отчётов об объединении для этого мода.",
     [UI_MODS_DETAILS_NONE] = "В отчётах об объединении больше ничего нет об этом моде.",
+    [UI_MODS_IDS] = "Номера, выданные модам с контентом (перемещённые — жёлтым, имена без номера — оранжевым; хранятся в mod-ids.txt в папке профиля)",
     [UI_MODS_UNDO] = "Вернуть список как при запуске",
     [UI_MODS_UNDO_DESC] = "Возвращает список таким, каким он был при запуске игры. Если файлы мода с тех пор обновились, перезапуск всё равно нужен.",
     [UI_MODS_RESTART] = "Перезапустить сейчас",

@@ -27,17 +27,23 @@
 #include <zstd.h>
 
 #include "fs.h"
+#include "mod_ids.h"
 #include "host.h"
 #include "romfs_mods.h"
 #include "sha256.h"
 #include "platform/platform.h"
 
-#define VERSION "bdat-merge 6"   // part of the cache name: a change to the merge rules makes new files
+#define VERSION "bdat-merge 8"   // part of the cache name: a change to the merge rules makes new files
 #define LOG_NOTES 20             // event lines in the log per merge; the report file has all of them
 #define STATUS_CAP 48
 #define STATUS_EVENTS 8          // left-out and caveat lines per merge in the Mods tab; the report has all
 
-static PlatMutex lock = PLAT_MUTEX_INIT;     // one merge at a time; guards the archive index and target
+static PlatMutex lock = PLAT_MUTEX_INIT;     // one data table merge at a time
+// One whole-file combine at a time (the raster, placement files: bdat_merge_serve_whole), apart from the data tables'
+// lock: a placement file is opened at a map load, which must not wait for a data table merge made ahead below normal
+// priority.
+static PlatMutex whole_lock = PLAT_MUTEX_INIT;
+static PlatMutex arh_lock = PLAT_MUTEX_INIT;  // the archive index's one read (game_stored); read-only after it
 static uint8_t *arh;
 static uint64_t arh_size;
 static int arh_state;                        // 0 not read, 1 read, -1 missing
@@ -106,11 +112,13 @@ static uint8_t *rom_read(const char *mount, const char *name, uint64_t off, uint
 
 // The game's copy as it is stored in sts.ard (packed or not) into a new buffer; NULL with the reason in why.
 static uint8_t *game_stored(const char *mount, const char *key, size_t *n, char *why, size_t cap) {
+    plat_mutex_lock(&arh_lock);
     if (!arh_state) {
         arh = rom_read(mount, "sts.arh", 0, UINT64_MAX, &arh_size);
         arh_state = arh && arh_size >= 16 && !memcmp(arh, "arh2", 4) && 16 + 16ull * rd32(arh + 4) <= arh_size &&
                     rd32(arh + 8) && !(rd32(arh + 8) & (rd32(arh + 8) - 1)) ? 1 : -1;
     }
+    plat_mutex_unlock(&arh_lock);
     if (arh_state < 0) {
         snprintf(why, cap, "the game's archive index sts.arh can't be read");
         return NULL;
@@ -177,7 +185,9 @@ typedef struct {
 } Report;
 static Report reports[2];
 static PlatMutex text_lock = PLAT_MUTEX_INIT;
-static int target;   // the report of the merge in progress; under lock
+// The report of the merge in progress on this thread: 0 this run's, 1 the next start's (a merge made ahead). Per
+// thread, since a whole-file combine may run beside a data table merge; only the serving thread reads it.
+static _Thread_local int target;
 
 // kind 0: a summary line; 1: a change left out; 2: a caveat; 3: a mod that adds nothing; 4: one partly alike. The oldest lines go first when the list is full.
 static void add_status(int kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -559,9 +569,20 @@ static int cached_ok(const char *file) {
     return ok;
 }
 
+// The numbers a mod was given (runtime/mod_ids.c), as they go into both cache keys: another hand-out, another merge.
+static void hash_ids(Sha256 *s, const BdatId *ids, int n) {
+    for (int i = 0; i < n; i++) {
+        uint32_t v[6] = {ids[i].kind, ids[i].has_local, ids[i].local, ids[i].number, ids[i].table, (uint32_t)ids[i].nrefs};
+        sha256_update(s, v, sizeof v);
+        sha256_update(s, ids[i].name, strlen(ids[i].name) + 1);
+        if (ids[i].nrefs) sha256_update(s, ids[i].refs, (size_t)ids[i].nrefs * 2 * sizeof *ids[i].refs);
+    }
+    sha256_update(s, "|", 1);
+}
+
 // The quick key as 32 hex digits in out; 0 when a file can't be seen (then there's no quick check).
 static int quick_key(const char *key, const uint8_t *stored, size_t stored_n, const BdatModFiles *mods, int n,
-                     char out[33]) {
+                     BdatId *const *ids, const int *nids, char out[33]) {
     Sha256 s;
     uint8_t d[32];
     uint64_t g[2] = {xxh64(stored, stored_n), stored_n};
@@ -575,6 +596,7 @@ static int quick_key(const char *key, const uint8_t *stored, size_t stored_n, co
         else if (!quick_file(&s, mods[k].full)) return 0;
         for (int x = 0; x < mods[k].njson; x++)
             if (!quick_file(&s, mods[k].json[x])) return 0;
+        hash_ids(&s, ids[k], nids[k]);
     }
     sha256_final(&s, d);
     hex(d, 16, out);
@@ -673,8 +695,8 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     if (!cfg || !cfg->profile) return 0;
     // lock is held for the whole merge, one at a time. A merge made ahead (bdat_merge_prepare) runs below normal
     // priority, so a game thread opening a data table meanwhile waits on it: a priority inversion, accepted because the
-    // game opens its tables only at start-up (before any merge ahead can run) and the Mods tab's next start is the
-    // only other caller. A finer lock would be needed if that changed.
+    // game opens its tables only at start-up (before any merge ahead can run). Placement files and the raster, opened
+    // at map loads too, take whole_lock instead (bdat_merge_serve_whole).
     plat_mutex_lock(&lock);
     target = next;
     int ok = 0, full = -1;
@@ -684,7 +706,8 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     uint8_t *data[64] = {0};
     uint64_t size[64] = {0};
     BdatJson *json[64] = {0};
-    int njson[64] = {0};
+    int njson[64] = {0}, nids[64] = {0};
+    BdatId *ids[64] = {0};
     char label[64][160];
     for (int k = 0; k < n; k++) label_of(mods[k].id, label[k], sizeof label[k]);
     for (int k = 1; k < n; k++)   // two mods of the same name: the later one also named by its id, so lines stay apart
@@ -707,8 +730,9 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     snprintf(quick, sizeof quick, "%s/%s.quick", pr.dir, flat);
     for (int k = 0; full < 0 && k < n; k++)
         if (mods[k].full) full = k;   // not merged: the caller serves this mod's whole copy
+    for (int k = 0; k < n; k++) ids[k] = mod_ids_of(mods[k].id, &nids[k]);   // the numbers each was given
     if (!(stored = game_stored(mount, key, &stored_n, why, sizeof why))) goto done;
-    if (quick_key(key, stored, stored_n, mods, n, qkey)) {
+    if (quick_key(key, stored, stored_n, mods, n, ids, nids, qkey)) {
         // "<quick key> <merged file name>": the same inputs as then, and its file still there
         uint64_t qn = 0;
         char *q = (char *)plat_file_read(quick, &qn), *nl = q ? strchr(q, '\n') : NULL;
@@ -735,6 +759,25 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
     for (int k = 0; k < n; k++) {
         char line[260];
         snprintf(line, sizeof line, "mod: %s %s", mods[k].id, label[k]);
+        add_line(&notes, line);
+    }
+    for (int k = 0; k < n; k++) {   // the numbers each was given (docs/mod-ids.md), the moved ones by name
+        if (!nids[k]) continue;
+        char line[700];
+        int moved = 0;
+        size_t w = 0;
+        for (int i = 0; i < nids[k]; i++) moved += ids[k][i].has_local && ids[k][i].local != ids[k][i].number;
+        w += (size_t)snprintf(line, sizeof line, "numbers: %s: %d given, %d moved", label[k], nids[k], moved);
+        for (int i = 0, shown = 0; i < nids[k] && w < sizeof line; i++) {
+            const BdatId *e = &ids[k][i];
+            if (!e->has_local || e->local == e->number) continue;
+            if (shown++ == 6) {
+                w += (size_t)snprintf(line + w, sizeof line - w, ", ...");
+                break;
+            }
+            w += (size_t)snprintf(line + w, sizeof line - w, "%s %s \"%.60s\" %u -> %u", shown == 1 ? ":" : ",",
+                                  bdat_id_kind_name(e->kind), e->name, e->local, e->number);
+        }
         add_line(&notes, line);
     }
     // every mod's copies read and hashed (at the same time when there are threads), then taken in priority order as
@@ -775,6 +818,7 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
             sha256_update(&s, json[k][x].stem, strlen(json[k][x].stem) + 1);
             sha256_update(&s, reads->d_json[k][x], 32);
         }
+        hash_ids(&s, ids[k], nids[k]);
     }
     sha256_final(&s, d);
     hex(d, 16, name);
@@ -791,8 +835,9 @@ static int serve(const char *mount, const char *key, const BdatModFiles *mods, i
         goto quick_note;
     }
 
-    BdatInput base = {game, game_n, "game", NULL, 0}, in[64];
-    for (int k = 0; k < n; k++) in[k] = (BdatInput){data[k], (size_t)size[k], label[k], json[k], njson[k]};
+    BdatInput base = {game, game_n, "game", NULL, 0, NULL, 0}, in[64];
+    for (int k = 0; k < n; k++)
+        in[k] = (BdatInput){data[k], (size_t)size[k], label[k], json[k], njson[k], ids[k], nids[k]};
     BdatSummary sum;
     bdat_merge_set_parallel(parallel_for);
     if (!(merged = bdat_merge(&base, in, n, &merged_n, &sum, on_note, &notes, why, sizeof why))) goto done;
@@ -821,6 +866,14 @@ quick_note:
         if (w > 0 && (size_t)w < sizeof line) plat_file_write_atomic(quick, line, (size_t)w);
     }
 done:
+    for (int k = 0; !ok && k < n; k++)
+        for (int i = 0; i < nids[k]; i++)
+            if (ids[k][i].has_local && ids[k][i].local != ids[k][i].number) {
+                // the game reads this mod's own numbers here, while the mod state keys it by the numbers given
+                rt_log("bdat merge: %s: %s's numbers that moved are not in the file served (the mod state uses the "
+                       "numbers given)", key, label[k]);
+                break;
+            }
     if (!ok && full >= 0) {
         rt_log("bdat merge: %s: not merged (%s); %s's whole file is used", key, why[0] ? why : "no room for the path",
                label[full]);
@@ -835,6 +888,7 @@ done:
     plat_mutex_unlock(&lock);
     for (int k = 0; k < n; k++) {
         free(data[k]);
+        free(ids[k]);
         for (int x = 0; x < njson[k]; x++) free((void *)json[k][x].data);
         free(json[k]);
         if (reads) {
@@ -949,4 +1003,149 @@ int bdat_merge_mod_lines(const char *id, int next, char (*out)[320], int *kinds,
         free(text);
     }
     return got;
+}
+
+// ---- whole files several mods ship, combined: the world raster of region mods (bdat_raster_combine) and a zone's
+// placement files (bdat_gimk_combine); docs/mod-ids.md, "The world raster" and "Placement files"
+
+int bdat_merge_serve_whole(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out,
+                           size_t cap) {
+    if (n < 1 || n > 64 || !mount || !key) return 0;
+    const RtConfig *cfg = rt_config();
+    if (!cfg || !cfg->profile) return 0;
+    size_t kl = strlen(key);
+    int gimk = kl > 5 && !strcmp(key + kl - 5, ".gimk");
+    const char *what = gimk ? "placement file" : "raster";
+    plat_mutex_lock(&whole_lock);
+    target = 0;   // this run's lines (a merge made ahead may have set it)
+    int ok = 0;
+    char why[400] = "", dir[2100], file[2400], report[2500], name[300], flat[256], label[64][160], quick[2400];
+    char qkey[33] = "";
+    uint8_t *data[64] = {0}, *game = NULL, *combined = NULL, *stored = NULL;
+    uint64_t size[64] = {0};
+    BdatId *ids[64] = {0};
+    int nids[64] = {0};
+    size_t game_n = 0, stored_n = 0, combined_n = 0;
+    Notes notes = {.key = key};
+    snprintf(flat, sizeof flat, "%s", key);
+    for (char *c = flat; *c; c++)
+        if (*c == '/' || *c == '\\') *c = '_';
+    snprintf(dir, sizeof dir, "%s/bdat-merge", cfg->profile);
+    snprintf(quick, sizeof quick, "%s/%s.quick", dir, flat);
+    for (int k = 0; k < n; k++) {
+        label_of(mods[k].id, label[k], sizeof label[k]);
+        ids[k] = mod_ids_of(mods[k].id, &nids[k]);
+    }
+    // the same inputs as at an earlier start (the quick key, as for the data tables): its file, unread mods
+    if (!(stored = game_stored(mount, key, &stored_n, why, sizeof why))) goto done;
+    if (quick_key(key, stored, stored_n, mods, n, ids, nids, qkey)) {
+        uint64_t qn = 0;
+        char *q = (char *)plat_file_read(quick, &qn), *nl = q ? strchr(q, '\n') : NULL;
+        if (nl) *nl = 0;
+        if (q && qn > 34 && !memcmp(q, qkey, 32) && q[32] == ' ' && !strchr(q + 33, '/') && !strchr(q + 33, '\\') &&
+            snprintf(file, sizeof file, "%s/%s", dir, q + 33) < (int)cap && cached_ok(file)) {
+            snprintf(out, cap, "%s", file);
+            ok = 1;
+            reuse(key, file, "inputs unchanged", mods, label, n);
+            prune(dir, flat, q + 33);
+        }
+        free(q);
+        if (ok) goto done;
+    }
+    for (int k = 0; k < n; k++)
+        if (mods[k].full && !(data[k] = plat_file_read(mods[k].full, &size[k]))) {
+            snprintf(why, sizeof why, "%s's copy can't be read", label[k]);
+            goto done;
+        }
+    game = game_unpack(stored, stored_n, key, &game_n, why, sizeof why);   // takes stored
+    stored = NULL;
+    if (!game) goto done;
+    // the file name: SHA-256 of the rules, the game's copy and per mod its id, its copy and its numbers
+    Sha256 s;
+    uint8_t d[32];
+    sha256_init(&s);
+    if (gimk) sha256_update(&s, VERSION " gimk", sizeof VERSION " gimk");
+    else sha256_update(&s, VERSION " raster", sizeof VERSION " raster");
+    sha256(game, game_n, d);
+    sha256_update(&s, d, 32);
+    for (int k = 0; k < n; k++) {
+        sha256_update(&s, mods[k].id, strlen(mods[k].id) + 1);
+        sha256(data[k] ? data[k] : (const uint8_t *)"", data[k] ? (size_t)size[k] : 0, d);
+        sha256_update(&s, d, 32);
+        hash_ids(&s, ids[k], nids[k]);
+    }
+    sha256_final(&s, d);
+    hex(d, 16, name);
+    name[32] = '-';
+    snprintf(name + 33, sizeof name - 33, "%s", flat);
+    snprintf(file, sizeof file, "%s/%s", dir, name);
+    snprintf(report, sizeof report, "%s.txt", file);
+    if (strlen(file) >= cap) {
+        snprintf(why, sizeof why, "no room for the path");
+        goto done;
+    }
+    if (cached_ok(file)) {
+        snprintf(out, cap, "%s", file);
+        ok = 1;
+        reuse(key, file, "found by its inputs' contents", mods, label, n);
+        prune(dir, flat, name);
+        goto quick_note;
+    }
+    // a header as a merged table's report has (its mods, then a "mod: <id> <label>" line each), for the Mods tab
+    {
+        char head[2400];
+        size_t hn = (size_t)snprintf(head, sizeof head, "%s merged from, highest priority first:", key);
+        for (int k = 0; k < n && hn < sizeof head; k++)
+            hn += (size_t)snprintf(head + hn, sizeof head - hn, "%s %s", k ? ";" : "", label[k]);
+        add_line(&notes, head);
+        for (int k = 0; k < n; k++) {
+            char line[260];
+            snprintf(line, sizeof line, "mod: %s %s", mods[k].id, label[k]);
+            add_line(&notes, line);
+        }
+    }
+    BdatInput base = {game, game_n, "game", NULL, 0, NULL, 0}, in[64];
+    for (int k = 0; k < n; k++) in[k] = (BdatInput){data[k], (size_t)size[k], label[k], NULL, 0, ids[k], nids[k]};
+    if (!(combined = gimk ? bdat_gimk_combine(&base, in, n, &combined_n, on_note, &notes, why, sizeof why)
+                          : bdat_raster_combine(&base, in, n, &combined_n, on_note, &notes, why, sizeof why)))
+        goto done;
+    plat_file_mkdir_p(dir);
+    if (!plat_file_write_atomic(file, combined, combined_n) || !write_sum(file, combined, combined_n)) {
+        snprintf(why, sizeof why, "%s can't be written", file);
+        goto done;
+    }
+    // its lines, then a summary as the last line (as a merged table's report: reuse() reads it back)
+    char summary[300];
+    int sn = snprintf(summary, sizeof summary, "%s: combined from the copies of %d mods", key, n);
+    if (sn > 0 && (size_t)sn < sizeof summary) add_line(&notes, summary);
+    plat_file_write_atomic(report, notes.text ? notes.text : "", notes.n);
+    note_report(report);
+    prune(dir, flat, name);
+    snprintf(out, cap, "%s", file);
+    ok = 1;
+    rt_log("bdat merge: %s: combined from %d mods' copies (report %s)", key, n, report);
+    add_status(0, "%s: combined from %d mods", key, n);
+    status_events(key, notes.text ? notes.text : "");
+    tag_events(key, notes.text ? notes.text : "", mods, label, n);
+quick_note:
+    if (qkey[0]) {   // the next start with these inputs finds this file without reading them
+        char line[400];
+        int w = snprintf(line, sizeof line, "%s %s\n", qkey, name);
+        if (w > 0 && (size_t)w < sizeof line) plat_file_write_atomic(quick, line, (size_t)w);
+    }
+done:
+    if (!ok) {
+        rt_log("bdat merge: %s: %ss not combined (%s); the top mod's whole file is used", key, what, why);
+        add_status(1, "%s: not combined (%s); the top mod's whole file is used", key, why);
+    }
+    plat_mutex_unlock(&whole_lock);
+    for (int k = 0; k < n; k++) {
+        free(data[k]);
+        free(ids[k]);
+    }
+    free(stored);
+    free(game);
+    free(combined);
+    free(notes.text);
+    return ok;
 }

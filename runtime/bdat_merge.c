@@ -540,6 +540,8 @@ static int grow(Entry **v, uint32_t *cap, uint32_t need) {
     return 1;
 }
 
+static int found_by_zone(uint32_t name);
+
 // Merges into out; 0 when out of memory.
 static int merge_table(Job *j, int *P, int np, Buf *out, char *why, size_t why_cap) {
     const Tab *t = j->b;
@@ -770,7 +772,7 @@ static int merge_table(Job *j, int *P, int np, Buf *out, char *why, size_t why_c
                 }
             }
         }
-        if (moved)
+        if (moved && !found_by_zone(t->name))   // tables the game searches by their zone column: not by number
             event(ev, CAVEAT, k, "table %08X: %u of its rows have other row numbers than in its copy (first: row %u "
                   "is its row %u); what points at them by number may point elsewhere", t->name, moved, t->base + at_i,
                   t->base + at_p);
@@ -846,6 +848,8 @@ static uint32_t hashname(const char *s, size_t n) {
     }
     return mm3((const uint8_t *)s, n);
 }
+
+uint32_t bdat_merge_name_hash(const char *s, size_t n) { return hashname(s, n); }
 
 enum { J_NULL, J_FALSE, J_TRUE, J_NUM, J_STR, J_ARR, J_OBJ };
 
@@ -1140,8 +1144,14 @@ static const JNode *jget(const JNode *o, const char *key, size_t klen) {
     return NULL;
 }
 
-// A JSON table as BDAT table bytes in out (the writer's layout), or 0 with the reason in why.
-static int json_table(const uint8_t *data, size_t size, const char *stem, Buf *out, char *why, size_t cap) {
+static int resolve(const BdatInput *in, const char *s, size_t n, uint32_t *out, char *why, size_t cap);
+static int fits(uint8_t ty, int64_t v);
+
+// A JSON table as BDAT table bytes in out (the writer's layout), or 0 with the reason in why. in: the mod, whose
+// numbers a '@kind:name' string in an integer cell stands for (resolve). A "table" string names the table instead of
+// the file name (*named; '@kind:name' in it is resolved too).
+static int json_table(const uint8_t *data, size_t size, const char *stem, const BdatInput *in, Buf *out, int *named,
+                      char *why, size_t cap) {
     JNode *root = NULL;
     Arena arena = {0};   // the parsed JSON, given back at the end
     Buf raw = {0};
@@ -1226,6 +1236,15 @@ static int json_table(const uint8_t *data, size_t size, const char *stem, Buf *o
                 memcpy(d, &f, 4);
             } else if (ty == 9 && v->type == J_STR) {
                 wr32(d, hashname(v->s, v->len));
+            } else if (v->type == J_STR && v->len && v->s[0] == '@') {
+                uint32_t x;
+                char r[200];
+                if (!resolve(in, v->s, v->len, &x, r, sizeof r)) {
+                    snprintf(why, cap, "row %lld column %u: %s", (long long)id->i, c, r);
+                    goto fail_st;
+                }
+                good = fits(ty, x);
+                memcpy(d, &x, TSIZE[ty]);
             } else if (v->type != J_NUM || v->isint != 1) {
                 good = 0;
             } else {
@@ -1243,6 +1262,31 @@ static int json_table(const uint8_t *data, size_t size, const char *stem, Buf *o
             }
             d += TSIZE[ty];
         }
+    }
+    const JNode *tn = jget(root, "table", 5);
+    *named = tn != NULL;
+    if (tn) {
+        if (tn->type != J_STR || !tn->len || memchr(tn->s, 0, tn->len)) {
+            snprintf(why, cap, "its \"table\" is not a name");
+            goto fail_st;
+        }
+        const char *at = memchr(tn->s, '@', tn->len);
+        uint32_t hash;
+        if (at) {
+            uint32_t x;
+            char name[400];
+            size_t pre = (size_t)(at - tn->s);
+            if (!resolve(in, at, tn->len - pre, &x, why, cap)) goto fail_st;
+            if (pre > 300) {
+                snprintf(why, cap, "its \"table\" is not a name");
+                goto fail_st;
+            }
+            int w = snprintf(name, sizeof name, "%.*s%u", (int)pre, tn->s, x);
+            hash = hashname(name, (size_t)w);
+        } else {
+            hash = hashname(tn->s, tn->len);
+        }
+        wr32(st.p + 1, hash);
     }
     uint32_t co = 48, ro = co + 3 * cc;
     uint64_t so = (uint64_t)ro + (uint64_t)rl * rc;
@@ -1295,11 +1339,44 @@ static int by_stem(const void *a, const void *b) {
     return strcmp(((const BdatJson *)a)->stem, ((const BdatJson *)b)->stem);
 }
 
+// A table a mod adds (docs/mod-ids.md, "New tables"): its bytes, its own (own.p) or in the mod's file, read as t.
+typedef struct { Buf own; Tab t; } Added;
+typedef struct { Added *v; int n, cap; } Adds;
+
+static void adds_free(Adds *a) {
+    for (int i = 0; i < a->n; i++) {
+        free(a->v[i].own.p);
+        free(a->v[i].t.off);
+    }
+    free(a->v);
+    *a = (Adds){0};
+}
+
+static int adds_find(const Adds *a, uint32_t name) {
+    for (int i = 0; i < a->n; i++)
+        if (a->v[i].t.name == name) return i;
+    return -1;
+}
+
+// Takes x (its Buf, if any, is a's now); 0 when out of memory.
+static int adds_put(Adds *a, Added x) {
+    if (a->n == a->cap) {
+        int cap = a->cap ? a->cap * 2 : 8;
+        Added *v = realloc(a->v, (size_t)cap * sizeof *v);
+        if (!v) return 0;
+        a->v = v;
+        a->cap = cap;
+    }
+    a->v[a->n++] = x;
+    return 1;
+}
+
 // file (the mod's full copy, or the game's) read into *out with the mod's JSON tables in place of those tables. No new
 // file is written: *tabs_out (one Buf per table, empty but for the JSON ones) holds those tables' bytes for as long as
-// *out is used, and file_bytes makes the file when one is needed whole.
+// *out is used, and file_with makes the file when one is needed whole. A JSON table with a "table" name of its own
+// that the file doesn't have goes to *added (a new table).
 static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int k, Events *ev, File *out,
-                      Buf **tabs_out, char *why, size_t cap) {
+                      Buf **tabs_out, Adds *added, char *why, size_t cap) {
     File f;
     char r[300];
     if (!read_file(file, size, &f, r, sizeof r)) {
@@ -1314,15 +1391,31 @@ static int apply_json(const uint8_t *file, size_t size, const BdatInput *in, int
     qsort(js, (size_t)in->njson, sizeof *js, by_stem);
     for (int x = 0; x < in->njson; x++) {
         Buf t = {0};
-        if (!json_table(js[x].data, js[x].size, js[x].stem, &t, r, sizeof r)) {
+        int named = 0;
+        if (!json_table(js[x].data, js[x].size, js[x].stem, in, &t, &named, r, sizeof r)) {
             event(ev, LEFT_OUT, k, "its table %s.json is not used (%s)", js[x].stem, r);
             free(t.p);
             continue;
         }
         uint32_t name = rd32(t.p + rd32(t.p + 40) + 1), j = 0;
+        while (named && j < f.count && f.t[j].name != name) j++;
+        if (named && j == f.count) {
+            Added a = {t, {0}};
+            if (adds_find(added, name) >= 0) {
+                event(ev, LEFT_OUT, k, "its table %s.json is not used (another of its tables has that name)",
+                      js[x].stem);
+                free(t.p);
+            } else if (!read_table(a.own.p, (uint32_t)a.own.n, &a.t) || !adds_put(added, a)) {
+                free(a.t.off);
+                free(t.p);
+                goto done;
+            }
+            continue;
+        }
+        j = 0;
         // bdat-toolset names a table known only by its hash with the 8 hex digits, no brackets ("1A2B3C4D.json"):
         // such a name is the hash when the game's file has that table (else, as any name, its murmur3)
-        int hex8 = strlen(js[x].stem) == 8;
+        int hex8 = !named && strlen(js[x].stem) == 8;
         uint32_t h = 0;
         for (int i = 0; hex8 && i < 8; i++) {
             int v = hexval((unsigned char)js[x].stem[i]);
@@ -1372,26 +1465,6 @@ done:
     return ok;
 }
 
-// The file of f's tables as they are (a mod's copy with its JSON tables put in, when it is used whole).
-static uint8_t *file_bytes(const File *f, size_t *out_n) {
-    Buf out = {0};
-    size_t head = 16 + 4 * (size_t)f->count;
-    if (!put(&out, NULL, head)) return NULL;
-    memcpy(out.p, "BDAT", 4);
-    wr32(out.p + 4, 0x01001004);
-    wr32(out.p + 8, f->count);
-    for (uint32_t j = 0; j < f->count; j++) {
-        wr32(out.p + 16 + 4 * j, (uint32_t)out.n);
-        if (!put(&out, f->t[j].p, f->t[j].len)) {
-            free(out.p);
-            return NULL;
-        }
-    }
-    wr32(out.p + 12, (uint32_t)out.n);
-    *out_n = out.n;
-    return out.p;
-}
-
 // The hash values a mod's changes put in cells other than keys: what its added and edited rows refer to.
 static int refs_of(const File *bf, const File *mf, const Change *ch, Set *out) {
     for (uint32_t j = 0; j < bf->count; j++) {
@@ -1416,6 +1489,332 @@ static uint8_t *copy_of(const BdatInput *in, size_t *out_n) {
         *out_n = in->size;
     }
     return p;
+}
+
+// ---- numbers handed out (docs/mod-ids.md)
+//
+// A content mod adds things the game finds by number (a region id, a flag id, a survey reward's claimed index, a row
+// id). runtime/mod_ids.c hands every number a mod.json names out once, so two mods never share one; here each mod's
+// copy gets its numbers before anything is compared: '@kind:name' in its JSON tables, its own (local) numbers in the
+// cells known to hold one of that kind (the census below), and the rows whose number is their row id put at that id.
+
+#define FIELD_NAMES 0x97991FA4u   // FLD_FieldNameList: region id = row id
+#define KIND_NAME(k) bdat_id_kind_name(k)
+// The census of where a number of each kind lives (docs/mod-ids.md "Moving a number" lists the same; change both, and
+// the merge's reference). Columns named zone or ZoneID hold a region id in any table; these pairs hold one under
+// other names (the columns' names are not known: hashes as the game's files have them).
+static const uint32_t REGION_USES[][2] = {
+    {0xFC830E48u, 0x8C44DF98u},   // FLD_WeatherRefer
+    {0x7A47835Eu, 0x8C44DF98u},   // MNU_ZoneNameConvert
+    {0x12E0693Fu, 0x554A58C8u},   // MNU_MapZoneInfo
+    {0x06FBB0CFu, 0x554A58C8u},   // the map's location rows (one per landmark, camp and FrontierNav site; name not known)
+};
+static const char *const REGION_TABLES[] = {"SEG_TerminalZone", "MNU_SegMapInfoZone", "SEG_ProbeListZone"};
+#define REWARD_TABLE 0xFA12D19Bu   // SEG_ExploreReward
+#define REWARD_COL 0x91C93FADu     // flag_index
+#define VEIN 0xF63C8049u        // FnetVeinList: a FrontierNav site's number is its row id (base 0)
+#define LOCATIONS 0xD12FB959u   // the location table: a location's id is its row id
+#define LOC_MENU 0x06FBB0CFu    // the map's location rows: row for row with the location table
+#define PROBES 0x8B4096AEu      // SEG_ProbeList: a probe hexagon's segment id is its row id
+// Table families (in place of one table's name below): the hexagon tables (SEG_Terminal<zone>), the Segments tab's
+// markers (MNU_SegMapInfo<zone>) and the probe lists (SEG_ProbeList, SEG_ProbeListZone<id>): the bare name, the
+// game's zones, and Zone0..Zone255 (a mod region's own table).
+#define FAM_HEX 0xFFFFFF01u
+#define FAM_SEGMAP 0xFFFFFF02u
+#define FAM_PROBE 0xFFFFFF03u
+static const char *const FAM_PREFIX[3] = {"SEG_Terminal", "MNU_SegMapInfo", "SEG_ProbeList"};
+static const char *const GAME_ZONES[] = {"1001", "1101", "1201", "1301", "1401", "1501", "1601", "1701", "2001", "2201",
+                                         "5000"};
+#define FAM_SIZE (1 + 11 + 256)
+// (table or a family; column) pairs that hold a site number
+static const uint32_t SITE_USES[][2] = {
+    {VEIN, 0xBF16FE7Du}, {VEIN, 0x3791D641u}, {VEIN, 0xF14C0AACu}, {VEIN, 0x38E329FDu}, {VEIN, 0xD270368Au},
+    {LOCATIONS, 0x655B3679u},   // a location's site number (F_spot)
+    {FAM_PROBE, 0x073607AAu},   // a probe list row's site (SEG_ProbeList and the SEG_ProbeListZone<id> tables)
+};
+// A row of table [0] is pointed at by column [2] of table [1] (a table, or a family), in the rows whose column [3]
+// (when not 0) holds [4].
+static const uint32_t ROW_REFS[][5] = {
+    {0x7A058ADAu, FIELD_NAMES, 0xBFCD306Du, 0, 0},   // FLD_NameCondition <- FLD_FieldNameList.nameCondition
+    {LOCATIONS, LOCATIONS, 0x9759C6FAu, 0, 0},       // a location's own id
+    {LOCATIONS, VEIN, 0xDBAF43F0u, 0, 0},            // a site's location
+    {LOCATIONS, 0x097D1D32u, 0x70F37937u, 0, 0},     // map marks
+    {LOCATIONS, FAM_HEX, 0x018D2A75u, 0, 0},         // a hexagon's field location
+    {LOCATIONS, FAM_SEGMAP, 0x690F4E13u, 0, 0},      // Segments-tab markers
+    {PROBES, FAM_HEX, 0x70BAC821u, 0x5BF33ED8u, 1},  // a probe hexagon's segment id (hexagon type 1)
+};
+// A row placed in table [0] takes the same row of table [1] with it.
+static const uint32_t PARALLEL[][2] = {{LOCATIONS, LOC_MENU}};
+// The row a gap row is a copy of (a number of a mod that is off), by row index; else the table's last row: for
+// FLD_FieldNameList its row 20, a placeholder region no part of the world raster has; for the site table the game's
+// unused site 47 (with no location and the gap's own number, below); for the location table and its menu rows the
+// game's unused camp slot CAMP_1501_10 (no box, no name, no map row), so a gap is never a second copy of a real place;
+// for the probe lists their unused row 6 (no site).
+static const uint32_t FILLER[][2] = {{FIELD_NAMES, 19}, {VEIN, 47}, {LOCATIONS, 399}, {LOC_MENU, 399}, {PROBES, 6}};
+#define VEIN_LOCATION 0xDBAF43F0u
+#define VEIN_SITE 0xBF16FE7Du
+// Columns of a gap row set to the gap's own row id ([2] = 1: a site's number, a location's own id) or to 0 (a site's
+// location).
+static const uint32_t GAP_SET[][3] = {{VEIN, VEIN_LOCATION, 0}, {VEIN, VEIN_SITE, 1}, {LOCATIONS, 0x9759C6FAu, 1}};
+// Tables whose spare game rows content mods take over (they can't be handed out): the location table (D12FB959) and
+// the map's location rows (06FBB0CF; names not known), FnetVeinList (the FrontierNav sites) and SEG_ProbeList.
+static const uint32_t SLOT_TABLES[] = {LOCATIONS, LOC_MENU, VEIN, PROBES};
+// Tables the game searches by a column (a region, or a location id for MNU_MapInfo), not by row number: a row they get
+// at another number than in a mod's copy is no caveat.
+static const uint32_t FOUND_BY_ZONE[] = {0xFC830E48u, 0xE6194796u, 0x12E0693Fu, 0x7A47835Eu, 0xFA12D19Bu, 0x097D1D32u};
+#define NUM_OF(a) (sizeof(a) / sizeof((a)[0]))
+
+static int in_list(const uint32_t *v, size_t n, uint32_t x) {
+    for (size_t i = 0; i < n; i++)
+        if (v[i] == x) return 1;
+    return 0;
+}
+
+static int found_by_zone(uint32_t name) { return in_list(FOUND_BY_ZONE, NUM_OF(FOUND_BY_ZONE), name); }
+
+static int int_type(uint8_t ty) { return ty && ty <= 13 && !IS_STR(ty) && ty != 8 && ty != 9; }
+static int flag_type(uint8_t ty) { return ty == 2 || ty == 3 || ty == 13; }
+
+static int fits(uint8_t ty, int64_t v) {
+    if (ty == 4) return v >= -128 && v <= 127;
+    if (ty == 5) return v >= -32768 && v <= 32767;
+    if (ty == 6) return v >= INT32_MIN && v <= INT32_MAX;
+    return v >= 0 && v <= (TSIZE[ty] == 1 ? 255 : TSIZE[ty] == 2 ? 65535 : 0xffffffffll);
+}
+
+static uint32_t col_of(const Tab *t, uint32_t h) {
+    for (uint32_t c = 0; c < t->cc; c++)
+        if (cname(t, c) == h) return c;
+    return NONE;
+}
+
+// The families' name hashes, made once (the merge runs on several threads: one makes them, 804 hashes in some
+// microseconds, while the others spin).
+static uint32_t fam_names[3][FAM_SIZE];
+static int fam_state;   // 0 not made, 1 being made, 2 made
+
+static int in_family(uint32_t fam, uint32_t name) {
+    if (fam < FAM_HEX || fam > FAM_PROBE) return 0;
+    int st = __atomic_load_n(&fam_state, __ATOMIC_ACQUIRE);
+    if (st != 2) {
+        int zero = 0;
+        if (__atomic_compare_exchange_n(&fam_state, &zero, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            for (int f = 0; f < 3; f++) {
+                char b[64];
+                int k = 0, n = snprintf(b, sizeof b, "%s", FAM_PREFIX[f]);
+                fam_names[f][k++] = mm3((const uint8_t *)b, (size_t)n);
+                for (size_t z = 0; z < NUM_OF(GAME_ZONES); z++) {
+                    n = snprintf(b, sizeof b, "%s%s", FAM_PREFIX[f], GAME_ZONES[z]);
+                    fam_names[f][k++] = mm3((const uint8_t *)b, (size_t)n);
+                }
+                for (int z = 0; z < 256; z++) {
+                    n = snprintf(b, sizeof b, "%sZone%d", FAM_PREFIX[f], z);
+                    fam_names[f][k++] = mm3((const uint8_t *)b, (size_t)n);
+                }
+            }
+            __atomic_store_n(&fam_state, 2, __ATOMIC_RELEASE);
+        } else {
+            while (__atomic_load_n(&fam_state, __ATOMIC_ACQUIRE) != 2) {}
+        }
+    }
+    const uint32_t *v = fam_names[fam - FAM_HEX];
+    for (int i = 0; i < FAM_SIZE; i++)
+        if (v[i] == name) return 1;
+    return 0;
+}
+
+// Table name (a table's own) matches x (a table's name, or a family).
+static int table_is(uint32_t x, uint32_t name) { return x == name || in_family(x, name); }
+
+static int site_col(uint32_t table, uint32_t col) {
+    for (size_t i = 0; i < NUM_OF(SITE_USES); i++)
+        if (SITE_USES[i][1] == col && table_is(SITE_USES[i][0], table)) return 1;
+    return 0;
+}
+
+static int64_t ival(const Tab *t, uint32_t r, uint32_t c) {
+    const uint8_t *p = cell(t, r, c);
+    switch (ctype(t, c)) {
+    case 4: return (int8_t)p[0];
+    case 5: return (int16_t)rd16(p);
+    case 6: return (int32_t)rd32(p);
+    case 3: return rd32(p);
+    default: return TSIZE[ctype(t, c)] == 1 ? p[0] : rd16(p);
+    }
+}
+
+static void set_ival(uint8_t *p, uint8_t ty, int64_t v) {
+    uint32_t u = (uint32_t)v;
+    memcpy(p, &u, TSIZE[ty]);
+}
+
+// '@kind:name' (s, n bytes) -> the number in's entry of that kind and name was given; 0 with the reason in why.
+static int resolve(const BdatInput *in, const char *s, size_t n, uint32_t *out, char *why, size_t cap) {
+    const char *colon = n > 1 ? memchr(s + 1, ':', n - 1) : NULL;
+    if (colon) {
+        size_t kn = (size_t)(colon - s - 1), nn = n - (size_t)(colon - s) - 1;
+        for (int i = 0; in && i < in->nids; i++) {
+            const BdatId *e = &in->ids[i];
+            const char *k = KIND_NAME(e->kind);
+            if (strlen(k) == kn && !memcmp(k, s + 1, kn) && strlen(e->name) == nn && !memcmp(e->name, colon + 1, nn)) {
+                *out = e->number;
+                return 1;
+            }
+        }
+    }
+    snprintf(why, cap, "it names %.*s, which its mod.json does not declare", (int)(n > 120 ? 120 : n), s);
+    return 0;
+}
+
+// A mod's local numbers that it was given others for: region, flag, reward (local -> number, the first entry of a
+// local wins), and rows: (table, column) holding a row id -> (local -> number).
+typedef struct { uint32_t table, col, local, number, cond_col, cond_val; uint8_t kind; } Move;
+typedef struct { Move *v; int n, cap; } Moves;
+
+static int move_add(Moves *m, uint8_t kind, uint32_t table, uint32_t col, uint32_t local, uint32_t number,
+                    uint32_t cond_col, uint32_t cond_val) {
+    for (int i = 0; i < m->n; i++)
+        if (m->v[i].kind == kind && m->v[i].table == table && m->v[i].col == col && m->v[i].local == local &&
+            m->v[i].cond_col == cond_col && m->v[i].cond_val == cond_val)
+            return 1;
+    if (m->n == m->cap) {
+        int cap = m->cap ? m->cap * 2 : 32;
+        Move *v = realloc(m->v, (size_t)cap * sizeof *v);
+        if (!v) return 0;
+        m->v = v;
+        m->cap = cap;
+    }
+    m->v[m->n++] = (Move){table, col, local, number, cond_col, cond_val, kind};
+    return 1;
+}
+
+// bf: the game's file, whose tables say where a row's numbers start: a row whose number or own id is one of the game's
+// rows moves nothing (place_rows leaves it out with a line); a row of another file's table can't be checked here.
+static int moves_of(const BdatInput *in, const File *bf, Moves *m) {
+    for (int i = 0; i < in->nids; i++) {
+        const BdatId *e = &in->ids[i];
+        if (!e->has_local || e->local == e->number) continue;
+        if (e->kind != BDAT_ID_ROW) {
+            if (!move_add(m, e->kind, 0, 0, e->local, e->number, 0, 0)) return 0;
+            continue;
+        }
+        int game_row = 0;
+        for (uint32_t j = 0; j < bf->count; j++)
+            if (bf->t[j].name == e->table)
+                game_row = e->number < bf->t[j].base + bf->t[j].rc || e->local < bf->t[j].base + bf->t[j].rc;
+        if (game_row) continue;
+        for (size_t r = 0; r < NUM_OF(ROW_REFS); r++)
+            if (ROW_REFS[r][0] == e->table && !move_add(m, BDAT_ID_ROW, ROW_REFS[r][1], ROW_REFS[r][2], e->local,
+                                                        e->number, ROW_REFS[r][3], ROW_REFS[r][4]))
+                return 0;
+        for (int r = 0; r < e->nrefs; r++)
+            if (!move_add(m, BDAT_ID_ROW, e->refs[2 * r], e->refs[2 * r + 1], e->local, e->number, 0, 0)) return 0;
+    }
+    return 1;
+}
+
+// The number local v (in row r of table t, column col) gets, by a move of that kind; a row move only in its column
+// (of its table, or any table) and in rows that hold its condition.
+static int moved(const Moves *m, uint8_t kind, const Tab *t, uint32_t r, uint32_t col, int64_t v, uint32_t *out) {
+    if (v < 0 || v > 0xffffffffll) return 0;
+    for (int i = 0; i < m->n; i++) {
+        const Move *x = &m->v[i];
+        if (x->kind != kind || x->local != (uint32_t)v) continue;
+        if (kind == BDAT_ID_ROW) {
+            if (x->col != col || !table_is(x->table, t->name)) continue;
+            if (x->cond_col) {
+                uint32_t ci = col_of(t, x->cond_col);
+                if (ci == NONE || ival(t, r, ci) != (int64_t)x->cond_val) continue;
+            }
+        }
+        *out = x->number;
+        return 1;
+    }
+    return 0;
+}
+
+#define H_ZONE 0x89194B91u      // murmur3 of "zone"
+#define H_ZONE_ID 0x4F89BA86u   // of "ZoneID"
+
+static int region_col(uint32_t table, uint32_t col) {
+    if (col == H_ZONE || col == H_ZONE_ID) return 1;
+    for (size_t i = 0; i < NUM_OF(REGION_USES); i++)
+        if (REGION_USES[i][0] == table && REGION_USES[i][1] == col) return 1;
+    return 0;
+}
+
+// The number a cell of a mod's (local number v, row r, column c of t) gets instead, if any.
+static int new_value(const Moves *m, const Tab *t, uint32_t r, uint32_t c, int64_t v, uint32_t *out) {
+    uint32_t h = cname(t, c);
+    if (region_col(t->name, h) && moved(m, BDAT_ID_REGION, t, r, h, v, out)) return 1;
+    if (site_col(t->name, h) && moved(m, BDAT_ID_SITE, t, r, h, v, out)) return 1;
+    if (moved(m, BDAT_ID_ROW, t, r, h, v, out)) return 1;
+    if (t->name == REWARD_TABLE && h == REWARD_COL && moved(m, BDAT_ID_REWARD, t, r, h, v, out)) return 1;
+    return flag_type(ctype(t, c)) && moved(m, BDAT_ID_FLAG, t, r, h, v, out);
+}
+
+// The bytes a table is read from, its own (a copy the first time), so its cells can be set in place.
+static int own_bytes(Buf *b, Tab *t) {
+    if (b->p && b->p == t->p) return 1;
+    Buf n = {0};
+    Tab nt;
+    if (!put(&n, t->p, t->len)) return 0;
+    if (!read_table(n.p, (uint32_t)n.n, &nt)) {
+        free(n.p);
+        return 0;
+    }
+    free(t->off);
+    free(b->p);
+    *b = n;
+    *t = nt;
+    return 1;
+}
+
+// Table t (own bytes in b) with its local numbers moved where g (the game's, or NULL for a new table) doesn't have
+// the same value at the same place. *unfit counts numbers that don't fit their column; 0 when out of memory.
+static int move_cells(const Moves *m, Buf *b, Tab *t, const Tab *g, int *unfit) {
+    int same = g && same_cols(g, t);
+    uint8_t cand[4096];   // columns whose cells may hold a number to move (read_table: at most 4096)
+    int any = 0;
+    for (uint32_t c = 0; c < t->cc; c++) {
+        uint32_t h = cname(t, c);
+        uint8_t ty = ctype(t, c);
+        cand[c] = int_type(ty) && (region_col(t->name, h) || flag_type(ty) || site_col(t->name, h) ||
+                                   (t->name == REWARD_TABLE && h == REWARD_COL));
+        for (int i = 0; !cand[c] && int_type(ty) && i < m->n; i++)
+            cand[c] = m->v[i].kind == BDAT_ID_ROW && m->v[i].col == h && table_is(m->v[i].table, t->name);
+        any |= cand[c];
+    }
+    if (!any) return 1;
+    for (uint32_t r = 0; r < t->rc; r++) {
+        if (same && r < g->rc && !memcmp(g->p + g->ro + (size_t)r * g->rl, t->p + t->ro + (size_t)r * t->rl, t->rl))
+            continue;   // the game's row byte for byte: no number of the mod's in it
+        for (uint32_t c = 0; c < t->cc; c++) {
+            uint8_t ty = ctype(t, c);
+            if (!cand[c]) continue;
+            if (same && r < g->rc && !memcmp(cell(g, r, c), cell(t, r, c), TSIZE[ty])) continue;
+            uint32_t nv;
+            if (!new_value(m, t, r, c, ival(t, r, c), &nv)) continue;
+            if (!fits(ty, nv)) {
+                (*unfit)++;
+                continue;
+            }
+            if (!own_bytes(b, t)) return 0;
+            set_ival(b->p + t->ro + (size_t)r * t->rl + t->off[c], ty, nv);
+        }
+    }
+    return 1;
+}
+
+static uint32_t name_with(const char *tmpl, uint32_t id) {
+    char s[64];
+    int n = snprintf(s, sizeof s, "%s%u", tmpl, id);
+    return mm3((const uint8_t *)s, (size_t)n);
+}
+
+static int by_added_name(const void *a, const void *b) {
+    uint32_t x = (*(Added *const *)a)->t.name, y = (*(Added *const *)b)->t.name;
+    return (x > y) - (x < y);
 }
 
 // ---- each mod's own work, possibly at the same time (bdat_merge_set_parallel)
@@ -1451,18 +1850,164 @@ static void pass_on(Events *ev, const Kept *k) {
     ev->s->partly_alike += k->s.partly_alike;
 }
 
-// A mod's file as it is merged: its JSON tables put in, then read. state: what came of it.
+// A mod's file as it is merged: its JSON tables put in, then read; its new tables apart; its numbers put in.
+// state: what came of it.
 enum { PREP_SAME_TABLES, PREP_UNREADABLE, PREP_OTHER_TABLES };
 typedef struct {
     const BdatInput *base, *mods;
     const File *bf;
     File *mf;
-    Buf *tabs[MAX_MODS];     // apply_json: a JSON mod's tables' bytes, which mf[k] points into
+    Buf *tabs[MAX_MODS];     // per table: bytes of its own (JSON tables, tables with numbers moved), which mf[k] uses
     uint32_t ntabs[MAX_MODS];
+    Adds added[MAX_MODS];    // its new tables
     int state[MAX_MODS];
     char why[MAX_MODS][300];
     Kept kept[MAX_MODS];
 } Prep;
+
+// Mod k's table j replaced by the bytes in nb (taken, freed on failure); 0 when out of memory.
+static int set_table(Prep *p, int k, uint32_t j, Buf nb) {
+    File *f = &p->mf[k];
+    Tab t;
+    if (!p->tabs[k]) {
+        if (!(p->tabs[k] = calloc(f->count, sizeof *p->tabs[k]))) {
+            free(nb.p);
+            return 0;
+        }
+        p->ntabs[k] = f->count;
+    }
+    if (!read_table(nb.p, (uint32_t)nb.n, &t)) {
+        free(t.off);
+        free(nb.p);
+        return 0;
+    }
+    free(f->t[j].off);
+    free(p->tabs[k][j].p);
+    p->tabs[k][j] = nb;
+    f->t[j] = t;
+    return 1;
+}
+
+// A copy whose list is the game's with new tables among them: the new ones go to the mod's new tables (after its
+// JSON ones of the same name, which come first). 1 when split, 0 when the list is another one, -1 out of memory.
+static int split_added(Prep *p, int k) {
+    File *f = &p->mf[k];
+    const File *g = p->bf;
+    uint32_t i = 0;
+    for (uint32_t x = 0; x < f->count; x++) {
+        uint32_t nm = f->t[x].name;
+        if (i < g->count && nm == g->t[i].name) {
+            i++;
+            continue;
+        }
+        for (uint32_t y = 0; y < g->count; y++)
+            if (g->t[y].name == nm) return 0;
+        for (uint32_t y = 0; y < x; y++)
+            if (f->t[y].name == nm) return 0;
+    }
+    if (i != g->count) return 0;
+    Tab *keep = calloc(g->count, sizeof *keep);
+    Buf *own = p->tabs[k] ? calloc(g->count, sizeof *own) : NULL;
+    if (!keep || (p->tabs[k] && !own)) {
+        free(keep);
+        free(own);
+        return -1;
+    }
+    i = 0;
+    for (uint32_t x = 0; x < f->count; x++) {
+        Buf b = p->tabs[k] ? p->tabs[k][x] : (Buf){0};
+        if (i < g->count && f->t[x].name == g->t[i].name) {
+            keep[i] = f->t[x];
+            if (own) own[i] = b;
+            i++;
+            continue;
+        }
+        if (adds_find(&p->added[k], f->t[x].name) >= 0 || !adds_put(&p->added[k], (Added){b, f->t[x]})) {
+            free(b.p);
+            free(f->t[x].off);
+        }
+    }
+    free(f->t);
+    free(p->tabs[k]);
+    f->t = keep;
+    f->count = g->count;
+    p->tabs[k] = own;
+    p->ntabs[k] = own ? g->count : 0;
+    return 1;
+}
+
+// Mod k's local numbers -> the numbers it was given, in the cells known to hold them, and its new tables named after a
+// region renamed with it (docs/mod-ids.md, "Moving a number"). 0 when out of memory.
+static int move_locals(Prep *p, int k, Events *ev) {
+    const BdatInput *in = &p->mods[k];
+    Moves m = {0};
+    int ok = 0, unfit = 0;
+    Added **order = NULL;
+    uint32_t *keys = NULL;
+    if (!moves_of(in, p->bf, &m)) goto done;
+    if (!m.n) {
+        ok = 1;
+        goto done;
+    }
+    File *f = &p->mf[k];
+    if (!p->tabs[k]) {
+        if (!(p->tabs[k] = calloc(f->count, sizeof *p->tabs[k]))) goto done;
+        p->ntabs[k] = f->count;
+    }
+    for (uint32_t j = 0; j < f->count; j++)
+        if (!move_cells(&m, &p->tabs[k][j], &f->t[j], &p->bf->t[j], &unfit)) goto done;
+    Adds *a = &p->added[k];
+    if (a->n && (!(order = malloc((size_t)a->n * sizeof *order)) || !(keys = malloc((size_t)a->n * sizeof *keys))))
+        goto done;
+    for (int i = 0; i < a->n; i++) order[i] = &a->v[i];
+    if (a->n) qsort(order, (size_t)a->n, sizeof *order, by_added_name);
+    for (int i = 0; i < a->n; i++)
+        if (!move_cells(&m, &order[i]->own, &order[i]->t, NULL, &unfit)) goto done;
+    // tables named after a region: renamed with it (a name matches at most one template and local number)
+    for (int i = 0; i < a->n; i++) {
+        Added *x = order[i];
+        uint32_t h = x->t.name;
+        keys[i] = h;
+        for (int q = 0; q < m.n; q++) {
+            if (m.v[q].kind != BDAT_ID_REGION) continue;
+            for (size_t t = 0; t < NUM_OF(REGION_TABLES); t++)
+                if (h == name_with(REGION_TABLES[t], m.v[q].local)) {
+                    if (!own_bytes(&x->own, &x->t)) goto done;
+                    uint32_t nm = name_with(REGION_TABLES[t], m.v[q].number);
+                    wr32(x->own.p + x->t.so + 1, nm);
+                    x->t.name = nm;
+                }
+        }
+    }
+    if (unfit)
+        event(ev, LEFT_OUT, k, "%d cell%s keep%s its own number: the number given doesn't fit the column", unfit,
+              unfit > 1 ? "s" : "", unfit > 1 ? "" : "s");
+    // two of its tables with one name once renamed (in order of the old names): the later one is left out
+    for (int i = 0; i < a->n; i++) {
+        Added *x = order[i];
+        int clash = 0;
+        for (int q = 0; q < i && !clash; q++) clash = order[q] && order[q]->t.name == x->t.name;
+        if (clash) {
+            event(ev, LEFT_OUT, k, "its table %08X: renamed with its region, it would be another of its tables", keys[i]);
+            free(x->own.p);
+            free(x->t.off);
+            x->own = (Buf){0};
+            x->t = (Tab){0};
+            order[i] = NULL;
+        }
+    }
+    // drop the left-out ones
+    int w = 0;
+    for (int i = 0; i < a->n; i++)
+        if (a->v[i].t.p) a->v[w++] = a->v[i];
+    a->n = w;
+    ok = 1;
+done:
+    free(m.v);
+    free(order);
+    free(keys);
+    return ok;
+}
 
 static void prepare(void *ctx, int k) {
     Prep *p = ctx;
@@ -1474,7 +2019,7 @@ static void prepare(void *ctx, int k) {
         // the mod's JSON tables in its full copy, or in the game's when it has none
         r[0] = 0;
         if (!apply_json(m->data ? m->data : p->base->data, m->data ? m->size : p->base->size, m, k, &ev, &p->mf[k],
-                        &p->tabs[k], r, sizeof p->why[k]))
+                        &p->tabs[k], &p->added[k], r, sizeof p->why[k]))
             return;
         p->ntabs[k] = p->mf[k].count;
     } else if (!m->data) {
@@ -1485,12 +2030,467 @@ static void prepare(void *ctx, int k) {
     }
     int same = p->mf[k].count == p->bf->count;
     for (uint32_t j = 0; same && j < p->bf->count; j++) same = p->mf[k].t[j].name == p->bf->t[j].name;
+    if (!same) {
+        int s = split_added(p, k);
+        if (s < 0) {
+            p->kept[k].oom = 1;
+            return;
+        }
+        same = s;
+    }
+    if (same && !move_locals(p, k, &ev)) p->kept[k].oom = 1;
     p->state[k] = same ? PREP_SAME_TABLES : PREP_OTHER_TABLES;
+}
+
+// The file of f's tables as they are, then the new tables news[0..nn) (a mod's copy used whole).
+static uint8_t *file_with(const File *f, Added *const *news, int nn, size_t *out_n) {
+    Buf out = {0};
+    uint32_t count = f->count + (uint32_t)nn;
+    size_t head = 16 + 4 * (size_t)count;
+    if (!put(&out, NULL, head)) return NULL;
+    memcpy(out.p, "BDAT", 4);
+    wr32(out.p + 4, 0x01001004);
+    wr32(out.p + 8, count);
+    for (uint32_t j = 0; j < count; j++) {
+        const Tab *t = j < f->count ? &f->t[j] : &news[j - f->count]->t;
+        wr32(out.p + 16 + 4 * j, (uint32_t)out.n);
+        if (!put(&out, t->p, t->len)) {
+            free(out.p);
+            return NULL;
+        }
+    }
+    if (out.n > 0xffffffffu) {
+        free(out.p);
+        return NULL;
+    }
+    wr32(out.p + 12, (uint32_t)out.n);
+    *out_n = out.n;
+    return out.p;
 }
 
 // Mod k's copy as the result, when it is used whole: its own file, or for a mod with JSON tables the file of them put in.
 static uint8_t *whole_copy(const Prep *p, int k, size_t *out_n) {
-    return p->tabs[k] ? file_bytes(&p->mf[k], out_n) : copy_of(&p->mods[k], out_n);
+    return p->tabs[k] ? file_with(&p->mf[k], NULL, 0, out_n) : copy_of(&p->mods[k], out_n);
+}
+
+static int by_i64(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+// A value each of the game's rows has its own of (a flag, a site number), that rows two mods add both use: the two
+// mods may clash there (a caveat; the numbers mod.json names are handed out before this, so these are the others).
+// Not for tables of fewer than 8 rows (a column of a few distinct values says little) or column 0 (the key: the merge
+// keeps keys unique itself).
+static int shared_values(const File *bf, const File *mf, const int *live, int nlive, Events *ev) {
+    int64_t *vals = NULL;
+    uint32_t cap = 0;
+    typedef struct { int64_t v; int k; } Seen;
+    Seen *seen = NULL, *told = NULL;
+    uint32_t scap = 0;
+    int ok = 0;
+    for (uint32_t j = 0; j < bf->count; j++) {
+        const Tab *g = &bf->t[j];
+        if (g->rc < 8) continue;
+        int first = -1, two = 0;
+        uint32_t nadd = 0;
+        for (int x = 0; x < nlive; x++) {
+            const Tab *t = &mf[live[x]].t[j];
+            if (!same_cols(t, g) || t->base != g->base || t->rc <= g->rc) continue;
+            nadd += t->rc - g->rc;
+            if (first < 0) first = live[x];
+            else if (first != live[x]) two = 1;
+        }
+        if (!two) continue;
+        if (g->rc > cap) {
+            int64_t *q = realloc(vals, (size_t)g->rc * sizeof *q);
+            if (!q) goto done;
+            vals = q;
+            cap = g->rc;
+        }
+        if (nadd > scap) {
+            Seen *q = realloc(seen, (size_t)nadd * sizeof *q), *q2;
+            if (!q) goto done;
+            seen = q;
+            if (!(q2 = realloc(told, (size_t)nadd * sizeof *q2))) goto done;
+            told = q2;
+            scap = nadd;
+        }
+        for (uint32_t c = 1; c < g->cc; c++) {
+            if (!int_type(ctype(g, c))) continue;
+            for (uint32_t r = 0; r < g->rc; r++) vals[r] = ival(g, r, c);
+            qsort(vals, g->rc, sizeof *vals, by_i64);
+            int uniq = 1;
+            for (uint32_t r = 1; uniq && r < g->rc; r++) uniq = vals[r] != vals[r - 1];
+            if (!uniq) continue;
+            uint32_t ns = 0, nt = 0;
+            for (int x = 0; x < nlive; x++) {
+                int k = live[x];
+                const Tab *t = &mf[k].t[j];
+                if (!same_cols(t, g) || t->base != g->base) continue;
+                for (uint32_t r = g->rc; r < t->rc; r++) {
+                    int64_t v = ival(t, r, c);
+                    int w = -1;
+                    for (uint32_t s = 0; s < ns && w < 0; s++)
+                        if (seen[s].v == v) w = seen[s].k;
+                    if (w < 0) {
+                        seen[ns++] = (Seen){v, k};
+                        continue;
+                    }
+                    if (w == k) continue;
+                    int again = 0;
+                    for (uint32_t s = 0; s < nt && !again; s++) again = told[s].v == v && told[s].k == k;
+                    if (again) continue;
+                    told[nt++] = (Seen){v, k};
+                    event(ev, CAVEAT, k, "table %08X column %u: a row it adds has %lld, as one of %s's does (each of "
+                          "the game's rows has a value of its own there)", g->name, c, (long long)v, ev->mods[w].name);
+                }
+            }
+        }
+    }
+    ok = 1;
+done:
+    free(vals);
+    free(seen);
+    free(told);
+    return ok;
+}
+
+// Spare game rows (FrontierNav sites, camp slots) two content mods both take: the lower mod's edits to that row are
+// left out whole, so no site is half one mod's and half the other's.
+static int take_slots(Prep *p, const int *live, int nlive, Events *ev) {
+    const File *bf = p->bf;
+    int ok = 0;
+    int *owner = NULL;
+    Src *from = NULL;
+    for (uint32_t j = 0; j < bf->count; j++) {
+        const Tab *g = &bf->t[j];
+        if (!in_list(SLOT_TABLES, NUM_OF(SLOT_TABLES), g->name)) continue;
+        free(owner);
+        if (!(owner = malloc((g->rc + 1) * sizeof *owner))) goto done;
+        for (uint32_t r = 0; r < g->rc; r++) owner[r] = -1;
+        for (int x = 0; x < nlive; x++) {
+            int k = live[x];
+            const Tab *t = &p->mf[k].t[j];
+            if (!p->mods[k].nids || !same_cols(t, g) || t->base != g->base) continue;
+            uint32_t n = t->rc < g->rc ? t->rc : g->rc, back = 0;
+            for (uint32_t r = 0; r < n; r++) {
+                if (same_row(g, r, t, r)) continue;
+                if (owner[r] >= 0) back++;
+                else owner[r] = k;
+            }
+            if (!back) continue;
+            free(from);
+            if (!(from = malloc(((size_t)t->rc * t->cc + 1) * sizeof *from))) goto done;
+            for (uint32_t r = 0; r < t->rc; r++) {
+                int mine = r < n && !same_row(g, r, t, r) && owner[r] != k;
+                for (uint32_t c = 0; c < t->cc; c++) from[(size_t)r * t->cc + c] = (Src){r, (uint8_t)(mine ? 0 : 1)};
+                if (mine && !same_row(&p->mf[owner[r]].t[j], r, t, r)) {   // the same edit as its owner's: nothing lost
+                    char rn[80];
+                    rowname(g, r, rn, sizeof rn);
+                    event(ev, LEFT_OUT, k, "table %08X %s: %s takes this row too; its edits to it are not used", g->name,
+                          rn, p->mods[owner[r]].name);
+                }
+            }
+            const Tab *src[2] = {g, t};
+            Buf nb = {0};
+            if (!write_table(&nb, t, src, from, t->rc, t->extra) || !set_table(p, k, j, nb)) goto done;
+        }
+    }
+    ok = 1;
+done:
+    free(owner);
+    free(from);
+    return ok;
+}
+
+// A game site's four network links (FnetVeinList) as a set: a site a mod adds links to a site of the game's, and the
+// game's links go both ways, so the mod edits the game site's row too, putting its site in a free link column; two
+// such mods would both take the same column. Here every mod's copy of a game site whose own links it keeps gets the
+// game's links in their columns and every mod's added links in the free ones, higher priority first (beyond four: a
+// "left out" line), so they agree there and the rest of their edits to that row merge as usual. Before take_slots.
+static const uint32_t VEIN_LINKS[4] = {0x3791D641u, 0xF14C0AACu, 0x38E329FDu, 0xD270368Au};
+
+static int link_slots(Prep *p, const int *live, int nlive, Events *ev) {
+    const File *bf = p->bf;
+    uint32_t j = 0;
+    while (j < bf->count && bf->t[j].name != VEIN) j++;
+    if (j == bf->count) return 1;
+    const Tab *g = &bf->t[j];
+    uint32_t lc[4];
+    for (int i = 0; i < 4; i++)
+        if ((lc[i] = col_of(g, VEIN_LINKS[i])) == NONE) return 1;
+    for (uint32_t r = 0; r < g->rc; r++) {
+        int64_t gl[4], uni[4];
+        int keeps[MAX_MODS] = {0}, any = 0;
+        for (int i = 0; i < 4; i++) uni[i] = gl[i] = ival(g, r, lc[i]);
+        for (int x = 0; x < nlive; x++) {
+            int k = live[x];
+            const Tab *t = &p->mf[k].t[j];
+            if (!same_cols(t, g) || t->base != g->base || r >= t->rc) continue;
+            int64_t ml[4];
+            for (int i = 0; i < 4; i++) ml[i] = ival(t, r, lc[i]);
+            int keep = 1;   // every link the game's row has, it has too (in any column)
+            for (int i = 0; i < 4 && keep; i++) {
+                int found = !gl[i];
+                for (int q = 0; q < 4 && !found; q++) found = ml[q] == gl[i];
+                keep = found;
+            }
+            if (!keep) continue;
+            keeps[x] = 1;
+            for (int i = 0; i < 4; i++) {
+                int64_t v = ml[i];
+                int have = !v;
+                for (int q = 0; q < 4 && !have; q++) have = uni[q] == v;
+                if (have) continue;
+                int at = -1;
+                for (int q = 0; q < 4 && at < 0; q++)
+                    if (!uni[q]) at = q;
+                if (at < 0) {
+                    event(ev, LEFT_OUT, k, "table %08X row %u: its link to site %lld: the site's four links are full",
+                          VEIN, r + g->base, (long long)v);
+                    continue;
+                }
+                uni[at] = v;
+                any = 1;
+            }
+        }
+        if (!any) continue;
+        for (int x = 0; x < nlive; x++) {
+            int k = live[x];
+            const Tab *t = &p->mf[k].t[j];
+            if (!keeps[x]) continue;
+            int differs = 0;
+            for (int i = 0; i < 4; i++) differs |= ival(t, r, lc[i]) != gl[i];
+            if (!differs) continue;   // a copy that doesn't touch this site's links stays the game's
+            Buf nb = {0};
+            Tab nt;
+            if (!put(&nb, t->p, t->len) || !read_table(nb.p, (uint32_t)nb.n, &nt)) {
+                free(nb.p);
+                free(nt.off);
+                return 0;
+            }
+            for (int i = 0; i < 4; i++)
+                set_ival(nb.p + nt.ro + (size_t)r * nt.rl + nt.off[lc[i]], ctype(&nt, lc[i]), uni[i]);
+            free(nt.off);
+            if (!set_table(p, k, j, nb)) return 0;
+        }
+    }
+    return 1;
+}
+
+// Rows whose number is their row id (a region's FLD_FieldNameList row, new rows a mod.json names) put at those ids:
+// each such table grows by gap rows up to the highest one, in the base and in every mod's copy, so different mods'
+// rows are edits of different rows and combine. bf's grown tables get bytes of their own in bown.
+typedef struct { uint32_t j, number; int k; uint32_t row; } Owner;
+
+static int place_rows(Prep *p, File *bf, Buf *bown, const int *live, int nlive, Events *ev) {
+    int ok = 0, nall = 0, capall = 0;
+    Owner *own = NULL, *all = NULL;
+    Src *from = NULL;
+    uint32_t *keys = NULL;
+    Buf fill = {0};
+    Tab ft = {0};
+    // the owners: every live mod's entries in order, the first to a number of a table keeps it
+    for (int x = 0; x < nlive; x++) {
+        int k = live[x];
+        const BdatInput *in = &p->mods[k];
+        for (int i = 0; i < in->nids; i++) {
+            const BdatId *e = &in->ids[i];
+            uint32_t h, j = 0;
+            if (e->kind == BDAT_ID_REGION && e->has_local) h = FIELD_NAMES;
+            else if (e->kind == BDAT_ID_SITE && e->has_local) h = VEIN;
+            else if (e->kind == BDAT_ID_ROW && e->has_local) h = e->table;
+            else continue;
+            while (j < bf->count && bf->t[j].name != h) j++;
+            if (j == bf->count) continue;   // a table of another file (mod_ids says when no file has it)
+            const Tab *g = &bf->t[j], *t = &p->mf[k].t[j];
+            uint32_t end = g->base + g->rc;
+            if (e->number < end || e->local < end || !same_cols(t, g) || t->base != g->base ||
+                e->local - t->base >= t->rc) {
+                event(ev, LEFT_OUT, k, "its %s \"%s\" (row %u of table %08X): not a row it adds there",
+                      KIND_NAME(e->kind), e->name, e->local, h);
+                continue;
+            }
+            int dup = 0;
+            for (int q = 0; q < nall && !dup; q++) dup = all[q].j == j && all[q].number == e->number;
+            if (dup) continue;
+            if (nall == capall) {
+                capall = capall ? capall * 2 : 16;
+                Owner *q = realloc(all, (size_t)capall * sizeof *q);
+                if (!q) goto done;
+                all = q;
+            }
+            all[nall++] = (Owner){j, e->number, k, e->local - t->base};
+            // its row of a parallel table, when it has one, goes with it
+            for (size_t q = 0; q < NUM_OF(PARALLEL); q++) {
+                if (PARALLEL[q][0] != h) continue;
+                uint32_t j2 = 0;
+                while (j2 < bf->count && bf->t[j2].name != PARALLEL[q][1]) j2++;
+                if (j2 == bf->count) continue;
+                const Tab *g2 = &bf->t[j2], *t2 = &p->mf[k].t[j2];
+                uint32_t end2 = g2->base + g2->rc;
+                if (!same_cols(t2, g2) || t2->base != g2->base || e->local < end2 || e->number < end2 ||
+                    e->local - t2->base >= t2->rc)
+                    continue;
+                int dup2 = 0;
+                for (int w = 0; w < nall && !dup2; w++) dup2 = all[w].j == j2 && all[w].number == e->number;
+                if (dup2) {
+                    event(ev, LEFT_OUT, k, "its %s \"%s\": its row %u of table %08X is another mod's number there",
+                          KIND_NAME(e->kind), e->name, e->local, PARALLEL[q][1]);
+                    continue;
+                }
+                if (nall == capall) {
+                    capall *= 2;
+                    Owner *w = realloc(all, (size_t)capall * sizeof *w);
+                    if (!w) goto done;
+                    all = w;
+                }
+                all[nall++] = (Owner){j2, e->number, k, e->local - t2->base};
+            }
+        }
+    }
+    for (uint32_t j = 0; j < bf->count; j++) {
+        int nown = 0;
+        free(own);
+        if (!(own = malloc((size_t)(nall ? nall : 1) * sizeof *own))) goto done;
+        for (int q = 0; q < nall; q++)
+            if (all[q].j == j) own[nown++] = all[q];
+        if (!nown) continue;
+        const Tab *g = &bf->t[j];
+        uint32_t end = g->base + g->rc;
+        uint32_t top = 0;
+        for (int q = 0; q < nown; q++)
+            if (own[q].number - end + 1 > top) top = own[q].number - end + 1;
+        int keyed = ctype(g, 0) == 9;
+        // A gap row is a copy of a row the game has (FILLER: a placeholder where the game has one, else the last row).
+        // Only the key is made up. Nothing points at a gap row: the mod whose number it is is off, and the numbers it
+        // was given are no other mod's.
+        uint32_t tmpl = g->rc - 1;
+        for (size_t q = 0; q < NUM_OF(FILLER); q++)
+            if (FILLER[q][0] == g->name && FILLER[q][1] < g->rc) tmpl = FILLER[q][1];
+        free(keys);
+        if (!(keys = malloc((size_t)top * sizeof *keys))) goto done;
+        // the gap rows: copies of the template row, each with a key of its own (the owner's, unless another row has it)
+        for (uint32_t o = 0; keyed && o < top; o++) {
+            int w = -1;
+            for (int q = 0; q < nown && w < 0; q++)
+                if (own[q].number == end + o) w = q;
+            uint32_t key = 0;
+            int have = 0;
+            if (w >= 0) {
+                key = rd32(cell(&p->mf[own[w].k].t[j], own[w].row, 0));
+                have = 1;
+                for (uint32_t r = 0; have && r < g->rc; r++) have = rd32(cell(g, r, 0)) != key;
+                for (uint32_t r = 0; have && r < o; r++) have = keys[r] != key;
+            }
+            if (!have) {
+                char s[64];
+                int n = snprintf(s, sizeof s, "mod-ids %08X %u", g->name, end + o);
+                uint32_t syn = mm3((const uint8_t *)s, (size_t)n);
+                if (w >= 0)
+                    event(ev, CAVEAT, own[w].k, "table %08X: its row %u gets key %08X: its own key is another row's",
+                          g->name, end + o, syn);
+                key = syn;
+            }
+            keys[o] = key;
+        }
+        free(from);
+        if (!(from = malloc(((size_t)top * g->cc + 1) * sizeof *from))) goto done;
+        for (uint32_t r = 0; r < top; r++)
+            for (uint32_t c = 0; c < g->cc; c++) from[(size_t)r * g->cc + c] = (Src){tmpl, 0};
+        const Tab *gsrc[1] = {g};
+        free(fill.p);
+        free(ft.off);
+        fill = (Buf){0};
+        ft = (Tab){0};
+        if (!write_table(&fill, g, gsrc, from, top, g->extra) || !read_table(fill.p, (uint32_t)fill.n, &ft)) goto done;
+        for (uint32_t o = 0; keyed && o < top; o++) wr32(fill.p + ft.ro + (size_t)o * ft.rl + ft.off[0], keys[o]);
+        for (size_t q = 0; q < NUM_OF(GAP_SET); q++) {   // a gap's own number, or no location
+            uint32_t ci = GAP_SET[q][0] == g->name ? col_of(&ft, GAP_SET[q][1]) : NONE;
+            for (uint32_t o = 0; ci != NONE && o < top; o++) {
+                int64_t v = GAP_SET[q][2] ? (int64_t)(end + o) : 0;
+                if (fits(ctype(&ft, ci), v)) set_ival(fill.p + ft.ro + (size_t)o * ft.rl + ft.off[ci], ctype(&ft, ci), v);
+            }
+        }
+        // the base: the game's rows, then the gap rows
+        uint32_t rows = g->rc + top;
+        free(from);
+        if (!(from = malloc(((size_t)rows * g->cc + 1) * sizeof *from))) goto done;
+        for (uint32_t r = 0; r < rows; r++)
+            for (uint32_t c = 0; c < g->cc; c++)
+                from[(size_t)r * g->cc + c] = r < g->rc ? (Src){r, 0} : (Src){r - g->rc, 1};
+        const Tab *bsrc[2] = {g, &ft};
+        Buf nb = {0};
+        Tab nt;
+        if (!write_table(&nb, g, bsrc, from, rows, g->extra) || !read_table(nb.p, (uint32_t)nb.n, &nt)) {
+            free(nb.p);
+            goto done;
+        }
+        // every live mod's copy: its rows but those it owns, with the gap rows (its own ones in place) after the
+        // game's number of rows
+        for (int x = 0; x < nlive; x++) {
+            int k = live[x];
+            const Tab *t = &p->mf[k].t[j];
+            if (!same_cols(t, g) || t->base != g->base) continue;
+            uint32_t mine = 0;
+            for (int q = 0; q < nown; q++) mine += own[q].k == k;
+            uint32_t mrows = t->rc - mine + top;
+            Src *mf2 = malloc(((size_t)mrows * t->cc + 1) * sizeof *mf2);
+            if (!mf2) {
+                free(nb.p);
+                free(nt.off);
+                goto done;
+            }
+            uint32_t at = 0, kept = 0;
+            for (uint32_t i = 0; i <= t->rc; i++) {
+                if (kept == g->rc || (i == t->rc && kept < g->rc)) {
+                    // the gap rows go here (once): after the first g->rc rows kept, or at the end of a shorter copy
+                    if (kept != NONE) {
+                        for (uint32_t o = 0; o < top; o++) {
+                            int w = -1;
+                            for (int q = 0; q < nown && w < 0; q++)
+                                if (own[q].number == end + o && own[q].k == k) w = q;
+                            for (uint32_t c = 0; c < t->cc; c++)
+                                mf2[(size_t)at * t->cc + c] = w >= 0 && !(keyed && c == 0) ? (Src){own[w].row, 0}
+                                                                                         : (Src){o, 1};
+                            at++;
+                        }
+                        kept = NONE;
+                    }
+                }
+                if (i == t->rc) break;
+                int owned = 0;
+                for (int q = 0; q < nown && !owned; q++) owned = own[q].k == k && own[q].row == i;
+                if (owned) continue;
+                for (uint32_t c = 0; c < t->cc; c++) mf2[(size_t)at * t->cc + c] = (Src){i, 0};
+                at++;
+                if (kept != NONE) kept++;
+            }
+            const Tab *msrc[2] = {t, &ft};
+            Buf mb = {0};
+            int w_ok = write_table(&mb, t, msrc, mf2, at, t->extra);
+            free(mf2);
+            if (!w_ok || !set_table(p, k, j, mb)) {
+                free(nb.p);
+                free(nt.off);
+                goto done;
+            }
+        }
+        free(bf->t[j].off);
+        free(bown[j].p);
+        bown[j] = nb;
+        bf->t[j] = nt;
+    }
+    ok = 1;
+done:
+    free(all);
+    free(own);
+    free(from);
+    free(keys);
+    free(fill.p);
+    free(ft.off);
+    return ok;
 }
 
 // A live mod's change to every table, and what its changes refer to.
@@ -1525,6 +2525,7 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     s.file_mod = -1;
     Events ev = {note, ctx, &s, mods};
     File bf = {0}, mf[MAX_MODS] = {{0}};
+    Buf *bown = NULL;
     int live[MAX_MODS], nlive = 0;
     Change *ch[MAX_MODS] = {0};
     Set refs[MAX_MODS] = {{0}};
@@ -1534,6 +2535,8 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
     Pair **bkeys = NULL;
     int *bunique = NULL;
     Prep *prep = NULL;
+    Added **news = NULL;
+    int nnews = 0;
     char r[300];
     if (n < 1 || n > MAX_MODS) {
         snprintf(why, why_cap, "%d mods (1 to %d can be merged)", n, MAX_MODS);
@@ -1576,10 +2579,50 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
         snprintf(why, why_cap, "no mod's copy can be read");
         goto done;
     }
+    // new tables: each name once, the highest mod's (a mod's own names are distinct: apply_json, split_added and
+    // move_locals leave a second one out)
+    {
+        int total = 0;
+        for (int x = 0; x < nlive; x++) total += prep->added[live[x]].n;
+        if (!(news = malloc((size_t)(total ? total : 1) * sizeof *news))) goto oom;
+    }
+    for (int x = 0; x < nlive; x++) {
+        Adds *a = &prep->added[live[x]];
+        Added **order = malloc((size_t)(a->n ? a->n : 1) * sizeof *order);
+        if (!order) goto oom;
+        for (int i = 0; i < a->n; i++) order[i] = &a->v[i];
+        qsort(order, (size_t)a->n, sizeof *order, by_added_name);   // the lines in order of name, as the reference
+        for (int i = 0; i < a->n; i++) {
+            int w = -1;
+            for (int q = 0; q < nnews && w < 0; q++)
+                if (news[q]->t.name == order[i]->t.name) w = q;
+            if (w >= 0) {
+                int owner = -1;
+                for (int y = 0; y < x && owner < 0; y++)
+                    if (adds_find(&prep->added[live[y]], order[i]->t.name) >= 0) owner = live[y];
+                event(&ev, LEFT_OUT, live[x], "its new table %08X is not used: %s's is", order[i]->t.name,
+                      mods[owner].name);
+            } else {
+                news[nnews++] = order[i];
+            }
+        }
+        free(order);
+    }
+    qsort(news, (size_t)nnews, sizeof *news, by_added_name);
+    int reworked = nnews > 0;
+    for (int x = 0; x < nlive; x++) reworked |= mods[live[x]].nids > 0;
+    if (nlive > 1 && !shared_values(&bf, mf, live, nlive, &ev)) goto oom;
+    if (reworked) {
+        if (!(bown = calloc(bf.count, sizeof *bown))) goto oom;
+        if (!link_slots(prep, live, nlive, &ev) || !take_slots(prep, live, nlive, &ev) ||
+            !place_rows(prep, &bf, bown, live, nlive, &ev))
+            goto oom;
+    }
     if (nlive == 1) {
         s.file_mode = BDAT_FILE_COPIED;
         s.file_mod = live[0];
-        if (!(result = whole_copy(prep, live[0], out_n))) snprintf(why, why_cap, "out of memory");
+        result = reworked ? file_with(&mf[live[0]], news, nnews, out_n) : whole_copy(prep, live[0], out_n);
+        if (!result) snprintf(why, why_cap, "out of memory");
         goto done;
     }
     // every mod's change to every table, and what its changes refer to
@@ -1621,7 +2664,8 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
                    alike == 1 ? "is" : "are", who);
     }
     s.file_mode = BDAT_FILE_MERGED;
-    if (!(offs = malloc(bf.count * sizeof *offs))) goto oom;
+    uint32_t count = bf.count + (uint32_t)nnews;
+    if (!(offs = malloc(count * sizeof *offs))) goto oom;
     for (uint32_t j = 0; j < bf.count; j++) {
         const Tab *b = &bf.t[j];
         int touch[MAX_MODS], nt = 0;
@@ -1662,16 +2706,20 @@ uint8_t *bdat_merge(const BdatInput *base, const BdatInput *mods, int n, size_t 
         }
         if (!put(&body, copy->p, copy->len) || !put(&body, NULL, (4 - (body.n & 3)) & 3)) goto oom;   // tables 4-aligned
     }
-    size_t head = 16 + 4 * (size_t)bf.count, total = head + body.n;
+    for (int i = 0; i < nnews; i++) {   // the new tables, by name
+        offs[bf.count + (uint32_t)i] = (uint32_t)body.n;
+        if (!put(&body, news[i]->t.p, news[i]->t.len) || !put(&body, NULL, (4 - (body.n & 3)) & 3)) goto oom;
+    }
+    size_t head = 16 + 4 * (size_t)count, total = head + body.n;
     if (total > 0xffffffffu || !(result = malloc(total))) {
         snprintf(why, why_cap, "the merged file is too big");
         goto done;
     }
     memcpy(result, "BDAT", 4);
     wr32(result + 4, 0x01001004);
-    wr32(result + 8, bf.count);
+    wr32(result + 8, count);
     wr32(result + 12, (uint32_t)total);
-    for (uint32_t j = 0; j < bf.count; j++) wr32(result + 16 + 4 * j, (uint32_t)(head + offs[j]));
+    for (uint32_t j = 0; j < count; j++) wr32(result + 16 + 4 * j, (uint32_t)(head + offs[j]));
     memcpy(result + head, body.p, body.n);
     *out_n = total;
     goto done;
@@ -1692,14 +2740,80 @@ done:
             free(prep->kept[k].lines.p);
             for (uint32_t j = 0; prep->tabs[k] && j < prep->ntabs[k]; j++) free(prep->tabs[k][j].p);
             free(prep->tabs[k]);
+            adds_free(&prep->added[k]);
         }
     }
     free(prep);
+    free(news);
+    if (bown)
+        for (uint32_t j = 0; j < bf.count; j++) free(bown[j].p);
+    free(bown);
     file_free(&bf);
     free(offs);
     free(body.p);
     if (sum) *sum = s;
     return result;
+}
+
+// ---- the ids file of the check command line (tests/bdat_merge_check.c)
+
+BdatId *bdat_merge_ids_from_json(const uint8_t *data, size_t size, const char *mod, int *n) {
+    Arena arena = {0};
+    JParse jp = {(const char *)data, (const char *)data + size, 0, 0, &arena};
+    BdatId *out = NULL;
+    *n = 0;
+    JNode *root = utf8_ok(data, size) ? jvalue(&jp) : NULL;
+    const JNode *list = root ? jget(root, mod, strlen(mod)) : NULL;
+    if (list && list->type == J_ARR && list->len) {
+        // one block: the entries, then the refs, then the names
+        size_t refs = 0, names = 0;
+        for (size_t i = 0; i < list->len; i++) {
+            const JNode *e = list->items[i], *rf = jget(e, "refs", 4), *nm = jget(e, "name", 4);
+            refs += rf && rf->type == J_ARR ? rf->len : 0;
+            names += nm && nm->type == J_STR ? nm->len + 1 : 1;
+        }
+        size_t at_refs = list->len * sizeof *out, at_names = at_refs + 2 * refs * sizeof(uint32_t);
+        uint8_t *blk = calloc(1, at_names + names);
+        if (blk) {
+            out = (BdatId *)blk;
+            uint32_t *rp = (uint32_t *)(blk + at_refs);
+            char *np = (char *)blk + at_names;
+            for (size_t i = 0; i < list->len; i++) {
+                const JNode *e = list->items[i], *v;
+                BdatId *d = &out[(*n)++];
+                if ((v = jget(e, "kind", 4)) && v->type == J_STR)
+                    for (int k = 0; k < BDAT_ID_KINDS; k++)
+                        if (strlen(KIND_NAME(k)) == v->len && !memcmp(KIND_NAME(k), v->s, v->len)) d->kind = (uint8_t)k;
+                d->name = np;
+                if ((v = jget(e, "name", 4)) && v->type == J_STR) {
+                    memcpy(np, v->s, v->len);
+                    np += v->len;
+                }
+                *np++ = 0;
+                if ((v = jget(e, "local", 5)) && v->type == J_NUM && v->isint) {
+                    d->has_local = 1;
+                    d->local = (uint32_t)v->i;
+                }
+                if ((v = jget(e, "number", 6)) && v->type == J_NUM && v->isint) d->number = (uint32_t)v->i;
+                if ((v = jget(e, "table", 5)) && v->type == J_STR) d->table = hashname(v->s, v->len);
+                if ((v = jget(e, "refs", 4)) && v->type == J_ARR) {
+                    d->refs = rp;
+                    for (size_t q = 0; q < v->len; q++) {
+                        const JNode *s = v->items[q];
+                        const char *dot = NULL;
+                        for (size_t c = 0; s->type == J_STR && c < s->len; c++)
+                            if (s->s[c] == '.') dot = s->s + c;
+                        if (!dot) continue;
+                        *rp++ = hashname(s->s, (size_t)(dot - s->s));
+                        *rp++ = hashname(dot + 1, s->len - (size_t)(dot - s->s) - 1);
+                        d->nrefs++;
+                    }
+                }
+            }
+        }
+    }
+    afree(&arena);
+    return out;
 }
 
 int bdat_rewrite_check(const uint8_t *data, size_t size) {
@@ -1721,4 +2835,78 @@ int bdat_rewrite_check(const uint8_t *data, size_t size) {
     }
     file_free(&f);
     return bad;
+}
+
+// ---- the world raster (docs/mod-ids.md, "The world raster")
+//
+// zone/zone0001.atr says which map region each 10 m cell of Mira is: a 32-byte header, then one byte per cell (the
+// region id). A region mod paints its land with its region's number; two of them ship the whole file each, so as a
+// whole file only the higher one's land would have its region. Combined, every mod's painted cells (the bytes that
+// differ from the game's) are put on the game's raster, lowest priority first, so a higher mod's cell wins, each
+// painted with the region number its mod was given.
+uint8_t *bdat_raster_combine(const BdatInput *game, const BdatInput *mods, int n, size_t *out_n, BdatNote note,
+                             void *ctx, char *why, size_t cap) {
+    const size_t head = 32;
+    if (game->size <= head || memcmp(game->data, "zatr", 4)) {
+        snprintf(why, cap, "the game's raster is not one this reads");
+        return NULL;
+    }
+    uint8_t *out = malloc(game->size), *owner = calloc(game->size, 1);
+    uint32_t won[MAX_MODS] = {0}, lost[MAX_MODS] = {0};
+    int used[MAX_MODS] = {0}, nused = 0;
+    if (!out || !owner || n > MAX_MODS) {
+        free(out);
+        free(owner);
+        snprintf(why, cap, "out of memory");
+        return NULL;
+    }
+    memcpy(out, game->data, game->size);
+    char line[400];
+    for (int k = 0; k < n; k++)
+        if (!mods[k].data || mods[k].size != game->size || memcmp(mods[k].data, game->data, head)) {
+            snprintf(line, sizeof line, "left out: %s: its raster is not the game's size or layout; not used",
+                     mods[k].name);
+            if (note) note(ctx, line);
+        } else {
+            used[k] = 1;
+            nused++;
+        }
+    for (int k = n - 1; k >= 0; k--) {   // lowest priority first: a higher mod's cell wins
+        if (!used[k]) continue;
+        uint8_t map[256];
+        for (int v = 0; v < 256; v++) map[v] = (uint8_t)v;
+        for (int i = 0; i < mods[k].nids; i++) {
+            const BdatId *e = &mods[k].ids[i];
+            if (e->kind == BDAT_ID_REGION && e->has_local && e->local < 256 && e->number < 256)
+                map[e->local] = (uint8_t)e->number;
+        }
+        const uint8_t *m = mods[k].data, *g = game->data;
+        for (size_t i = head; i < game->size; i++) {
+            if (m[i] == g[i]) continue;
+            uint8_t v = map[m[i]];
+            if (owner[i] && out[i] != v) lost[owner[i] - 1]++;
+            out[i] = v;
+            owner[i] = (uint8_t)(k + 1);
+        }
+    }
+    for (size_t i = head; i < game->size; i++)
+        if (owner[i]) won[owner[i] - 1]++;
+    for (int k = 0; k < n; k++) {
+        if (!used[k]) continue;
+        snprintf(line, sizeof line, "raster: %s: %u cell(s) painted", mods[k].name, won[k]);
+        if (note) note(ctx, line);
+        if (lost[k]) {
+            snprintf(line, sizeof line, "left out: %s: %u of its raster cells: a mod higher in priority paints them "
+                     "too", mods[k].name, lost[k]);
+            if (note) note(ctx, line);
+        }
+    }
+    free(owner);
+    if (!nused) {
+        free(out);
+        snprintf(why, cap, "no mod's raster can be used");
+        return NULL;
+    }
+    *out_n = game->size;
+    return out;
 }

@@ -11,13 +11,44 @@ typedef struct {
     size_t size;
 } BdatJson;
 
+// A number handed out to a mod (runtime/mod_ids.c; docs/mod-ids.md): what its mod.json calls it, the number its own
+// files use (if any) and the one it was given. The merge puts the given numbers in before anything is compared:
+// '@kind:name' in a JSON table's integer cells and "table" name, the local number in the cells known to hold one of
+// that kind, and a region's FLD_FieldNameList row or a new row at the row id it was given.
+enum { BDAT_ID_REGION, BDAT_ID_FLAG, BDAT_ID_REWARD, BDAT_ID_ROW, BDAT_ID_SITE, BDAT_ID_KINDS };
+// A kind's name, as mod.json, '@kind:name' cells, the records file and the lines say it ("?" for no kind).
+static inline const char *bdat_id_kind_name(int kind) {
+    static const char *const names[] = {"region", "flag", "reward", "row", "site"};
+    _Static_assert(sizeof names / sizeof names[0] == BDAT_ID_KINDS, "a name for every BDAT_ID_ kind");
+    return kind >= 0 && kind < BDAT_ID_KINDS ? names[kind] : "?";
+}
+typedef struct {
+    uint8_t kind;           // BDAT_ID_*
+    uint8_t has_local;      // local is the number the mod's own files use
+    const char *name;
+    uint32_t local, number;
+    uint32_t table;         // BDAT_ID_ROW: the name hash of its table
+    const uint32_t *refs;   // BDAT_ID_ROW: (table, column) name hash pairs whose cells hold its row id
+    int nrefs;
+} BdatId;
+
 typedef struct {
     const uint8_t *data;  // the whole file; NULL for a mod that has only JSON tables of it
     size_t size;
     const char *name;     // for events: a mod id, "game"
     const BdatJson *json; // tables in place of the file's (or the game's) own; any order
     int njson;
+    const BdatId *ids;    // the numbers it was given; none: nothing is moved (its JSON names are then undeclared)
+    int nids;
 } BdatInput;
+
+// A name as the game's tables and bdat-toolset write it: "<8 hex digits>" is the hash itself, anything else its
+// murmur3 (seed 0).
+uint32_t bdat_merge_name_hash(const char *s, size_t n);
+
+// For tests/bdat_merge_check.c: mod's entries of an ids file ({mod: [{kind, name, local, number, table, refs}]}, as
+// the check command line takes it) as one malloc'd block (free it); NULL when it has none or can't be read.
+BdatId *bdat_merge_ids_from_json(const uint8_t *data, size_t size, const char *mod, int *n);
 
 enum { BDAT_FILE_MERGED, BDAT_FILE_COPIED, BDAT_FILE_WHOLE };
 
@@ -38,6 +69,19 @@ typedef struct {
 // One line per event: "priority: ...", "left out: <mod>: ...", "caveat: <mod>: ...", "adds nothing: <mod>: ...",
 // "partly alike: <mod>: ...".
 typedef void (*BdatNote)(void *ctx, const char *line);
+
+// The world raster (zone/zone0001.atr: a 32-byte header, then a region id byte per 10 m cell) of every mod in mods
+// (highest priority first, their full copies as data) combined: the game's, then each mod's cells that differ from the
+// game's, lowest priority first, with its region numbers as it was given them (ids). Malloc'd, size in *out_n; NULL
+// with the reason in why when no mod's raster can be used. Lines as bdat_merge's ("left out: ...", "raster: ...").
+uint8_t *bdat_raster_combine(const BdatInput *game, const BdatInput *mods, int n, size_t *out_n, BdatNote note,
+                             void *ctx, char *why, size_t cap);
+
+// A zone's placement file (gimmick/<zone>/arrangement_*.gimk) of every mod in mods (highest priority first) combined
+// label by label onto the game's (runtime/gimk_merge.c; docs/mod-ids.md, "Placement files"). NULL, with the reason in
+// why, when the game's file isn't one this reads, the top mod's isn't, or no mod's can be used. Lines as bdat_merge's.
+uint8_t *bdat_gimk_combine(const BdatInput *game, const BdatInput *mods, int n, size_t *out_n, BdatNote note, void *ctx,
+                           char *why, size_t cap);
 
 // Runs fn(ctx, i) for every i in [0, n), in any order and possibly at the same time; returns when all have returned.
 // bdat_merge runs each mod's own work (its JSON tables put in, its file read, its tables compared with the game's)
@@ -75,6 +119,12 @@ int bdat_merge_serve(const char *mount, const char *key, const BdatModFiles *mod
 // files this run serves are kept. What it said goes to the next-start lines and tags (bdat_merge_next_status,
 // bdat_merge_next_mod_tag), which bdat_merge_next_clear empties. 1 when a file was made or found.
 int bdat_merge_prepare(const char *mount, const char *key, const BdatModFiles *mods, int n);
+// The same for a whole file several mods ship, combined: the world raster (zone/zone0001.atr) of several region mods,
+// or of one whose region numbers moved (bdat_raster_combine), and a zone's placement file
+// (gimmick/<zone>/arrangement_*.gimk, bdat_gimk_combine) of several mods. Kept in <profile>/bdat-merge/ like a merged
+// table. 0 when it can't be made (the caller serves the top mod's whole copy).
+int bdat_merge_serve_whole(const char *mount, const char *key, const BdatModFiles *mods, int n, char *out,
+                           size_t cap);
 void bdat_merge_next_clear(void);
 
 // What this run's merges said about mod id, for its row in the Mods tab: "adds nothing" when it adds nothing to any

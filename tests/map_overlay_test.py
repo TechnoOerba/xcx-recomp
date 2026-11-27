@@ -37,10 +37,12 @@ def xbc1(data, name='test'):
     return b'xbc1' + struct.pack('<III', 1, len(data), len(z)) + b'\0' * 4 + name.encode().ljust(28, b'\0') + z
 
 
-def group_chunk(texture):
+def group_chunk(texture, vd=(), links=()):
     """A prop group chunk the tool and the overlay understand: base 64, stream table at base + 40 (list A: vertex
-    data 1, list B: texture `texture`), texture list at 200 (two entries: global `texture`, and 0xffff = none)."""
-    d = bytearray(256)
+    data 1, list B: texture `texture`), texture list at 200 (two entries: global `texture`, and 0xffff = none), the
+    model -> vertex data list at 224 (u32 each, words 10/11) and the links to placement chunks at 256 (32 bytes each,
+    the placement entry first; words 14/15)."""
+    d = bytearray(256 + 32 * len(links))
     struct.pack_into('<I', d, 24, 64)                       # base
     struct.pack_into('<II', d, 32, 200, 2)                  # texture list
     struct.pack_into('<I', d, 64 + 56, 40)                  # stream table, from base
@@ -49,7 +51,25 @@ def group_chunk(texture):
     struct.pack_into('<H', d, 64 + 34, texture)
     struct.pack_into('<4H', d, 200, 0xffff, 0xffff, texture, 2)
     struct.pack_into('<4H', d, 208, 0xffff, 0xffff, 0xffff, 2)
+    if vd:
+        struct.pack_into('<II', d, 40, 224, len(vd))
+        struct.pack_into('<%dI' % len(vd), d, 224, *vd)
+    if links:
+        struct.pack_into('<II', d, 56, 256, len(links))
+        for i, p in enumerate(links):
+            struct.pack_into('<I', d, 256 + 32 * i, p)
     return xbc1(bytes(d), 'group')
+
+
+def terrain_chunk(vds):
+    """A terrain set chunk as the tool reads it: groups block at 64 (word 14), its groups at +8 (36 bytes each,
+    terrain vertex data per level of detail at +24 and +28)."""
+    d = bytearray(64 + 8 + 36 * len(vds))
+    struct.pack_into('<I', d, 56, 64)
+    struct.pack_into('<II', d, 64, 8, len(vds))
+    for i, (a, b) in enumerate(vds):
+        struct.pack_into('<II', d, 64 + 8 + 36 * i + 24, a, b)
+    return xbc1(bytes(d), 'terrain')
 
 
 def tag_sec(tag, flags, payload):
@@ -204,8 +224,9 @@ class Game:
 
 
 def edited_top(game, out):
-    """The first mod, made the old way: terrain 0 repointed and its bounds moved, a texture added (all three tables
-    moved to the header's end, as the texture tool does) and prop group 1 using it, nav tile 1 replaced."""
+    """The first mod, made the old way: terrain 0 repointed and its bounds moved, a texture and a vertex data entry
+    added (the tables moved to the header's end, as the texture tool does) and prop group 1 using both (its texture
+    lists and its model -> vertex data list), nav tile 1 replaced."""
     h, da = bytearray(game.hd), bytearray(game.da)
 
     def append(blob):
@@ -224,7 +245,13 @@ def edited_top(game, out):
         new = len(h)
         h += h[o:o + 20 * n] + struct.pack('<5I', at_tex, 550, 0, 0, 32)
         struct.pack_into('<II', h, cw, n + 1, new)
-    struct.pack_into('<II', h, 416 + 64 + 52, append(group_chunk(3)), 256)
+    n, o = struct.unpack_from('<II', h, 80)   # vertex data (words 20/21): one more entry, the table moved
+    h.extend(bytes(-len(h) % 16))
+    new = len(h)
+    h += h[o:o + 8 * n] + struct.pack('<II', append(xbc1(b'our vertex data' * 30)), 450)
+    struct.pack_into('<II', h, 80, n + 1, new)
+    g1 = group_chunk(3, vd=[1, 2])
+    struct.pack_into('<II', h, 416 + 64 + 52, append(g1), 256)
     vh, vd = bytearray(game.vh), bytearray(game.vd)
     vd += bytes(-len(vd) % 64)
     at = len(vd)
@@ -244,9 +271,12 @@ add wismhd texture mine
 chunk wismhd texture +mine 0 tex.xbc1 594
 chunk wismhd texture2 +mine 0 tex.xbc1 594
 chunk wismhd texture3 +mine 0 tex.xbc1 594
+add wismhd propvd pvx
+chunk wismhd propvd +pvx 0 pv2.xbc1 640
 chunk wismhd group 0 52 g0.xbc1 256
 fix g0.xbc1 98 u16 texture +mine 3
 fix g0.xbc1 204 u16 texture +mine 3
+fix g0.xbc1 228 u32 propvd +pvx 2
 add winvhe tile far
 chunk winvhe tile +far 4 tile.bin 2048
 set winvhe tile +far 0 u32 3
@@ -324,8 +354,24 @@ class MapOverlayTest(unittest.TestCase):
         return r.stdout
 
     def setUp(self):
-        if not self.exe:
+        if not self.exe and self._testMethodName != 'test_chunk_numbers':
             self.skipTest('needs clang (MSYS2 UCRT64, or XCX_CLANG)')
+
+    def test_chunk_numbers(self):
+        # where make looks for numbers of other tables inside a chunk (needs no clang)
+        d, nums = mp.chunk_numbers('group', group_chunk(5, vd=[7, 8], links=[3, 4]))
+        self.assertEqual(sorted(nums), sorted([(204, 'texture', 2), (212, 'texture', 2), (94, 'propvd', 2),
+                                               (98, 'texture', 2), (224, 'propvd', 4), (228, 'propvd', 4),
+                                               (256, 'placement', 4), (288, 'placement', 4)]))
+        d, nums = mp.chunk_numbers('terrain', terrain_chunk([(1, 2), (3, 4)]))
+        self.assertEqual(nums, [(96, 'terrainvd', 4), (132, 'terrainvd', 4), (100, 'terrainvd', 4),
+                                (136, 'terrainvd', 4)])
+        self.assertEqual([struct.unpack_from('<I', d, at)[0] for at, _, _ in nums], [1, 3, 2, 4])
+        # lists that don't fit the chunk give nothing; other tables' chunks are not read
+        bad = bytearray(zlib.decompress(group_chunk(5, vd=[7])[48:]))
+        struct.pack_into('<I', bad, 44, 10 ** 6)
+        self.assertNotIn('propvd', [t for _, t, w in mp.chunk_numbers('group', xbc1(bytes(bad)))[1] if w == 4])
+        self.assertEqual(mp.chunk_numbers('light', group_chunk(5))[1], [])
 
     def test_no_pieces_leaves_the_map_alone(self):
         mods = self.tmp / 'none'
@@ -365,6 +411,7 @@ class MapOverlayTest(unittest.TestCase):
         self.assertIn('fix group-1-52.xbc1 204 u16 texture +n0 3', text)   # the texture list
         self.assertIn('fix group-1-52.xbc1 98 u16 texture +n0 3', text)    # stream list B (base 64 + 34)
         self.assertNotIn('65535', text)
+        self.assertIn('fix group-1-52.xbc1 228 u32 propvd +n0 2', text)   # the model -> vertex data list
         self.assertIn('bodies mapcoli/ma00a_grd bodies-ma00a_grd.bin', text)
         r = subprocess.run(tool + ['verify', str(top)] + edits, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -393,7 +440,8 @@ class MapOverlayTest(unittest.TestCase):
         (low / 'bodies-ma00a_grd.bin').write_bytes(bodies)
         (low / 'pv.xbc1').write_bytes(xbc1(b'vertex data' * 109))
         (low / 'tex.xbc1').write_bytes(xbc1(b'low texture' * 54))
-        (low / 'g0.xbc1').write_bytes(group_chunk(3))
+        (low / 'g0.xbc1').write_bytes(group_chunk(3, vd=[0, 2]))
+        (low / 'pv2.xbc1').write_bytes(xbc1(b'more vertex data' * 40))
         (low / 'tile.bin').write_bytes(b'F' * 2048)
         bad = mods / 'bad' / 'romfs' / 'map' / 'ma9990.pieces'
         bad.mkdir(parents=True)
@@ -453,7 +501,7 @@ class MapOverlayTest(unittest.TestCase):
         self.assertEqual(v['data'][shape[1]:shape[1] + 9], b'low shape')
         self.assertEqual(struct.unpack_from('<Q', v['data'], shape[1] + 16)[0], 1)   # low's own pointer field
         self.assertEqual(v['patches'][-1], [9, [shape[1] + 16]])
-        self.assertIn('line low: 7 map entries (2 added), 1 lost to higher mods; 1 collision body', out)
+        self.assertIn('line low: 8 map entries (3 added), 1 lost to higher mods; 1 collision body', out)
         self.assertIn('line top: ', out)
         self.assertIn('2 collision bodies', out)
         self.assertIn('line! whole: its whole map/mapcoli/ma00a_grd.wihkar is left out', out)
@@ -472,6 +520,7 @@ class MapOverlayTest(unittest.TestCase):
         d = zlib.decompress(g0[48:])
         self.assertEqual(struct.unpack_from('<H', d, 204)[0], 4)
         self.assertEqual(struct.unpack_from('<H', d, 98)[0], 4)
+        self.assertEqual(struct.unpack_from('<2I', d, 224), (0, 3))   # vertex data: after the game's 2 and top's 1
         # the nav cell points at the added tile (1-based: tile 3 is 4)
         vh = heads['winvhe']
         self.assertEqual(struct.unpack_from('<H', vh, 304 + 6)[0], 4)
@@ -479,7 +528,7 @@ class MapOverlayTest(unittest.TestCase):
         self.assertIn('line! bad: map pieces left out: pieces.txt line 2', out)
         self.assertIn('line! old: map pieces left out: pieces.txt line 2: made for another game version', out)
         self.assertIn('line! whole: its whole map/ma9990.wismhd is left out', out)
-        self.assertIn('line low: 7 map entries (2 added), 1 lost to higher mods', out)
+        self.assertIn('line low: 8 map entries (3 added), 1 lost to higher mods', out)
         self.assertIn('changed 0', out)
         self.assertIn('changed-after 1', out)
 

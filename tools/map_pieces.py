@@ -188,22 +188,44 @@ def blob_at(src, off, file, entry, field):
     return src.read(off, u32(entry, field + 4))
 
 
-# ---- fix-ups: numbers inside a prop group's chunk that name entries of other tables
-def group_numbers(blob):
-    """(byte offset in the unpacked chunk, table) for each u16 holding a global number: the group's texture list
-    (chunk words 8/9: offset, count; 8 bytes each, the global texture at +4) and its stream table (base = word 6,
-    table at base + base word 14: list A = prop vertex data, list B = textures)."""
-    if blob[:4] != b'xbc1' or u32(blob, 4) != 1:
+# ---- fix-ups: numbers inside a chunk that name entries of other tables
+def chunk_numbers(table, blob):
+    """(unpacked chunk, [(byte offset in it, table, width)]) for each number in a chunk of table that names an entry
+    of a header table (each checked on the game's own map: every such number is in range):
+      group    the texture list (chunk words 8/9: offset, count; 8 bytes each, the global texture at +4, u16), the
+               stream table (base = word 6, table at base + base word 14: list A = prop vertex data, list B =
+               textures, u16), the model -> vertex data list (words 10/11: offset, count; u32) and the links to
+               placement chunks (words 14/15: offset, count; 32 bytes each, the placement entry at +0, u32)
+      terrain  the groups (word 14 -> (offset, count) relative to it; 36 bytes each, terrain vertex data per level of
+               detail at +24 and +28, u32)
+    Anything outside the chunk is skipped. Only zlib xbc1 chunks (the game's kind for both) are read."""
+    if blob[:4] != b'xbc1' or u32(blob, 4) != 1 or table not in ('group', 'terrain'):
         return None, []
     d = zlib.decompress(blob[48:48 + u32(blob, 12)])
     out = []
-    wo, wc = u32(d, 32), u32(d, 36)
-    out += [(wo + 8 * i + 4, 'texture') for i in range(wc)]
-    base = u32(d, 24)
-    t = base + u32(d, base + 56)
-    a_o, a_n, b_o, b_n = struct.unpack_from('<4I', d, t)
-    out += [(base + a_o + 2 * i, 'propvd') for i in range(a_n)]
-    out += [(base + b_o + 2 * i, 'texture') for i in range(b_n)]
+
+    def run(at, n, step, field, tab, width):
+        if n and 0 <= at and at + step * n <= len(d) and field + width <= step:
+            out.extend((at + step * i + field, tab, width) for i in range(n))
+    if len(d) < 64:
+        return d, out
+    if table == 'group':
+        run(u32(d, 32), u32(d, 36), 8, 4, 'texture', 2)
+        base = u32(d, 24)
+        if base + 60 <= len(d):
+            t = base + u32(d, base + 56)
+            if t + 16 <= len(d):
+                a_o, a_n, b_o, b_n = struct.unpack_from('<4I', d, t)
+                run(base + a_o, a_n, 2, 0, 'propvd', 2)
+                run(base + b_o, b_n, 2, 0, 'texture', 2)
+        run(u32(d, 40), u32(d, 44), 4, 0, 'propvd', 4)
+        run(u32(d, 56), u32(d, 60), 32, 0, 'placement', 4)
+    else:
+        g = u32(d, 56)
+        if g + 8 <= len(d):
+            go, gc = struct.unpack_from('<II', d, g)
+            run(g + go, gc, 36, 24, 'terrainvd', 4)
+            run(g + go, gc, 36, 28, 'terrainvd', 4)
     return d, out
 
 
@@ -286,13 +308,12 @@ def make_file(f, gh, gsize, mh, src, lines, files):
                 fn = '%s-%s-%d.%s' % (name, en.lstrip('+'), r, 'xbc1' if f == 'wismhd' else 'bin')
                 files[fn] = blob
                 lines.append('chunk %s %s %s %d %s %d' % (f, name, en, r, fn, s))
-                if name == 'group':
-                    d, nums = group_numbers(blob)
-                    for at, tt in nums:
-                        v = struct.unpack_from('<H', d, at)[0]
-                        ref = names.get((tt, v))   # a number naming an added entry (0xffff = none)
-                        if ref:
-                            fixes.append('fix %s %d u16 %s %s %d' % (fn, at, tt, ref, v))
+                d, nums = chunk_numbers(name, blob)
+                for at, tt, w in nums:
+                    v = struct.unpack_from('<H' if w == 2 else '<I', d, at)[0]
+                    ref = names.get((tt, v))   # a number naming an added entry (0xffff = none)
+                    if ref:
+                        fixes.append('fix %s %d u%d %s %s %d' % (fn, at, 8 * w, tt, ref, v))
             if t['kind'] == 'cells':
                 v = struct.unpack_from('<H', e)[0]
                 ref = index_ref('tile', v, 1) if v else None

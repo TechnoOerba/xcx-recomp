@@ -34,7 +34,8 @@
 // Combining: the mods are taken in priority order (romfs-enabled.txt, the top line first). An entry of the game's
 // that two mods change belongs to the higher mod: the lower mod's lines for that entry are left out, and the Mods tab
 // and the log say so. Added entries never clash: each table's added entries are numbered after the game's, the top
-// mod's first. A mod's file holding such a number (a prop group's stream lists name vertex data and textures) has a
+// mod's first. A mod's file holding such a number (a prop group's texture, stream and model lists name textures and
+// vertex data, its placement links name placement entries, a terrain set's groups name terrain vertex data) has a
 // fix line for it, and when the number it gets differs from the recorded one, the file is served patched (an xbc1 zlib
 // chunk unpacked, patched and stored again as a zlib stream of stored blocks).
 //

@@ -135,6 +135,29 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(any('bdat-toolset' in line for line in lines))
         self.assertTrue(mod_layout.needs_confirm(p))
 
+    def test_map_pieces(self):
+        # a map mod as pieces: pieces.txt and its chunks under map/ma9990.pieces/, named as map pieces rather than as
+        # files the game lacks; the folder in any case; files deeper in the folder or in another .pieces folder are
+        # not pieces
+        g = game('bdat/common.bdat', 'map/ma9990.wismhd')
+        p = mod_layout.plan(members('island/romfs/map/ma9990.pieces/pieces.txt',
+                                    'island/romfs/Map/MA9990.pieces/terrain-1-52.xbc1',
+                                    'island/romfs/map/ma9990.pieces/old/x.bin',
+                                    'island/romfs/map/ma0101.pieces/pieces.txt'), g)
+        self.assertEqual(p.map_pieces, ['Map/MA9990.pieces/terrain-1-52.xbc1', 'map/ma9990.pieces/pieces.txt'])
+        self.assertEqual(p.new_files, ['map/ma0101.pieces/pieces.txt', 'map/ma9990.pieces/old/x.bin'])
+        en = json.loads((ROOT / 'installer' / 'text' / 'en.json').read_text(encoding='utf-8'))
+        lines = mod_layout.describe(p, lambda i, **k: en[i].format(**k))
+        self.assertTrue(any('2 of these are map pieces' in line for line in lines))
+        self.assertTrue(mod_layout.needs_confirm(p))
+        # without a romfs folder the pieces alone place the mod, as tables do
+        p = mod_layout.plan(members('island/map/ma9990.pieces/pieces.txt', 'island/map/ma9990.pieces/a.xbc1'), g)
+        self.assertEqual((p.how, p.top, p.matched, p.new_files), ('matched', 'island', 2, []))
+        # with a game that has no map header they are no evidence: an archive of only pieces is refused
+        with self.assertRaises(mod_layout.LayoutError) as e:
+            mod_layout.plan(members('island/map/ma9990.pieces/pieces.txt'), game('bdat/common.bdat'))
+        self.assertEqual(e.exception.id, 'mods.zip_no_romfs')
+
     def test_tables_only(self):
         # the Tweaks mod's options: whole tables as JSON in bdat/<file>/, no game file at all; placed by the bdat
         # file each table belongs to, the archive's names kept as they are

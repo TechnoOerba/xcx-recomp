@@ -89,6 +89,9 @@ what is in `mods/`:
 - A bdat table as bdat-toolset JSON, `bdat/<file>/<Table>.json` (how the Tweaks mod's options come), is installed
   under the archive's own name and merged into `bdat/<file>.bdat` by the game at start-up. The layout check counts
   such a table as the game's when `bdat/<file>.bdat` is a game file, so a mod of only tables is placed as surely.
+- A map mod's pieces, `map/ma9990.pieces/` (`pieces.txt` and the chunk files it names), are installed as they come
+  and put together with the game's map by the game at start-up. The layout check counts them as the game's when
+  `map/ma9990.wismhd` is a game file, so they are named as map pieces, not as files the game lacks.
 - `python -m installer.mods --dest DIR install ID --file A --file B` installs a library entry from downloaded files
   from a console, as the window does.
 - Archives: zip through Python's `zipfile`, RAR 4 and 5 through `bin/xcx-unpack` (`installer/unpack.c` over the RAR

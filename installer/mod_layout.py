@@ -27,6 +27,7 @@ TITLE_ID = '0100453019aa8000'   # Xenoblade Chronicles X: Definitive Edition (in
 KNOWN_TOP = {'bdat', 'chr', 'sound', 'movie'}
 DOC_SUFFIXES = {'.txt', '.md', '.pdf', '.rtf', '.doc', '.docx', '.htm', '.html', '.url', '.nfo', '.ini', '.json',
                 '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.mp4', '.zip', '.rar', '.7z'}
+MAP_HEADER = 'map/ma9990.wismhd'   # the game's map header, which a mod's map pieces change
 SHOWN = 12   # names a note lists before "and N more"
 
 
@@ -56,9 +57,15 @@ class Plan:
         return sorted(g for g in self.files.values() if is_table_json(g))
 
     @property
+    def map_pieces(self):
+        """Map pieces (map/ma9990.pieces/<file>, as tools/map_pieces.py writes them): installed as they come, put
+        together with the game's map when the game starts, never game files of their own."""
+        return sorted(g for g in self.files.values() if is_map_piece(g))
+
+    @property
     def new_files(self):
-        """The added files that are not JSON tables."""
-        return [g for g in self.added if not is_table_json(g)]
+        """The added files that are not JSON tables or map pieces."""
+        return [g for g in self.added if not is_table_json(g) and not is_map_piece(g)]
 
 
 def is_table_json(game_path):
@@ -67,16 +74,24 @@ def is_table_json(game_path):
     return low.startswith('bdat/') and low.endswith('.json') and low.count('/') >= 2
 
 
+def is_map_piece(game_path):
+    """A file of a mod's map pieces, map/ma9990.pieces/<file> (pieces.txt and the chunks it names), which the game puts
+    together with its own map/ma9990.* files. The folder's name is matched in any case, as the game finds it."""
+    parts = game_path.lower().split('/')
+    return len(parts) == 3 and parts[0] == 'map' and parts[1] == 'ma9990.pieces' and parts[2] != ''
+
+
 def table_target(game_path):
     """The bdat file a JSON table belongs to: 'bdat/us/common_ms/X.json' -> 'bdat/us/common_ms.bdat'."""
     return game_path.rsplit('/', 1)[0] + '.bdat'
 
 
 def in_game(game_path, game):
-    """Whether a path is a game file, or a JSON table of one."""
+    """Whether a path is a game file, a JSON table of one, or a map piece of the game's map."""
     if not game:
         return False
-    return game_path in game or is_table_json(game_path) and table_target(game_path) in game
+    return (game_path in game or is_table_json(game_path) and table_target(game_path) in game
+            or is_map_piece(game_path) and MAP_HEADER in game)
 
 
 def is_title_id(name):
@@ -262,6 +277,8 @@ def describe(p, cat):
         lines.append(cat('layout.added', files=names(p.new_files)))
     if p.tables:
         lines.append(cat('layout.bdat_json', count=len(p.tables)))
+    if p.map_pieces:
+        lines.append(cat('layout.map_pieces', count=len(p.map_pieces)))
     for reason in ('exefs', 'doc', 'outside'):
         left = [name for name, why in p.left_out if why == reason]
         if left:
@@ -272,4 +289,4 @@ def describe(p, cat):
 def needs_confirm(p):
     """Whether the player should see the plan before anything is written: anything but a plain romfs archive whose
     files are all the game's."""
-    return p.how not in ('romfs', 'loader') or bool(p.new_files) or bool(p.tables) or any(why == 'outside' for _, why in p.left_out)
+    return p.how not in ('romfs', 'loader') or bool(p.new_files) or bool(p.tables) or bool(p.map_pieces) or any(why == 'outside' for _, why in p.left_out)

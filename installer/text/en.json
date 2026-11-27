@@ -297,5 +297,6 @@
  "mods.parts_pick": "Pick the parts to download:",
  "mods.manual_pick_many": "Choose the downloaded files...",
  "layout.bdat_json": "{count} of these are bdat tables as JSON (the format of bdat-toolset): the game merges them into its bdat files when it starts, so they apply at the next start.",
+ "layout.map_pieces": "{count} of these are map pieces (map/ma9990.pieces/): the game puts them together with its own map when it starts, so they apply at the next start.",
  "mods.overlap_note": "{name} and {others} are both on; one contains the other. That is fine: where both set the same value the game takes it once."
 }

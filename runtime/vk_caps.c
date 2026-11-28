@@ -6,7 +6,8 @@
 //   - minStorageBufferOffsetAlignment above 4 (XCX_VK_SSBO_ALIGN=<power of two> raises it): the translator computes
 //     storage offsets from the guest address rounded down to that alignment (Ryujinx's unaligned storage path), and
 //     vk_exec_draw.c ssbo_info binds the rounded-down address, so shader writes reach guest memory instead of a copy.
-//   - no graphics pipeline library with fast linking (XCX_GPL=0 forces it; the default on AMD's RDNA 1/2 driver):
+//   - no graphics pipeline library with fast linking (XCX_GPL=0 forces it; the default on AMD's RDNA 1/2 driver and on
+//     the Steam Deck under RADV):
 //     vk_caps.gpl = 0, the extension stays disabled, and pipelines are built whole.
 //   - no 32-lane pin (no subgroupSizeControl, 32 outside min..max, or XCX_VK_SUBGROUP_PIN=0): stages run at the
 //     device's subgroupSize (SPIR-V 1.3 without a required size) and the translator is told that size.
@@ -44,18 +45,22 @@ void vk_caps_driver(VkPhysicalDevice p) {
     // AMD split RDNA 1 and 2 off into a driver branch of their own; its driverInfo reads
     // "26.10.1 (AMD proprietary shader compiler)" where the RDNA 3 and 4 driver names LLPC.
     vk_caps.amd_sc = drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY && strstr(drv.driverInfo, "shader compiler");
+    // RADV names the Steam Deck's GPU "AMD Custom GPU 0405/0932 (RADV VANGOGH)", the LCD and OLED models alike
+    vk_caps.deck = drv.driverID == VK_DRIVER_ID_MESA_RADV && strstr(p2.properties.deviceName, "VANGOGH");
 }
 
 // XCX_GPL=0/1 forces graphics pipeline libraries off or on. Default off on AMD's RDNA 1/2 driver branch: every boot
 // that lost the device there had a cold pipeline cache and draws waiting on fast-linked pipelines, and a run with GPL
 // off booted (TotK Recomp issue #5); Savage Wind Recomp turns GPL off on RDNA 4 under RADV for a GPU hang at the title
-// screen.
+// screen. Default off on the Steam Deck (RADV, Van Gogh) too: measured there (2026-11-27) a fast-linked first frame in
+// a new area took the GPU 0.7-2.3 s where whole pipelines took a steady 1.05 s, and steady play ran 2-4% faster
+// without GPL, with the same hitches.
 int vk_caps_gpl(const VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *f,
                 const VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *p) {
     gpl_lib = f->graphicsPipelineLibrary;
     gpl_fast = p->graphicsPipelineLibraryFastLinking;
     const char *e = cfg_get("XCX_GPL");   // no fixed default: it depends on the driver, see above
-    vk_caps.gpl = gpl_lib && gpl_fast && (e && *e ? strcmp(e, "0") != 0 : !vk_caps.amd_sc);
+    vk_caps.gpl = gpl_lib && gpl_fast && (e && *e ? strcmp(e, "0") != 0 : !vk_caps.amd_sc && !vk_caps.deck);
     return vk_caps.gpl;
 }
 
@@ -141,7 +146,8 @@ void vk_caps_init(VkCtx *c) {
     const char *ge = cfg_get("XCX_GPL");
     rt_log("vk caps: gpl %s fast-link %s (graphicsPipelineLibrary %u%s)", vk_caps.gpl ? "yes" : "no",
            gpl_fast ? "yes" : "no", (unsigned)gpl_lib,
-           !gpl_lib || !gpl_fast || vk_caps.gpl ? "" : ge && *ge ? ", off by XCX_GPL=0" : ", off on AMD's RDNA 1/2 driver");
+           !gpl_lib || !gpl_fast || vk_caps.gpl ? "" : ge && *ge ? ", off by XCX_GPL=0"
+           : vk_caps.deck ? ", off on the Steam Deck (RADV)" : ", off on AMD's RDNA 1/2 driver");
     rt_log("vk caps: fallbacks: float64 %s, storage buffers %s %u, subgroup pin %u on stages %#x, translator subgroup vs/fs/cs %u/%u/%u",
            vk_caps.float64 ? "native" : "softfloat64", vk_caps.sbuf_align ? "rounded down to" : "exact, alignment",
            (unsigned)l->minStorageBufferOffsetAlignment, want, (unsigned)vk_caps.sg_pin_stages, told[0], told[1], told[2]);

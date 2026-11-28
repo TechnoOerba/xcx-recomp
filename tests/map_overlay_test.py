@@ -112,9 +112,9 @@ def coli_types():
 
 
 # the made-up collision: a root (item 1) pointing at the body array (item 2: two 32-byte bodies, each pointing at its
-# shape, item 3, and the name "ground", item 4), the shape after the array
+# shape, item 3, and the name "ground", item 4), the shape after the array, and an empty array (item 5) at the end
 COLI_ITEMS = [(0, 0, 0), (2 | 0x10 << 24, 0, 1), (5 | 0x20 << 24, 16, 2), (7 | 0x10 << 24, 80, 1),
-              (8 | 0x20 << 24, 112, 6)]
+              (8 | 0x20 << 24, 112, 6), (5 | 0x20 << 24, 128, 0)]
 COLI_PATCHES = [(2, [0]), (5, [16, 48]), (8, [24, 56])]
 COLI_ENTRIES = [(b'IDM\0' + b'm' * 36, 64), (b'IDV\0' + b'v' * 124, 128)]
 
@@ -314,14 +314,53 @@ EDGES = [
      "pieces.txt line 4: entry number 305 doesn't fit in 1 bytes"),
     ('newer', "xcx-map-pieces 2\n", {}, 'pieces.txt line 1: map pieces of a newer format (version 2)'),
 ]
-# Collision: mods left out whole for one reason (each with a copy of low's bodies file, b.bin, unless it brings its own)
+def bodies_edit(data, edit):
+    """A bodies file read, changed by edit(piece) and written again (a hand-made file, for the checks)."""
+    p = mp.read_bodies('b.bin', data)
+    edit(p)
+    return mp.bodies_bytes(p)
+
+
+def unaligned(p):
+    t, r, o, v = p['ptrs'][0]
+    p['ptrs'][0] = (t, r, o + 4, v)
+
+
+def unlisted(p):   # top's pointer field in its changed body 1 (its shape) moved to a float the game doesn't patch;
+    # the shape field itself names a game item again, so only the patch lists can tell
+    p['ptrs'] = [(t, r, o + 16 if r == 2 else o, v) for t, r, o, v in p['ptrs']]
+    i, rec = p['over'][1]
+    p['over'][1] = (i, struct.pack('<Q', 3) + rec[8:])
+
+
+def wild(p):   # low's changed body 1 naming item 99 (the file has 6) in a field the game's patch list holds
+    i, rec = p['over'][0]
+    p['over'][0] = (i, rec[:8] + struct.pack('<Q', 99) + rec[16:])
+
+
+# Collision: mods left out whole for one reason (each with a copy of low's bodies file, b.bin, unless it brings its own:
+# bytes, or a function of low's and top's bodies files)
 COLI_MADE = "xcx-map-pieces 1\nmade-from mapcoli/ma00a_grd {cn} {ch:016x}\n"
+COLI_BODIES = COLI_MADE + "bodies mapcoli/ma00a_grd b.bin {bn}\n"
 COLI_EDGES = [
     ('coli-old', "xcx-map-pieces 1\nmade-from mapcoli/ma00a_grd {cn} 0123456789abcdef\nbodies mapcoli/ma00a_grd b.bin {bn}\n",
      None, "made for another game version (its mapcoli/ma00a_grd differs from this game's)"),
     ('coli-size', COLI_MADE + "bodies mapcoli/ma00a_grd b.bin 7\n", None, "pieces.txt line 3: b.bin is not the line's size"),
-    ('coli-magic', COLI_MADE + "bodies mapcoli/ma00a_grd b.bin 40\n", b'XCXA' + bytes(36),
-     'b.bin: not a collision bodies file (XCXB version 2)'),
+    ('coli-magic', COLI_BODIES, b'XCXA' + bytes(36), 'b.bin: not a collision bodies file'),
+    ('coli-v1', COLI_BODIES, lambda lo, top: lo[:4] + struct.pack('<I', 1) + lo[8:],
+     'b.bin: made by an older tools/map_pieces.py (bodies version 1); make it again'),
+    ('coli-made2', COLI_MADE + COLI_BODIES[COLI_BODIES.index('made-from'):], None,
+     'pieces.txt line 3: a second made-from line for mapcoli/ma00a_grd'),
+    ('coli-unaligned', COLI_BODIES, lambda lo, top: bodies_edit(lo, unaligned),
+     'b.bin: an item or pointer outside its bodies'),
+    ('coli-twice', COLI_BODIES, lambda lo, top: bodies_edit(lo, lambda p: p.update(over=p['over'] * 2)),
+     'b.bin: it changes a game body of mapcoli/ma00a_grd twice'),
+    ('coli-unlisted', COLI_BODIES, lambda lo, top: bodies_edit(top, unlisted),
+     "b.bin: a pointer field of a changed mapcoli/ma00a_grd body isn't the game's"),
+    ('coli-wild', COLI_BODIES, lambda lo, top: bodies_edit(lo, wild),
+     "b.bin: a pointer field of a changed mapcoli/ma00a_grd body isn't the game's"),
+    ('coli-empty', COLI_BODIES, lambda lo, top: bodies_edit(lo, lambda p: p.update(array=5, over=[])),
+     "b.bin: its bodies don't fit this game's mapcoli/ma00a_grd"),
     ('coli-none', "xcx-map-pieces 1\nmade-from mapcoli/ma09a_grd 1 0123456789abcdef\nbodies mapcoli/ma09a_grd b.bin {bn}\n",
      None, 'this game has no map/mapcoli/ma09a_grd.wihkar it can read'),
 ]
@@ -477,12 +516,16 @@ class MapOverlayTest(unittest.TestCase):
                 (d / fn).write_bytes(xbc1(b'x' * 300))
             edges.append(d)
         cn, ch = len(g.coli), mp.xxh64(g.coli)
+        top_bodies = (top / 'bodies-ma00a_grd.bin').read_bytes()
         for name, text, own, _ in COLI_EDGES:
             d = mods / name / 'romfs' / 'map' / 'ma9990.pieces'
             d.mkdir(parents=True)
-            (d / 'pieces.txt').write_text(text.format(cn=cn, ch=ch, bn=len(bodies)))
-            (d / 'b.bin').write_bytes(own if own is not None else bodies)
+            data = own(bodies, top_bodies) if callable(own) else own if own is not None else bodies
+            (d / 'pieces.txt').write_text(text.format(cn=cn, ch=ch, bn=len(data)))
+            (d / 'b.bin').write_bytes(data)
             edges.append(d)
+        (top.parent / 'mapcoli').mkdir()   # top ships its whole file beside its pieces, for builds without them
+        (top.parent / 'mapcoli' / 'ma00a_grd.wihkar').write_bytes(g.coli)
         whole = mods / 'whole' / 'romfs' / 'map'
         (whole / 'mapcoli').mkdir(parents=True)
         (whole / 'ma9990.wismhd').write_bytes(g.hd)
@@ -496,7 +539,7 @@ class MapOverlayTest(unittest.TestCase):
         self.assertIn('other 0', out)
         self.assertIn('claims-coli 1 0', out)   # ma00a_grd served, ma02a_grd (no bodies for it) not claimed
         # the reference gets every enabled mod with pieces, in the same order, and must leave out the same ones
-        heads, layout, report, gsize, built = mp.combine(str(g.dir), [str(top), str(bad), str(low), str(old)] +
+        heads, layout, report, gsize, built, _ = mp.combine(str(g.dir), [str(top), str(bad), str(low), str(old)] +
                                                          [str(e) for e in edges])
         out_ref = sorted(r.split(':')[0] for r in report if 'map pieces left out' in r)
         self.assertEqual(out_ref, sorted(['bad', 'old'] + names), report)
@@ -511,21 +554,23 @@ class MapOverlayTest(unittest.TestCase):
         served = self.tmp / 'out'
         # collision: the game's two bodies, then top's two, then low's; every byte as the tool builds it
         self.assertEqual((served / 'ma00a_grd.wihkar').read_bytes(), built['ma00a_grd'][0])
-        self.assertEqual(built['ma00a_grd'][1:], (3, 2))
+        self.assertEqual(built['ma00a_grd'][1:], (3, 2, 2))
         v = mp.coli_view(built['ma00a_grd'][0])
         self.assertEqual(v['items'][2][2], 5)
         bodies_at = v['items'][2][1]
         firsts = [struct.unpack_from('<Q', v['data'], bodies_at + 32 * i)[0] for i in range(5)]
-        self.assertEqual(firsts, [3, 6, 5, 6, 7])   # body 1 points at top's second shape; top's two, low's one
+        self.assertEqual(firsts, [3, 7, 6, 7, 8])   # body 1 points at top's second shape; top's two, low's one
         xs = [struct.unpack_from('<f', v['data'], bodies_at + 32 * i + 16)[0] for i in range(5)]
         self.assertEqual(xs[:2], [500.0, 2.0])      # top moved body 0; low's move of body 1 is left out
-        shape = v['items'][7]
+        shape = v['items'][8]
         self.assertEqual(v['data'][shape[1]:shape[1] + 9], b'low shape')
         self.assertEqual(struct.unpack_from('<Q', v['data'], shape[1] + 16)[0], 1)   # low's own pointer field
         self.assertEqual(v['patches'][-1], [9, [shape[1] + 16]])
         self.assertIn('line low: 8 map entries (3 added), 1 lost to higher mods; 1 collision body', out)
         self.assertIn('2 collision bodies, 2 game collision bodies changed', out)
         self.assertIn('line! whole: its whole map/mapcoli/ma00a_grd.wihkar is left out', out)
+        self.assertIn('line top: its whole map/mapcoli/ma00a_grd.wihkar is for builds without map pieces; its pieces '
+                      'are used', out)
         self.assertNotIn('ma02a_grd', out)
         for f in ('wismhd', 'winvhe'):
             self.assertEqual((served / ('ma9990.' + f)).read_bytes(), heads[f], f)
@@ -552,6 +597,43 @@ class MapOverlayTest(unittest.TestCase):
         self.assertIn('line low: 8 map entries (3 added), 1 lost to higher mods', out)
         self.assertIn('changed 0', out)
         self.assertIn('changed-after 1', out)
+
+
+    def test_collision_only_and_a_mod_left_out_later(self):
+        # first: collision bodies for the scene root's array, and a map line this game can't take (plan leaves it
+        # out); second: collision only, bodies for the body array. Only used mods decide the body array, so second
+        # is used once first is out, and the map stays the game's (no used mod changes it).
+        g = self.game
+        mods = self.tmp / 'later'
+        cn, ch = len(g.coli), mp.xxh64(g.coli)
+
+        def piece(array, esize):
+            return mp.bodies_bytes({'array': array, 'esize': esize, 'count': 1, 'recs': b'R' * esize, 'over': [],
+                                    'items': [], 'ptrs': [], 'tail': b''})
+        made = 'xcx-map-pieces 1\nmade-from mapcoli/ma00a_grd %d %016x\n' % (cn, ch)
+        dirs = []
+        for name, extra, data in (
+                ('first', 'made-from wismhd %d %016x\nset wismhd terrain 9 0 u32 5\n' % (len(g.hd), mp.xxh64(g.hd)),
+                 piece(1, 16)),
+                ('second', '', piece(2, 32))):
+            d = mods / name / 'romfs' / 'map' / 'ma9990.pieces'
+            d.mkdir(parents=True)
+            (d / 'b.bin').write_bytes(data)
+            (d / 'pieces.txt').write_text(made + extra + 'bodies mapcoli/ma00a_grd b.bin %d\n' % len(data))
+            dirs.append(str(d))
+        (mods / 'romfs-enabled.txt').write_text('first\nsecond\n')
+        out = self.run_check(mods, self.tmp / 'later-out')
+        heads, layout, report, gsize, built, map_on = mp.combine(str(g.dir), dirs)
+        why = "first: map pieces left out: pieces.txt line 4: no such entry in this game's terrain"
+        self.assertEqual([r for r in report if 'left out' in r], [why], report)
+        self.assertIn('line! ' + why, out)
+        self.assertNotIn('another body array', out)
+        self.assertFalse(map_on)
+        self.assertIn('claims 0', out)          # the map is the game's
+        self.assertIn('claims-coli 1 0', out)   # the collision file is served, built as the tool builds it
+        self.assertEqual((self.tmp / 'later-out' / 'ma00a_grd.wihkar').read_bytes(), built['ma00a_grd'][0])
+        self.assertEqual(built['ma00a_grd'][1:], (1, 0, 1))
+        self.assertIn('line second: 0 map entries (0 added), 0 lost to higher mods; 1 collision body', out)
 
 
 if __name__ == '__main__':

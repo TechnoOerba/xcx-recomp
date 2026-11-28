@@ -9,9 +9,10 @@ header table and entry, with the data those entries point at as files of their o
   python tools/map_pieces.py make OUT --game GAME [--map HD SRC] [--nav HD SRC] [--coli WIHKAR]...
       OUT: the mod's pieces folder (<mod>/romfs/map/ma9990.pieces). GAME: a folder with the game's own ma9990.wismhd,
       .wismda, .winvhe and .winvda (unpacked; map__ma9990.* names work too), and for --coli the game's collision files
-      (<name>.wihkar or map__mapcoli__<name>.wihkar). HD: the edited header; SRC: the edited data file, or a folder of
-      chunk-<offset>.xbc1 / .bin files holding everything past the game's end. WIHKAR: an edited collision file
-      (map/mapcoli/<name>.wihkar) that adds bodies to the game's: its bodies become a bodies-<name>.bin piece.
+      (<name>.wihkar, map__mapcoli__<name>.wihkar or mapcoli/<name>.wihkar, in any case). HD: the edited header; SRC:
+      the edited data file, or a folder of chunk-<offset>.xbc1 / .bin files holding everything past the game's end.
+      WIHKAR: an edited collision file (map/mapcoli/<name>.wihkar) that adds bodies to the game's or changes the game's
+      own: they become a bodies-<name>.bin piece.
   python tools/map_pieces.py verify OUT --game GAME [--map HD SRC] [--nav HD SRC] [--coli WIHKAR]...
       builds the header from the game's and the pieces (as the game will), and checks every entry against the edited
       header and every piece's bytes against the edited data, and each collision file built from the game's and the
@@ -347,8 +348,8 @@ def cmd_make(a):
         try:
             piece = coli_split(game, readb(path))
         except Unsplittable as e:
-            sys.exit('%s: %s; ship this collision file whole (it loads while no enabled mod adds bodies to it as '
-                     'pieces)' % (path, e))
+            sys.exit('%s: %s; ship this collision file whole (a whole copy loads when no enabled mod adds or changes '
+                     'bodies in it as pieces)' % (path, e))
         fn = 'bodies-%s.bin' % name
         files[fn] = bodies_bytes(piece)
         lines.append('made-from mapcoli/%s %d %016x' % (name, len(game), xxh64(game)))
@@ -372,14 +373,15 @@ def cmd_make(a):
                                                         sum(len(b) for b in files.values())))
 
 
-# ---- collision: a region's map/mapcoli/<name>.wihkar ('1RAS' archive around a Havok tagfile), as bodies a mod adds
+# ---- collision: a region's map/mapcoli/<name>.wihkar ('1RAS' archive around a Havok tagfile), as the bodies a mod
+# adds and the game bodies it changes
 MAX_COLI = 8
 MAX_COLI_FILE = 256 << 20
 COLI_CHARS = set('abcdefghijklmnopqrstuvwxyz0123456789_')
 
 
 class Unsplittable(Exception):
-    """A mod's collision file changes more than adding bodies: it can't be pieces."""
+    """A mod's collision file changes more than adding bodies and changing game bodies: it can't be pieces."""
 
 
 def _sec(b, o, end, tag):
@@ -623,13 +625,17 @@ def read_bodies(name, data):
     """A bodies file read and checked as runtime/map_overlay.c coli_bodies does; Left otherwise."""
     if len(data) > MAX_COLI_FILE:
         raise Left("%s is too big or can't be read" % name)
-    if len(data) < COLI_HEAD or data[:4] != b'XCXB' or u32(data, 4) != 2:
-        raise Left('%s: not a collision bodies file (XCXB version 2)' % name)
+    if len(data) < COLI_HEAD or data[:4] != b'XCXB':
+        raise Left('%s: not a collision bodies file' % name)
+    if u32(data, 4) < 2:
+        raise Left('%s: made by an older tools/map_pieces.py (bodies version %d); make it again' % (name, u32(data, 4)))
+    if u32(data, 4) > 2:
+        raise Left('%s: a newer bodies format (version %d); this build reads version 2' % (name, u32(data, 4)))
     array, esize, count, ni, nptr, tail, nover = struct.unpack_from('<7I', data, 8)
     recs = esize * count
     if COLI_HEAD + recs + nover * (4 + esize) + 16 * ni + 16 * nptr + tail != len(data):
         raise Left("%s: its counts don't add up to its length" % name)
-    if not esize or not (count or nover) or esize % 8 or esize > 4096:
+    if not esize or not (count or nover) or esize % 16 or esize > 4096:
         raise Left('%s: its element size or count is out of range' % name)
     at = COLI_HEAD + recs
     idx = list(struct.unpack_from('<%dI' % nover, data, at))
@@ -638,8 +644,8 @@ def read_bodies(name, data):
     items = [struct.unpack_from('<4I', data, at + 16 * k) for k in range(ni)]
     ptrs = [struct.unpack_from('<4I', data, at + 16 * ni + 16 * k) for k in range(nptr)]
     size = (recs, tail, esize * nover)
-    if len(set(idx)) != nover or any(r > 1 or o > size[r] for _, r, o, _ in items) or \
-            any(r > 2 or o + 8 > size[r] or (v >> 31 and v & 0x7fffffff >= ni) for _, r, o, v in ptrs):
+    if any(r > 1 or o > size[r] for _, r, o, _ in items) or \
+            any(r > 2 or o % 8 or o + 8 > size[r] or (v >> 31 and v & 0x7fffffff >= ni) for _, r, o, v in ptrs):
         raise Left('%s: an item or pointer outside its bodies' % name)
     return {'array': array, 'esize': esize, 'count': count, 'recs': data[COLI_HEAD:COLI_HEAD + recs],
             'over': list(zip(idx, orecs)), 'items': items, 'ptrs': ptrs, 'tail': data[at + 16 * ni + 16 * nptr:]}
@@ -722,9 +728,9 @@ def coli_build(game, pieces):
 
 def game_coli(game, name):
     """The game's copy of map/mapcoli/<name>.wihkar in the --game folder, or None."""
-    for rel in ('%s.wihkar' % name, 'map__mapcoli__%s.wihkar' % name, os.path.join('mapcoli', '%s.wihkar' % name)):
-        p = os.path.join(game, rel)
-        if os.path.isfile(p):
+    for rel in ('%s.wihkar' % name, 'map__mapcoli__%s.wihkar' % name, 'mapcoli/%s.wihkar' % name):
+        p = find_ci(game, rel)
+        if p and os.path.isfile(p):
             return readb(p)
     return None
 
@@ -839,7 +845,9 @@ def parse(folder, game_hash):
             if u is None:
                 bad('collision file %s: a name of [a-z0-9_], and at most %d files' % (tok[1][:48], MAX_COLI))
             if number(tok[2]) is None or len(tok[3]) != 16 or any(c not in '0123456789abcdefABCDEF' for c in tok[3]):
-                bad('made-from <hd> <size> <xxh64>')
+                bad('made-from mapcoli/<name> <size> <xxh64>')
+            if u['made']:
+                bad('a second made-from line for %s' % tok[1][:48])
             u['made'] = (number(tok[2]), int(tok[3], 16))
         elif tok[0] == 'bodies':
             u = coli_use(tok[1]) if len(tok) == 4 else None
@@ -1098,82 +1106,89 @@ def combine(game, mods):
         except Left as e:
             report.append('%s: map pieces left out: %s' % (mod_id(m), e.args[0]))
     mods = used
-    # collision: the game's copy of each file the mods add bodies to, then each mod's bodies checked against it
-    colis = {}
+    colis = {}   # name -> the game's copy and its parts, read when a used mod first names it
 
-    def drop(k, why):
+    def game_copy(name):
+        if name not in colis:
+            raw = game_coli(game, name)
+            view = coli_view(raw) if raw is not None else None
+            colis[name] = {'game': raw, 'view': view, 'hash': xxh64(raw) if view else None,
+                           'fields': {(o, ti) for ti, pl in view['patches'] for o in pl} if view else set()}
+        return colis[name]
+
+    def coli_check():
+        """runtime/map_overlay.c coli_check: each mod's bodies against the game's copy, given the mods above it;
+        Left(k, why) for the first to leave out."""
+        first, names = {}, []
+        for k in range(len(mods)):
+            for name in bodies[k]:
+                if name not in names:
+                    names.append(name)
+            if len(names) > MAX_COLI:
+                raise Left(k, 'more than %d collision files in all' % MAX_COLI)
+            for name, b in bodies[k].items():
+                c, fn = game_copy(name), b['file']
+                if c['view'] is None:
+                    raise Left(k, 'this game has no map/mapcoli/%s.wihkar it can read' % name)
+                if b['made'] != (len(c['game']), c['hash']):
+                    raise Left(k, "made for another game version (its mapcoli/%s differs from this game's)" % name)
+                gi, es = c['view']['items'], b['esize']
+                fits = 0 < b['array'] < len(gi) and gi[b['array']][2] > 0 and \
+                    gi[b['array']][1] + es * gi[b['array']][2] <= len(c['view']['data']) and \
+                    all(v >> 31 or v < len(gi) for _, _, _, v in b['ptrs']) and \
+                    all(i < gi[b['array']][2] for i, _ in b['over'])
+                if not fits:
+                    raise Left(k, "%s: its bodies don't fit this game's mapcoli/%s" % (fn, name))
+                if b['over']:
+                    # each game body changed once; a changed body's pointer fields are the game's: a region 2 field is
+                    # in the game's patch list of its type at its place, and the others hold a game item's number
+                    boff, idx = gi[b['array']][1], [i for i, _ in b['over']]
+                    mine = {o for _, r, o, _ in b['ptrs'] if r == 2}
+                    wrong = any((boff + es * idx[o // es] + o % es, ti) not in c['fields']
+                                for ti, r, o, _ in b['ptrs'] if r == 2)
+                    if len(set(idx)) != len(idx):
+                        raise Left(k, '%s: it changes a game body of mapcoli/%s twice' % (fn, name))
+                    for j, (i, rec) in enumerate(b['over']):
+                        lo = boff + es * i
+                        for o, _ in c['fields']:
+                            if lo <= o < lo + es and es * j + o - lo not in mine and \
+                                    struct.unpack_from('<Q', rec, o - lo)[0] >= len(gi):
+                                wrong = True
+                    if wrong:
+                        raise Left(k, "%s: a pointer field of a changed mapcoli/%s body isn't the game's" % (fn, name))
+                f = first.get(name)
+                if f and (b['array'], es) != (f[1], f[2]):
+                    raise Left(k, "%s: its bodies are for another body array than %s's" % (fn, f[0]))
+            for name, b in bodies[k].items():
+                first.setdefault(name, (mod_id(mods[k]), b['array'], b['esize']))
+            for name in bodies[k]:   # the file as built with this mod's bodies and those of the mods above
+                who = [j for j in range(k + 1) if name in bodies[j]]
+                if len(coli_build(colis[name]['game'], [bodies[j][name] for j in who])[0]) > MAX_COLI_FILE:
+                    raise Left(k, 'its collision bodies would make mapcoli/%s too big' % name)
+    while True:   # each attempt: the higher of the mods the two checks refuse is left out (plan's reason for a tie)
+        lost, refused = [], []
+        for check in (coli_check, lambda: plan(gh, gsize, mods, parsed, lost)):
+            try:
+                got = check()
+            except Left as e:
+                refused.append(e.args)
+        if not refused:
+            count, extra, idx, owner, placed, blobs = got
+            break
+        k, why = min(refused, key=lambda kw: (kw[0], -refused.index(kw)))
         report.append('%s: map pieces left out: %s' % (mod_id(mods[k]), why))
         del mods[k], parsed[k], bodies[k]
-    k = 0
-    while k < len(mods):
-        why = None
-        for name in bodies[k]:
-            if name in colis:
-                continue
-            if len(colis) == MAX_COLI:
-                why = 'more than %d collision files in all' % MAX_COLI
-                break
-            raw = game_coli(game, name)
-            colis[name] = {'game': raw, 'bad': raw is None or coli_view(raw) is None, 'first': None, 'grow': 0}
-            if not colis[name]['bad']:
-                colis[name].update(view=coli_view(raw), hash=xxh64(raw))
-        if why:
-            drop(k, why)
-        else:
-            k += 1
-    k = 0
-    while k < len(mods):
-        why, add = None, {}
-        for name, b in bodies[k].items():
-            c, fn = colis[name], b['file']
-            if c['bad']:
-                why = 'this game has no map/mapcoli/%s.wihkar it can read' % name
-                break
-            if b['made'] != (len(c['game']), c['hash']):
-                why = "made for another game version (its mapcoli/%s differs from this game's)" % name
-                break
-            gi = c['view']['items']
-            fits = 0 < b['array'] < len(gi) and gi[b['array']][1] + b['esize'] * gi[b['array']][2] <= \
-                len(c['view']['data']) and all(v >> 31 or v < len(gi) for _, _, _, v in b['ptrs']) and \
-                all(i < gi[b['array']][2] for i, _ in b['over'])
-            if not fits:
-                why = "%s: its bodies don't fit this game's mapcoli/%s" % (fn, name)
-                break
-            if c['first'] and (b['array'], b['esize']) != (c['array'], c['esize']):
-                why = "%s: its bodies are for another body array than %s's" % (fn, c['first'])
-                break
-            add[name] = len(b['recs']) + len(b['tail']) + 16 + 12 * len(b['items']) + 4 * len(b['ptrs']) + 8
-            if len(c['game']) + c['grow'] + add[name] + 4096 > MAX_COLI_FILE:
-                why = 'its collision bodies would make mapcoli/%s too big' % name
-                break
-        if why:
-            drop(k, why)
-            continue
-        for name, b in bodies[k].items():
-            c = colis[name]
-            if not c['first']:
-                c.update(first=mod_id(mods[k]), array=b['array'], esize=b['esize'])
-            c['grow'] += add[name]
-        k += 1
-    while True:
-        lost = []
-        try:
-            count, extra, idx, owner, placed, blobs = plan(gh, gsize, mods, parsed, lost)
-            break
-        except Left as e:
-            k, why = e.args
-            report.append('%s: map pieces left out: %s' % (mod_id(mods[k]), why))
-            del mods[k], parsed[k], bodies[k]
     report += lost
-    built = {}   # name -> (file, bodies, mods), each collision file a kept mod adds bodies to or changes
+    built = {}   # name -> (file, bodies added, game bodies changed, mods), each file a kept mod adds to or changes
     for name, c in colis.items():
         who = [k for k, b in enumerate(bodies) if name in b]
-        if who and not c['bad']:
+        if who:
             data, lost_c = coli_build(c['game'], [bodies[k][name] for k in who])
             for j, i, o in lost_c:
                 report.append("%s: mapcoli/%s body %d is %s's (a higher mod); %s's change to it is left out" % (
                     mod_id(mods[who[j]]), name, i, mod_id(mods[who[o]]), mod_id(mods[who[j]])))
-            built[name] = (data, sum(bodies[k][name]['count'] for k in who), len(who))
+            built[name] = (data, sum(bodies[k][name]['count'] for k in who),
+                           len({i for k in who for i, _ in bodies[k][name]['over']}), len(who))
     heads, off = {}, {n: (count[n] or (0, 0))[1] for n in T}
     for f in FILES:
         h = bytearray(gh[f])
@@ -1214,7 +1229,8 @@ def combine(game, mods):
     for (k, f, fn), p in sorted(placed.items(), key=lambda kv: kv[1]):
         blob, patched = blobs[(k, f, fn)]
         layout[f].append((p, len(blob), mods[k], fn, blob, patched))
-    return {f: bytes(h) for f, h in heads.items()}, layout, report, gsize, built
+    map_on = any(adds or any(op[0] in ('set', 'chunk', 'fix') for op in ops) for ops, adds, _ in parsed)
+    return {f: bytes(h) for f, h in heads.items()}, layout, report, gsize, built, map_on
 
 
 def patch(blob, fixes):
@@ -1242,7 +1258,7 @@ def patch(blob, fixes):
 
 
 def cmd_verify(a):
-    heads, layout, report, gsize, built = combine(a.game, [a.out])
+    heads, layout, report, gsize, built, _ = combine(a.game, [a.out])
     bad = 0
     for f, opt in (('wismhd', a.map), ('winvhe', a.nav)):
         if not opt:
@@ -1286,7 +1302,8 @@ def cmd_verify(a):
             print('FAIL mapcoli/%s: built from the game and the bodies, it is not %s' % (name, path))
             bad += 1
         else:
-            print('mapcoli/%s: built %d bytes, xxh64 %016x; %d bodies' % (name, len(got[0]), xxh64(got[0]), got[1]))
+            print('mapcoli/%s: built %d bytes, xxh64 %016x; %d bodies added, %d changed' % (
+                name, len(got[0]), xxh64(got[0]), got[1], got[2]))
     for r in report:
         print(r)
     if bad:
@@ -1295,20 +1312,19 @@ def cmd_verify(a):
 
 
 def cmd_combine(a):
-    heads, layout, report, gsize, built = combine(a.game, a.mods)
+    heads, layout, report, gsize, built, map_on = combine(a.game, a.mods)
     for r in report:
         print(r)
-    for f in FILES:
+    for f in FILES if map_on else ():   # (collision only: the map stays the game's, as the game logs it)
         for p, n, m, fn, blob, patched in layout[f]:
             if patched:
                 print('%s: %s served with its numbers fixed (%d bytes, xxh64 %016x)' % (mod_id(m), fn, n,
                                                                                          xxh64(blob)))
         print('%s: %d bytes, xxh64 %016x; data %d + %d bytes in %d pieces' % (
             f, len(heads[f]), xxh64(heads[f]), gsize[f], sum(n for _, n, *_ in layout[f]), len(layout[f])))
-    for name, (data, n, k) in built.items():
-        print('mapcoli/%s: %d bytes, xxh64 %016x; %d bod%s from %d mod%s' % (name, len(data), xxh64(data), n,
-                                                                            'y' if n == 1 else 'ies', k,
-                                                                            '' if k == 1 else 's'))
+    for name, (data, n, ch, k) in built.items():
+        print('mapcoli/%s: %d bytes, xxh64 %016x; %d bod%s added, %d changed, from %d mod%s' % (
+            name, len(data), xxh64(data), n, 'y' if n == 1 else 'ies', ch, k, '' if k == 1 else 's'))
     if a.out:
         os.makedirs(a.out, exist_ok=True)
         for f in FILES:
@@ -1317,7 +1333,7 @@ def cmd_combine(a):
             with open(os.path.join(a.out, '%s.layout.txt' % DATA[f]), 'w', newline='\n') as w:
                 for p, n, m, fn, _, _ in layout[f]:
                     w.write('%d %d %s/%s\n' % (p, n, m, fn))
-        for name, (data, _, _) in built.items():
+        for name, (data, *_) in built.items():
             with open(os.path.join(a.out, '%s.wihkar' % name), 'wb') as w:
                 w.write(data)
 

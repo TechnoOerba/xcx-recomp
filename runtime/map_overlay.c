@@ -41,8 +41,9 @@
 //
 // Serving: the header from memory; the data file as the game's bytes (read from the archive in place) up to the
 // game's end, then each mod file the kept chunk lines name, 4 KB aligned, read from the mod's file (kept open, in a
-// way that still lets the mod be updated or removed: plat_file_open_shared) or from memory when patched. The overlay is built at the first ask for any map file and kept for the run: the game holds
-// header offsets, so pieces that change while it runs apply at the next start (map_overlay_changed).
+// way that still lets the mod be updated or removed: plat_file_open_shared) or from memory when patched. The overlay
+// is built at the first ask for any map or collision file and kept for the run: the game holds header offsets, so
+// pieces that change while it runs apply at the next start (map_overlay_changed).
 //
 // Adding: a table that grows is copied whole to the end of the header with its new entries and its count and offset
 // words repointed (the game's copy stays in place, unused). The three texture tables grow together: an add to
@@ -50,21 +51,24 @@
 //
 // Collision: a region's collision is map/mapcoli/<name>.wihkar, a '1RAS' archive whose first entry is a Havok
 // tagfile (sections SDKV, DATA, TYPE, INDX: the data as a memory image, its items (type, offset, count) and patch
-// lists (the data offsets of pointer fields, which hold item numbers)). A mod that adds land adds static bodies: its
-// pieces name them with
+// lists (the data offsets of pointer fields, which hold item numbers)). A mod that adds land adds static bodies, and
+// one that reshapes land changes the game's; its pieces name them with
 //   made-from mapcoli/<name> <size> <xxh64>                the game's collision file they were made against
-//   bodies mapcoli/<name> <file> <size>                    the bodies the mod adds to it
+//   bodies mapcoli/<name> <file> <size>                    the bodies the mod adds to it or changes in it
 // <file> (written by tools/map_pieces.py from the mod's whole collision file): 'XCXB', 2, then u32s: the body array's
 // item, its element size, the added bodies' count, the new items' count, the pointer fields' count, the tail's size,
 // the changed game bodies' count; then the added body records, the changed game bodies' numbers and their records,
-// the new items (type | flags << 24, region, offset, count), the pointer fields (patch type, region, offset, item:
-// bit 31 set for one of the file's new items), and the tail (the bodies' shapes, which link inside themselves only).
-// Region 0 is the added records, 1 the tail, 2 the changed game bodies' records. A changed game body (moved, turned,
-// pointed at a new shape, or moved out of the world to take it away) replaces the game's record whole; two mods that
-// change one belong to the higher one, like map entries. The file is built in memory at the first ask for it:
-// the body array grows by every used mod's bodies, top mod first, and each mod's tail goes to the end of the data.
-// Bodies never clash, so a mod keeps all of them; a collision file no used mod adds bodies to isn't claimed (a mod's
-// whole copy of it loads as before).
+// the new items (type | flags << 24, region 0 or 1, offset, count), the pointer fields (patch type, region, offset,
+// item: bit 31 set for one of the file's new items), and the tail (the bodies' shapes, whose pointer fields name game
+// items or the file's new items). Region 0 is the added records, 1 the tail, 2 the changed game bodies' records (a
+// pointer field there is one the game's patch lists already hold). A changed game body (moved, turned, pointed at a new
+// shape, or moved out of the world to take it away) replaces the game's record whole; two mods that change one belong
+// to the higher one, like map entries. The file is built in memory with the map, at the first ask for any map or
+// collision file: the body array grows by every used mod's bodies, top mod first, and each mod's tail goes to the end
+// of the data. Added bodies never clash, so a mod keeps all of them; a collision file no used mod adds bodies to or
+// changes bodies in isn't claimed (a mod's whole copy of it loads as before). The type numbers of a file's items and
+// pointer fields are taken as written (tools/map_pieces.py takes them from the mod's file, whose type table must be the
+// game's); the checks cover sizes, offsets, item numbers and the game's patch lists.
 //
 // Known and not known: every chunk pointer of the game's map header (16,101 of them) lies in one of the tables below,
 // found by checking each (offset, size) pair against the data file's chunks. What the tables named by their header
@@ -324,7 +328,8 @@ typedef struct {
     uint64_t mem_n;
     uint64_t placed[NFILE];           // offset + 1 in each data file (0: not placed)
 } Piece;
-// A collision file a mod adds bodies to (see "Collision"): its lines and its bodies file, read whole by check_files.
+// A collision file a mod adds bodies to or changes bodies in (see "Collision"): its lines and its bodies file, read
+// whole by check_files.
 typedef struct {
     char name[COLI_NAME];             // map/mapcoli/<name>.wihkar
     uint8_t made, has;                // a made-from line; a bodies line
@@ -364,7 +369,7 @@ typedef struct {
     uint64_t hd_hash;
 } Served;
 
-// A collision file the used mods add bodies to: the game's copy (where its parts are) and the one served.
+// A collision file a mod adds bodies to or changes: the game's copy (where its parts are) and the one served.
 typedef struct {
     char name[COLI_NAME];
     uint8_t *game;
@@ -373,12 +378,13 @@ typedef struct {
     uint32_t nent, ent_off[64], ent_size[64];   // the 1RAS archive's entries; entry 0 is the tagfile
     uint32_t top_flags, data_flags, indx_flags, item_flags, ptch_flags;
     uint64_t sdkv_at, sdkv_n, data_at, data_n, type_at, type_n, item_at, item_n, ptch_at, ptch_n;   // in game
+    uint64_t *fields;                 // the game's pointer fields, offset << 32 | patch type, in order
+    uint64_t nfields;
     uint32_t array, esize;            // the body array (an item) and its element size, as the first mod says
     char first[65];                   // that mod
-    uint64_t grow;                    // what the kept mods add, for the size limit
     uint8_t *out;
     uint64_t out_n, out_hash;
-    int bodies, mods;
+    int bodies, changed, mods;        // added bodies, changed game bodies, mods in it
 } Coli;
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
@@ -614,7 +620,8 @@ static int parse(Mod *m, char *text, const uint64_t *gn, const uint64_t *gh_hash
             uint64_t size, h;
             ColiUse *u = coli_use(m, tok[1]);
             if (!u) BAD("collision file %.48s: a name of [a-z0-9_], and at most %d files", tok[1], MAX_COLI);
-            if (!number(tok[2], &size) || !hex64(tok[3], &h)) BAD("made-from <hd> <size> <xxh64>");
+            if (!number(tok[2], &size) || !hex64(tok[3], &h)) BAD("made-from mapcoli/<name> <size> <xxh64>");
+            if (u->made) BAD("a second made-from line for %.48s", tok[1]);
             u->made = 1;
             u->made_size = size;
             u->made_hash = h;
@@ -751,8 +758,18 @@ static int coli_bodies(Mod *m, ColiUse *u, const Piece *x) {
         return 0;
     }
     const uint8_t *r = u->raw;
-    if (x->len < COLI_HEAD || memcmp(r, "XCXB", 4) || rd32(r + 4) != 2) {
-        snprintf(m->why, sizeof m->why, "%s: not a collision bodies file (XCXB version 2)", x->name);
+    if (x->len < COLI_HEAD || memcmp(r, "XCXB", 4)) {
+        snprintf(m->why, sizeof m->why, "%s: not a collision bodies file", x->name);
+        return 0;
+    }
+    if (rd32(r + 4) != 2) {
+        if (rd32(r + 4) < 2)
+            snprintf(m->why, sizeof m->why,
+                     "%s: made by an older tools/map_pieces.py (bodies version %u); make it again", x->name,
+                     rd32(r + 4));
+        else
+            snprintf(m->why, sizeof m->why, "%s: a newer bodies format (version %u); this build reads version 2",
+                     x->name, rd32(r + 4));
         return 0;
     }
     u->array = rd32(r + 8);
@@ -767,7 +784,8 @@ static int coli_bodies(Mod *m, ColiUse *u, const Piece *x) {
         snprintf(m->why, sizeof m->why, "%s: its counts don't add up to its length", x->name);
         return 0;
     }
-    if (!u->esize || !(u->count || u->nover) || u->esize % 8 || u->esize > 4096) {
+    // a multiple of 16, so the game's data after the body array keeps its alignment when the array grows
+    if (!u->esize || !(u->count || u->nover) || u->esize % 16 || u->esize > 4096) {
         snprintf(m->why, sizeof m->why, "%s: its element size or count is out of range", x->name);
         return 0;
     }
@@ -777,9 +795,7 @@ static int coli_bodies(Mod *m, ColiUse *u, const Piece *x) {
     u->items = u->over_recs + orecs;
     u->ptrs = u->items + 16ull * u->nitems;
     u->tailp = u->ptrs + 16ull * u->nptrs;
-    int bad = 0;
-    for (uint32_t k = 0; k < u->nover && !bad; k++)      // each game body changed once
-        for (uint32_t j = 0; j < k && !bad; j++) bad = rd32(u->over_idx + 4ull * j) == rd32(u->over_idx + 4ull * k);
+    int bad = 0;   // (each game body changed once: coli_check, against the game's body count)
     for (uint32_t k = 0; k < u->nitems && !bad; k++) {   // type | flags << 24, region (0 bodies, 1 tail), offset, count
         const uint8_t *e = u->items + 16ull * k;
         bad = rd32(e + 4) > 1 || rd32(e + 8) > (rd32(e + 4) ? u->tail : recs);
@@ -788,7 +804,8 @@ static int coli_bodies(Mod *m, ColiUse *u, const Piece *x) {
         const uint8_t *e = u->ptrs + 16ull * k;
         uint32_t target = rd32(e + 12);
         uint32_t region = rd32(e + 4);   // 0 the added bodies, 1 the tail, 2 the changed game bodies
-        bad = region > 2 || rd32(e + 8) + 8ull > (region == 2 ? orecs : region ? u->tail : recs) ||
+        // 8-aligned, so a field in region 2 stays inside its record (esize is a multiple of 16)
+        bad = region > 2 || rd32(e + 8) % 8 || rd32(e + 8) + 8ull > (region == 2 ? orecs : region ? u->tail : recs) ||
               (target >> 31 && (target & 0x7fffffffu) >= u->nitems);
     }
     if (bad) {
@@ -1122,12 +1139,23 @@ static void served_free(void) {
     }
 }
 
-// Builds the served headers and data layouts from the game's headers gh and the parsed mods (top first). 0 on a
-// failure that leaves the overlay off (out of memory), with a line saying so.
+static int coli_check(void);
+
+// Builds the served headers and data layouts from the game's headers gh and the parsed mods (top first). Each attempt
+// checks the mods' collision bodies (coli_check) and plans the map; each names the first mod it refuses, given the mods
+// above it, and the higher of the two is left out (plan's reason when both name it) before the next attempt, so a mod
+// left out never decides anything for the mods below it. 0 on a failure that leaves the overlay off (out of memory),
+// with a line saying so.
 static int combine(uint8_t *const *gh, const uint64_t *gn, const uint64_t *game_da) {
     Plan pl;
     int base = nlines, r;
-    while ((r = plan(gh, gn, game_da, &pl)) >= 0) {
+    for (;;) {
+        int a = coli_check(), b = a == PLAN_NOMEM ? PLAN_NOMEM : plan(gh, gn, game_da, &pl);
+        if (b == PLAN_NOMEM || (a < 0 && b < 0)) {
+            r = b;
+            break;
+        }
+        r = a < 0 ? b : b < 0 ? a : a < b ? a : b;
         lines_back_to(base);   // the attempt's lines go; the mod left out is said, and the next attempt speaks
         mods[r].used = 0;
         mod_release(&mods[r]);
@@ -1213,7 +1241,9 @@ static int combine(uint8_t *const *gh, const uint64_t *gn, const uint64_t *game_
 }
 
 // ---- collision (see "Collision" at the top)
-static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static uint32_t be32(const uint8_t *p) {
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
 
 // A tagfile section at o of b (n bytes): its tag, whole size (header included) and flags; 0 when it doesn't fit.
 static int section(const uint8_t *b, uint64_t n, uint64_t o, const char *tag, uint64_t *size, uint32_t *flags) {
@@ -1277,80 +1307,150 @@ static Coli *coli_named(const char *name) {
     return NULL;
 }
 
-// The game's copy of every collision file the used mods add bodies to, then each mod's bodies checked against it in
-// priority order; a mod whose bodies don't fit is left out (all its pieces) with a line saying why.
-static void coli_prepare(const uint8_t *arh, uint64_t an) {
-    for (int i = 0; i < nmods; i++) {
-        Mod *m = &mods[i];
-        char why[240] = "";
-        for (int u = 0; m->used && u < m->ncoli && !why[0]; u++) {
-            if (!m->coli[u].has || coli_named(m->coli[u].name)) continue;
-            if (ncolis == MAX_COLI) {
-                snprintf(why, sizeof why, "more than %d collision files in all", MAX_COLI);
-                break;
-            }
-            Coli *c = &colis[ncolis++];
-            memset(c, 0, sizeof *c);
-            snprintf(c->name, sizeof c->name, "%s", m->coli[u].name);
-            char key[80];
-            snprintf(key, sizeof key, "map/mapcoli/%s.wihkar", c->name);
-            c->game = archive_file(arh, an, key, MAX_COLI_FILE, &c->game_n);
-            c->bad = !c->game || !coli_view(c);
-            if (!c->bad) c->game_hash = xxh64(c->game, (size_t)c->game_n);
-        }
-        if (why[0]) {
-            m->used = 0;
-            mod_release(m);
-            say(1, "%s: map pieces left out: %s", m->id, why);
-        }
+static int u64_order(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+// The index of the first of c's pointer fields (offset << 32 | patch type, in order) at or after key.
+static uint64_t field_at(const Coli *c, uint64_t key) {
+    uint64_t lo = 0, hi = c->nfields;
+    while (lo < hi) {
+        uint64_t mid = lo + (hi - lo) / 2;
+        if (c->fields[mid] < key) lo = mid + 1;
+        else hi = mid;
     }
+    return lo;
+}
+
+static const uint8_t *coli_arh;   // the game's archive header while build() runs
+static uint64_t coli_an;
+
+// The game's copy of collision file c (its name set), its parts and its pointer fields in order; c->bad when the game
+// has none this file reads. 0 when out of memory.
+static int coli_load(Coli *c) {
+    char key[80];
+    snprintf(key, sizeof key, "map/mapcoli/%s.wihkar", c->name);
+    c->game = archive_file(coli_arh, coli_an, key, MAX_COLI_FILE, &c->game_n);
+    c->bad = !c->game || !coli_view(c);
+    if (c->bad) return 1;
+    c->game_hash = xxh64(c->game, (size_t)c->game_n);
+    const uint8_t *pt = c->game + c->ptch_at;
+    for (uint64_t p = 0; p + 8 <= c->ptch_n; p += 8 + 4ull * rd32(pt + p + 4)) c->nfields += rd32(pt + p + 4);
+    if (!(c->fields = malloc(8 * (c->nfields ? c->nfields : 1)))) return 0;
+    uint64_t n = 0;
+    for (uint64_t p = 0; p + 8 <= c->ptch_n; p += 8 + 4ull * rd32(pt + p + 4))
+        for (uint32_t j = 0; j < rd32(pt + p + 4); j++)
+            c->fields[n++] = (uint64_t)rd32(pt + p + 8 + 4ull * j) << 32 | rd32(pt + p);
+    qsort(c->fields, n, 8, u64_order);
+    return 1;
+}
+
+// Whether a used mod up to lim (in priority order) adds bodies to or changes bodies in collision file name.
+static int coli_named_by(int lim, const char *name) {
+    for (int i = 0; i <= lim; i++)
+        for (int k = 0; mods[i].used && k < mods[i].ncoli; k++)
+            if (mods[i].coli[k].has && !strcmp(mods[i].coli[k].name, name)) return 1;
+    return 0;
+}
+
+// A slot for collision file name, for mod i: a new one, or one no used mod up to i names; NULL when each of the
+// MAX_COLI slots is a file a used mod up to i names.
+static Coli *coli_slot(int i, const char *name) {
+    Coli *c = ncolis < MAX_COLI ? &colis[ncolis++] : NULL;
+    for (int s = 0; !c && s < ncolis; s++)
+        if (!coli_named_by(i, colis[s].name)) c = &colis[s];
+    if (!c) return NULL;
+    free(c->game);
+    free(c->fields);
+    memset(c, 0, sizeof *c);
+    snprintf(c->name, sizeof c->name, "%s", name);
+    return c;
+}
+
+static int coli_build(Coli *c, int lim, uint64_t *size);
+
+// Each used mod's collision bodies checked against the game's copy of every file it names, in priority order, given
+// the used mods above it: PLAN_OK, PLAN_NOMEM, or the index of the first mod to leave out (its why set). combine
+// calls it at each attempt, so the body array, the file count and the size limit are judged by used mods only.
+static int coli_check(void) {
+#define WHY(...)                                      \
+    do {                                              \
+        snprintf(m->why, sizeof m->why, __VA_ARGS__); \
+        return i;                                     \
+    } while (0)
+    for (int c = 0; c < ncolis; c++) colis[c].first[0] = 0;
     for (int i = 0; i < nmods; i++) {
         Mod *m = &mods[i];
         if (!m->used) continue;
-        char why[240] = "";
-        uint64_t add[MAX_COLI] = {0};
-        for (int k = 0; k < m->ncoli && !why[0]; k++) {
+        for (int k = 0; k < m->ncoli; k++) {
+            if (!m->coli[k].has || coli_named(m->coli[k].name)) continue;
+            Coli *c = coli_slot(i, m->coli[k].name);
+            if (!c) WHY("more than %d collision files in all", MAX_COLI);
+            if (!coli_load(c)) return PLAN_NOMEM;
+        }
+        for (int k = 0; k < m->ncoli; k++) {
             const ColiUse *u = &m->coli[k];
             if (!u->has) continue;
             Coli *c = coli_named(u->name);
             const char *file = m->paths[u->path].name;
-            if (c->bad) {
-                snprintf(why, sizeof why, "this game has no map/mapcoli/%s.wihkar it can read", u->name);
-                break;
-            }
-            if (u->made_size != c->game_n || u->made_hash != c->game_hash) {
-                snprintf(why, sizeof why, "made for another game version (its mapcoli/%s differs from this game's)",
-                         u->name);
-                break;
-            }
+            if (c->bad) WHY("this game has no map/mapcoli/%s.wihkar it can read", u->name);
+            if (u->made_size != c->game_n || u->made_hash != c->game_hash)
+                WHY("made for another game version (its mapcoli/%s differs from this game's)", u->name);
             uint32_t ng = (uint32_t)(c->item_n / 12);
-            const uint8_t *it = c->game + c->item_at + 12ull * u->array;
-            int fits = u->array && u->array < ng &&
-                       (uint64_t)rd32(it + 4) + (uint64_t)u->esize * rd32(it + 8) <= c->data_n;
+            int fits = u->array && u->array < ng;
+            const uint8_t *it = fits ? c->game + c->item_at + 12ull * u->array : NULL;
+            uint64_t boff = fits ? rd32(it + 4) : 0, bcnt = fits ? rd32(it + 8) : 0;
+            // an array of the game's bodies: at least one (an empty one would sit where the added records go, and
+            // the items after it couldn't be told apart from it)
+            fits = fits && bcnt && boff + (uint64_t)u->esize * bcnt <= c->data_n;
             for (uint32_t p = 0; p < u->nptrs && fits; p++) {
                 uint32_t target = rd32(u->ptrs + 16ull * p + 12);
                 fits = target >> 31 || target < ng;
             }
-            for (uint32_t k = 0; k < u->nover && fits; k++) fits = rd32(u->over_idx + 4ull * k) < rd32(it + 8);
-            if (!fits) {
-                snprintf(why, sizeof why, "%s: its bodies don't fit this game's mapcoli/%s", file, u->name);
-                break;
+            for (uint32_t j = 0; j < u->nover && fits; j++) fits = rd32(u->over_idx + 4ull * j) < bcnt;
+            if (!fits) WHY("%s: its bodies don't fit this game's mapcoli/%s", file, u->name);
+            if (u->nover) {
+                // each game body changed once, and a changed body's pointer fields are the game's: a region 2 field
+                // is in the game's patch list of its type at its place, and the others hold a game item's number
+                uint8_t *seen = calloc(bcnt, 1);
+                uint64_t *mine = malloc(8ull * (u->nptrs ? u->nptrs : 1)), nm = 0;
+                if (!seen || !mine) {
+                    free(seen);
+                    free(mine);
+                    return PLAN_NOMEM;
+                }
+                int twice = 0, wrong = 0;
+                for (uint32_t j = 0; j < u->nover && !twice; j++) {
+                    uint32_t b = rd32(u->over_idx + 4ull * j);
+                    twice = seen[b];
+                    seen[b] = 1;
+                }
+                for (uint32_t p = 0; p < u->nptrs && !wrong; p++) {
+                    const uint8_t *e = u->ptrs + 16ull * p;
+                    if (rd32(e + 4) != 2) continue;
+                    uint32_t off = rd32(e + 8), b = rd32(u->over_idx + 4ull * (off / u->esize));
+                    uint64_t key = (boff + (uint64_t)u->esize * b + off % u->esize) << 32 | rd32(e);
+                    uint64_t f = field_at(c, key);
+                    wrong = f == c->nfields || c->fields[f] != key;
+                    mine[nm++] = off;
+                }
+                qsort(mine, nm, 8, u64_order);
+                for (uint32_t j = 0; j < u->nover && !wrong && !twice; j++) {
+                    uint64_t lo = boff + (uint64_t)u->esize * rd32(u->over_idx + 4ull * j);
+                    for (uint64_t f = field_at(c, lo << 32); f < c->nfields && (c->fields[f] >> 32) < lo + u->esize &&
+                                                             !wrong; f++) {
+                        uint64_t off = (uint64_t)u->esize * j + ((c->fields[f] >> 32) - lo);
+                        if (!bsearch(&off, mine, nm, 8, u64_order)) wrong = rd64(u->over_recs + off) >= ng;
+                    }
+                }
+                free(seen);
+                free(mine);
+                if (twice) WHY("%s: it changes a game body of mapcoli/%s twice", file, u->name);
+                if (wrong) WHY("%s: a pointer field of a changed mapcoli/%s body isn't the game's", file, u->name);
             }
-            if (c->first[0] && (u->array != c->array || u->esize != c->esize)) {
-                snprintf(why, sizeof why, "%s: its bodies are for another body array than %s's", file, c->first);
-                break;
-            }
-            add[c - colis] = (uint64_t)u->esize * u->count + u->tail + 16 + 12ull * u->nitems + 4ull * u->nptrs + 8;
-            if (c->game_n + c->grow + add[c - colis] + 4096 > MAX_COLI_FILE) {
-                snprintf(why, sizeof why, "its collision bodies would make mapcoli/%s too big", u->name);
-                break;
-            }
-        }
-        if (why[0]) {
-            m->used = 0;
-            mod_release(m);
-            say(1, "%s: map pieces left out: %s", m->id, why);
-            continue;
+            if (c->first[0] && (u->array != c->array || u->esize != c->esize))
+                WHY("%s: its bodies are for another body array than %s's", file, c->first);
         }
         for (int k = 0; k < m->ncoli; k++) {
             if (!m->coli[k].has) continue;
@@ -1360,9 +1460,16 @@ static void coli_prepare(const uint8_t *arh, uint64_t an) {
                 c->array = m->coli[k].array;
                 c->esize = m->coli[k].esize;
             }
-            c->grow += add[c - colis];
+        }
+        for (int k = 0; k < m->ncoli; k++) {   // the file as built with this mod's bodies and those of the mods above
+            uint64_t size;
+            if (!m->coli[k].has) continue;
+            if (!coli_build(coli_named(m->coli[k].name), i, &size)) return PLAN_NOMEM;
+            if (size > MAX_COLI_FILE) WHY("its collision bodies would make mapcoli/%s too big", m->coli[k].name);
         }
     }
+    return PLAN_OK;
+#undef WHY
 }
 
 typedef struct { uint32_t ti, n, cap; uint32_t *off; } PList;
@@ -1385,15 +1492,16 @@ static uint8_t *put_section(uint8_t *w, const char *tag, uint32_t flags, uint64_
 // Collision file c built from the game's copy and the used mods' bodies, top mod first: the body array grows in place
 // by every mod's bodies, the game's data after it moves along (its items and pointer fields follow), each mod's tail
 // goes to the end of the data (16-aligned), its items after the game's, and its pointer fields are set to the item
-// numbers they now have and added to the tagfile's patch lists. The other archive entries are kept as they are. 0 when
-// out of memory.
-static int coli_build(Coli *c) {
+// numbers they now have and added to the tagfile's patch lists. The other archive entries are kept as they are. Only
+// the used mods up to lim (in priority order) are in. With size set, nothing is built: *size is the file's size (for
+// coli_check's limit). 0 when out of memory.
+static int coli_build(Coli *c, int lim, uint64_t *size) {
     const uint8_t *g = c->game;
     uint32_t ng = (uint32_t)(c->item_n / 12);
     const uint8_t *gi = g + c->item_at;
     uint64_t boff = rd32(gi + 12ull * c->array + 4), ins = boff + (uint64_t)c->esize * rd32(gi + 12ull * c->array + 8);
     uint64_t delta = 0, nitems = ng, added = 0;
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1402,7 +1510,7 @@ static int coli_build(Coli *c) {
             nitems += u->nitems;
         }
     uint64_t dn = c->data_n + delta;   // the data: the game's with the bodies inside, then each mod's tail
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (u->has && !strcmp(u->name, c->name)) dn = align16(dn) + u->tail;
@@ -1421,7 +1529,7 @@ static int coli_build(Coli *c) {
         nl++;
         p += 8 + 4ull * cnt;
     }
-    for (int i = 0; ok && i < nmods; i++)   // room for each list's new offsets
+    for (int i = 0; ok && i <= lim; i++)   // room for each list's new offsets
         for (int k = 0; ok && mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1446,25 +1554,28 @@ static int coli_build(Coli *c) {
     uint64_t total = c->ent_off[0] + align128(tag);
     for (uint32_t e = 1; e < c->nent; e++) total += align128(c->ent_size[e]);
     total = (total + 2047) & ~2047ull;
-    uint8_t *out = ok && total <= MAX_COLI_FILE ? calloc(1, total) : NULL;
-    uint8_t *data = out ? malloc(dn) : NULL, *items = out ? malloc(12 * nitems) : NULL;
+    if (size || !ok || total > MAX_COLI_FILE) {   // measured only (coli_check has judged the size before a build)
+        for (int l = 0; l < nl; l++) free(pl[l].off);
+        free(pl);
+        if (size) *size = total;
+        return ok && size;
+    }
+    uint8_t *out = calloc(1, total);
     uint32_t bcnt = rd32(gi + 12ull * c->array + 8);
     int16_t *own = out ? calloc(bcnt ? bcnt : 1, sizeof *own) : NULL;   // a changed game body's mod + 1
-    if (!out || !data || !items || !own) {
+    if (!out || !own) {
         for (int l = 0; l < nl; l++) free(pl[l].off);
         free(pl);
         free(out);
-        free(data);
-        free(items);
         free(own);
         return 0;
     }
-    // the data
-    memset(data, 0, dn);
+    // the data and the items, written where they go in the file (zero where nothing is written)
+    uint8_t *data = out + c->ent_off[0] + 8 + c->sdkv_n + 8, *items = data + dn + c->type_n + 8 + 8;
     memcpy(data, g + c->data_at, ins);
     uint64_t w = ins;
     uint64_t rec_at[MAP_MODS_MAX], tail_at[MAP_MODS_MAX], first_new[MAP_MODS_MAX];
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1474,7 +1585,7 @@ static int coli_build(Coli *c) {
         }
     memcpy(data + w, g + c->data_at + ins, c->data_n - ins);
     w += c->data_n - ins;
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1486,10 +1597,11 @@ static int coli_build(Coli *c) {
     // the items: the game's, moved past the insertion; the body array longer; then each mod's
     memcpy(items, gi, 12ull * ng);
     for (uint32_t k = 1; k < ng; k++)
-        if (rd32(items + 12ull * k + 4) >= ins) wr32(items + 12ull * k + 4, (uint32_t)(rd32(items + 12ull * k + 4) + delta));
+        if (rd32(items + 12ull * k + 4) >= ins)
+            wr32(items + 12ull * k + 4, (uint32_t)(rd32(items + 12ull * k + 4) + delta));
     wr32(items + 12ull * c->array + 8, (uint32_t)(rd32(items + 12ull * c->array + 8) + added));
     uint64_t ni = ng;
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1502,7 +1614,7 @@ static int coli_build(Coli *c) {
             }
         }
     // the changed game bodies: each the top mod's; a lower mod's change to one is left out, and a line says so
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1529,7 +1641,7 @@ static int coli_build(Coli *c) {
         }
         p += 8 + 4ull * cnt;
     }
-    for (int i = 0; i < nmods; i++)
+    for (int i = 0; i <= lim; i++)
         for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) {
             const ColiUse *u = &mods[i].coli[k];
             if (!u->has || strcmp(u->name, c->name)) continue;
@@ -1556,14 +1668,12 @@ static int coli_build(Coli *c) {
     memcpy(q, g + c->sdkv_at, c->sdkv_n);
     q += c->sdkv_n;
     q = put_section(q, "DATA", c->data_flags, 8 + dn);
-    memcpy(q, data, dn);
-    q += dn;
+    q += dn;   // (data, written above)
     memcpy(q, g + c->type_at, c->type_n);
     q += c->type_n;
     q = put_section(q, "INDX", c->indx_flags, 8 + 8 + 12 * nitems + 8 + ptch);
     q = put_section(q, "ITEM", c->item_flags, 8 + 12 * nitems);
-    memcpy(q, items, 12 * nitems);
-    q += 12 * nitems;
+    q += 12 * nitems;   // (items, written above)
     q = put_section(q, "PTCH", c->ptch_flags, 8 + ptch);
     for (int l = 0; l < nl; l++) {
         qsort(pl[l].off, pl[l].n, 4, u32_order);
@@ -1574,9 +1684,6 @@ static int coli_build(Coli *c) {
         free(pl[l].off);
     }
     free(pl);
-    free(data);
-    free(items);
-    free(own);
     uint64_t pos = c->ent_off[0];
     wr32(out + 160, (uint32_t)pos);
     wr32(out + 164, (uint32_t)align128(tag));
@@ -1592,14 +1699,19 @@ static int coli_build(Coli *c) {
     c->out_n = total;
     c->out_hash = xxh64(out, (size_t)total);
     c->bodies = (int)added;
-    for (int i = 0; i < nmods; i++)
-        for (int k = 0; mods[i].used && k < mods[i].ncoli; k++) c->mods += mods[i].coli[k].has && !strcmp(mods[i].coli[k].name, c->name);
+    c->changed = 0;
+    for (uint32_t b = 0; b < bcnt; b++) c->changed += own[b] != 0;
+    free(own);
+    for (int i = 0; i <= lim; i++)
+        for (int k = 0; mods[i].used && k < mods[i].ncoli; k++)
+            c->mods += mods[i].coli[k].has && !strcmp(mods[i].coli[k].name, c->name);
     return 1;
 }
 
 static void coli_free(void) {
     for (int c = 0; c < ncolis; c++) {
         free(colis[c].game);
+        free(colis[c].fields);
         free(colis[c].out);
     }
     memset(colis, 0, sizeof colis);
@@ -1626,7 +1738,11 @@ static void build(void) {
         if (!plat_file_stat(path, &m->pieces_size, &m->pieces_time)) continue;
         nmods++;
     }
-    if (!nmods) return;
+    if (!nmods) {   // enabled mods, none with map pieces: nothing kept
+        free(mods);
+        mods = NULL;
+        return;
+    }
     uint64_t an = 0;
     uint8_t *arh = rom_read_all("sts.arh", &an);
     uint8_t *gh[NFILE] = {0};
@@ -1670,9 +1786,19 @@ static void build(void) {
         }
         used += m->used;
     }
-    if (used) coli_prepare(arh, an);
-    free(arh);
+    coli_arh = arh;   // coli_check reads the game's collision files from it
+    coli_an = an;
     int on = used && combine(gh, gn, da);
+    coli_arh = NULL;
+    free(arh);
+    for (int c = 0; on && c < ncolis; c++) {   // each collision file a used mod adds bodies to or changes
+        if (!coli_named_by(nmods - 1, colis[c].name)) continue;
+        if (!coli_build(&colis[c], nmods - 1, NULL)) {   // (its size was checked): out of memory, so all off, as when
+            served_free();                                // the map can't be put together; no mod is half in
+            say(1, "out of memory putting mapcoli/%s together; map pieces off", colis[c].name);
+            on = 0;
+        }
+    }
     if (on) {
         map_on = 0;   // the map files are served only when a used mod changes the map
         for (int i = 0; i < nmods; i++) map_on |= mods[i].used && (mods[i].nops || mods[i].nadds);
@@ -1680,14 +1806,6 @@ static void build(void) {
             served_free();
             if (ard_h) romfs_close(ard_h);
             ard_h = 0;
-        }
-        for (int c = 0; c < ncolis; c++) {   // and each collision file a used mod adds bodies to
-            int any = 0;
-            for (int i = 0; i < nmods; i++)
-                for (int k = 0; mods[i].used && k < mods[i].ncoli; k++)
-                    any |= mods[i].coli[k].has && !strcmp(mods[i].coli[k].name, colis[c].name);
-            if (any && !colis[c].bad && !coli_build(&colis[c]))
-                say(1, "out of memory putting mapcoli/%s together; its collision bodies are left out", colis[c].name);
         }
         int served_any = map_on;
         for (int c = 0; c < ncolis; c++) served_any |= colis[c].out != NULL;
@@ -1723,9 +1841,10 @@ static void build(void) {
                        served[f].nseg, served[f].nseg == 1 ? "" : "s");
         for (int c = 0; c < ncolis; c++)
             if (colis[c].out)
-                rt_log("map pieces: mapcoli/%s %llu bytes (xxh64 %016llx); %d bod%s from %d mod%s", colis[c].name,
-                       (unsigned long long)colis[c].out_n, (unsigned long long)colis[c].out_hash, colis[c].bodies,
-                       colis[c].bodies == 1 ? "y" : "ies", colis[c].mods, colis[c].mods == 1 ? "" : "s");
+                rt_log("map pieces: mapcoli/%s %llu bytes (xxh64 %016llx); %d bod%s added, %d changed, from %d mod%s",
+                       colis[c].name, (unsigned long long)colis[c].out_n, (unsigned long long)colis[c].out_hash,
+                       colis[c].bodies, colis[c].bodies == 1 ? "y" : "ies", colis[c].changed, colis[c].mods,
+                       colis[c].mods == 1 ? "" : "s");
         // a mod's whole copy of a file served from pieces is not used beside them
         for (int i = 0; i < n; i++)
             for (int f = 0; f < 2 * NFILE + ncolis; f++) {
@@ -1736,14 +1855,27 @@ static void build(void) {
                 else snprintf(key, sizeof key, "map/mapcoli/%s.wihkar", colis[f - 2 * NFILE].name);
                 char rel[96];
                 snprintf(rel, sizeof rel, "romfs/%s", key);
-                if ((size_t)snprintf(base, sizeof base, "%s/%s", root, ids[i]) < sizeof base &&
-                    find_ci(base, rel, path, sizeof path) && plat_fs_kind(path) == PLAT_FS_FILE)
+                if ((size_t)snprintf(base, sizeof base, "%s/%s", root, ids[i]) >= sizeof base ||
+                    !find_ci(base, rel, path, sizeof path) || plat_fs_kind(path) != PLAT_FS_FILE)
+                    continue;
+                int own = 0;   // the mod's own pieces of that file are used: the copy is for builds without pieces
+                for (int j = 0; j < nmods && !own; j++) {
+                    const Mod *m = &mods[j];
+                    if (!m->used || strcmp(m->id, ids[i])) continue;
+                    if (f < 2 * NFILE) own = m->nops || m->nadds;
+                    for (int k = 0; f >= 2 * NFILE && k < m->ncoli; k++)
+                        own |= m->coli[k].has && !strcmp(m->coli[k].name, colis[f - 2 * NFILE].name);
+                }
+                if (own) say(0, "%s: its whole %s is for builds without map pieces; its pieces are used", ids[i], key);
+                else
                     say(1, "%s: its whole %s is left out (map pieces are on); make it pieces with tools/map_pieces.py",
                         ids[i], key);
             }
         for (int c = 0; c < ncolis; c++) {   // the game's copies are not needed any more
             free(colis[c].game);
+            free(colis[c].fields);
             colis[c].game = NULL;
+            colis[c].fields = NULL;
         }
         for (int i = 0; i < nmods; i++)   // the bodies are in the built files
             for (int k = 0; k < mods[i].ncoli; k++) {
@@ -1761,6 +1893,11 @@ static void build(void) {
     for (int f = 0; f < NFILE; f++) free(gh[f]);
 }
 
+// The build runs once per run, on the first thread that asks for a map or collision file (at the title), and holds
+// lock throughout: it reads the game's archive and puts each file together (4 to 9 ms for map pieces alone, about
+// 30 ms with collision files, up to 315 ms measured while four games started at once). Only threads asking for a map or
+// collision file wait for it, and they need the result; no served file has a handle yet (handles are made after state
+// is 1), so no read waits, and every other file's open passes without the lock.
 static void build_once(void) {
     if (__atomic_load_n(&state, __ATOMIC_ACQUIRE)) return;
     plat_mutex_lock(&lock);

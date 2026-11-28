@@ -232,7 +232,9 @@ int cfg_load(const char *path) {
 // The Steam Deck (LCD Jupiter, OLED Galileo; 1280x800, 16:10, 4 Zen 2 cores, RDNA 2 with 8 CUs sharing 16 GB): the game
 // at 1280x720 with its own 5/6 scene, letterboxed in the 16:10 screen (XCX_PICTURE_FIT) until the game draws 16:10
 // itself; fullscreen and vsync, as gamescope composes Game Mode; 40 fps, which divides 40 Hz (and 120 Hz on the OLED).
-// Starting points to replace with measured ones (docs/tester-guide.md, Steam Deck).
+// Measured on an OLED (docs/steam-deck.md): with these values alone the game thread's CPU work holds the Deck to
+// about 37 fps in the open and 33 in New Los Angeles, under the 40 limit; with REPLAY_ASYNC and MIRROR_COW on it holds
+// 40 in both, which the doc recommends.
 static const struct { const char *key, *value; } DECK[] = {
     {"FULLSCREEN", "1"}, {"WINDOW_SIZE", "1280x800"}, {"OUTPUT_RES", "1280x720"}, {"RENDER_SCALE", "game"},
     {"VK_PRESENT", "fifo"}, {"FPS_LIMIT", "40"},

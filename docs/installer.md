@@ -214,6 +214,11 @@ bin/                  xcx_xlate, hactool, ninja, libSDL3.so.0
 - The window follows `LANG` for English or Russian, cancels through SIGTERM to the CLI's process group (the CLI handles
   it as Ctrl+Break on Windows) and opens the finished folder with `xdg-open`.
 - Requirements beyond Windows': Linux 6.7 or later (the write watch, `docs/building.md`) and glibc 2.34.
+- On Linux, a Steam Deck included, play this build, not the Windows release through Proton. On a Steam Deck OLED
+  (2026-11-27, commit 2fafc91, the Deck's device profile, no mods) the Windows build never reached the game world:
+  4 of 4 boots with Proton 10.0 ended in a Vulkan device fault, and 4 of 4 with Proton 11.0 in a crash in the game
+  code, all within 40 s. The Linux build of the same commit reached the world in 47 of 47 boots.
+- On a Steam Deck, [steam-deck.md](steam-deck.md) has the recommended settings and what they were measured with.
 
 ## Making a release
 

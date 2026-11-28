@@ -93,7 +93,8 @@ region every hook returns what the game had.
   row (Map Shortcuts': see its header band below); Map Shortcuts moves up a row per row (it reaches the screen's bottom) and its rows move down by what its
   window's header band (part of the window's picture) grows as the window stretches, the FrontierNav panel widens once
   for a longer name. A panel taller than the screen's band is scaled down as a whole,
-  to half size at the least. With no mod region nothing is served.
+  to half size at the least; Map Shortcuts' cursor box is drawn a fixed amount inside its rect whatever the scale, so
+  its cursor rects grow by that much for the scale and the box stays on its row. With no mod region nothing is served.
 - The field-region test (`region > 24` means "no field") answers 0 for a far region; the discovery flag of a far
   region comes from its `flg`; a probe install also uncovers the hexagons its site names in `SEG_ProbeListZone<id>`.
 

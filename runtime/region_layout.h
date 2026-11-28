@@ -16,13 +16,17 @@ uint32_t region_panel_rows(RegionPanel panel);
 // A layout's rows (mc_ListNN components): whether the panel moves up a row per row added (it reaches the screen's
 // bottom), how much wider the first added row makes it and the rects that move right with its columns, and how much its
 // window's header band grows per unit of the window's height scale (Map Shortcuts': the band is part of the window's
-// picture and stretches with it, so the rows move down by that much; 0 for a window whose header keeps its size).
+// picture and stretches with it, so the rows move down by that much; 0 for a window whose header keeps its size), and
+// for a panel scaled down to fit, the share of its rows' cursor rects (rect_Cursor, rect_CursorHi) that the cursor's
+// picture leaves empty across and down whatever the scale (Map Shortcuts': the box is drawn a fixed amount inside its
+// rect, so a scaled-down box would come out narrower than its row; the rects grow to make up for it; 0: no cursor).
 typedef struct {
     RegionPanel panel;
     int game_rows, move_up;
     double widen;
     const char *const *widen_also;
     double band;
+    double cursor_w, cursor_h;
 } RegionLayoutKind;
 // The functions below work on a layout file in memory and keep no state between calls.
 // The mc_ListNN rows of a menu layout (LAGP), -1 when it isn't one.
@@ -36,7 +40,8 @@ int region_layout_grow(uint8_t **data, size_t *n, int rows, const RegionLayoutKi
 // apply, the panel is scaled and moved so (0 when it has no scale keys to do it with).
 double region_layout_fit(uint8_t *data, size_t n, int apply);
 #define REGION_LAYOUT_MIN_SCALE 0.5
-// As many of rows as fit at REGION_LAYOUT_MIN_SCALE or more: added and the panel fitted; its scale in *scale.
+// As many of rows as fit at REGION_LAYOUT_MIN_SCALE or more: added and the panel fitted (its cursor rects grown for
+// the scale, see cursor_w); its scale in *scale.
 int region_layout_grow_fit(uint8_t **data, size_t *n, int rows, const RegionLayoutKind *kind, double *scale);
 
 // At the game's RomFS opens and archive lookups (runtime/fs_host.c, runtime/romfs_mods.c): for a panel layout while mod

@@ -19,6 +19,9 @@ STEP = 0.024          # the rows' step
 MIRA_GAP = 0.03       # the special last row sits a bigger step below the one before it
 WIN = (-0.1, -0.05, 0.2, 0.1)   # the window rect: x, y, w, h
 LGAP = 0.01           # a divider line sits this far above its row (Region Intel's rect_LineNN)
+CURSOR_RECT = (-0.12, -0.035, 0.24, 0.07)   # a row's rect_Base, rect_Cursor and rect_CursorHi: x, y, w, h
+CURSOR_PX = (-234, -68, 234, 68)            # and their pixel box: x0, y0, x1, y1
+ROW_RECTS = ('rect_Base', 'rect_Cursor', 'rect_CursorHi')
 
 
 def clang():
@@ -36,10 +39,11 @@ def row_y(r, rows):
     return (rows - 2) * STEP + MIRA_GAP - STEP if r == rows else (r - 2) * STEP
 
 
-def build(rows=3, kid=False, top_frame=True, lines=False):
+def build(rows=3, kid=False, top_frame=True, lines=False, cursor=False):
     """A layout: components top, mc_Top, mc_ListNN..01 (each optionally followed by a child component mc_Kid), the
     window rect in mc_Top, placement nodes for top (2 position + 2 scale keys), the window and each row. lines: a
-    divider line above each row as Region Intel has them (rects rect_LineNN, the last one on a special node)."""
+    divider line above each row as Region Intel has them (rects rect_LineNN, the last one on a special node). cursor:
+    each row has Map Shortcuts' rects rect_Base, rect_Cursor and rect_CursorHi (CURSOR_RECT, pixel box CURSOR_PX)."""
     # ---- placement nodes: table at +64, arrays after it
     nnodes = 2 + rows + (rows if lines else 0)
     arrays = bytearray()
@@ -84,7 +88,7 @@ def build(rows=3, kid=False, top_frame=True, lines=False):
             names.append('mc_Kid')
     comp_of_row = {r: names.index('mc_List%02d' % r) for r in range(1, rows + 1)}
     u13 = bytearray(64)
-    blocks, ents = {}, []
+    blocks, ents, row_rects = {}, [], []
 
     def put(blob, align=4):
         while len(u13) % align:
@@ -127,7 +131,13 @@ def build(rows=3, kid=False, top_frame=True, lines=False):
             kids = [(0, 0, i + 1, 0)] if kid else []
             fr = put(struct.pack('<2I', 8, len(kids)) + b''.join(struct.pack('<2I', 0, 0 << 16 | 0xffff) for _ in kids))
             dl = put(display(kids, [[0] if kid else [], [], []]))
-            ents.append([0, fr, 0, dl, put(struct.pack('<2I', 0, 8)), start, 0])
+            if cursor:
+                rc = put(struct.pack('<2I', len(ROW_RECTS), 8) + b''.join(
+                    struct.pack('<2I4f4h', 0, 0, *CURSOR_RECT, *CURSOR_PX) for _ in ROW_RECTS))
+                row_rects.append(rc + 8)             # named below
+            else:
+                rc = put(struct.pack('<2I', 0, 8))
+            ents.append([0, fr, 0, dl, rc, start, 0])
         else:
             fr = put(struct.pack('<2I', 8, 0))
             ents.append([0, fr, 0, put(display([], [[], [], []])), put(struct.pack('<2I', 0, 8)), start, 0])
@@ -137,6 +147,10 @@ def build(rows=3, kid=False, top_frame=True, lines=False):
     struct.pack_into('<I', u13, rect_name_at, put(b'rect_Window\0', 1))
     for k, r in enumerate(range(rows, 0, -1) if lines else ()):
         struct.pack_into('<I', u13, rect_name_at + 32 * (1 + k), put(b'rect_Line%02d\0' % r, 1))
+    rect_names = [put(nm.encode() + b'\0', 1) for nm in ROW_RECTS] if cursor else []
+    for at in row_rects:
+        for k, s in enumerate(rect_names):
+            struct.pack_into('<I', u13, at + 32 * k, s)
     ct = put(b''.join(struct.pack('<7I', *e) for e in ents))
     # tree: item i = component i + 1; mc_Top's children are the rows (slots 1..rows), a row's children its kid
     n = len(names)
@@ -230,6 +244,18 @@ class Layout:
             if name.startswith('rect_Line'):
                 self.assert_eq(rects[it[2]][1], f[1] >> 16)        # the rect and its frame name the same node
                 out[name] = (f[0], f[1] >> 16)
+        return out
+
+    def rects(self, e):
+        """{rect name: ((x, y, w, h), (x0, y0, x1, y1))} of a component's rect table."""
+        rb = self.u13 + e[4]
+        cnt, off = self.u32(rb), self.u32(rb + 4)
+        out = {}
+        for j in range(cnt):
+            o = rb + off + 32 * j
+            s = self.u13 + self.u32(o)
+            out[self.d[s:self.d.index(b'\0', s)].decode()] = (struct.unpack_from('<4f', self.d, o + 8),
+                                                              struct.unpack_from('<4h', self.d, o + 24))
         return out
 
     @staticmethod
@@ -394,6 +420,37 @@ class RegionLayout(unittest.TestCase):
         _, plain = self.run_check(build(), 2)                        # no band: the rows stay where they were
         self.assertAlmostEqual(Layout(plain).floats(Layout(plain).node(Layout(plain).top_rows()['mc_List01'][1])[2], 2)[1],
                                -STEP, places=5)
+
+    def test_cursor_rects_grow_with_a_scaled_panel(self):
+        # Map Shortcuts: its cursor picture leaves a fixed share of its rect empty, so a scaled-down panel's cursor rects
+        # grow by 1 + k (1/s - 1) about their centers, once each (rows copied from one another included)
+        kw, kh = 0.15, 0.08
+        res, out = self.run_check(build(cursor=True), 60, fit=2, also=('cursor=%g,%g' % (kw, kh),))
+        s = res['fit']
+        self.assertLess(s, 1.0)
+        fw, fh = 1 + kw * (1 / s - 1), 1 + kh * (1 / s - 1)
+        x, y, w, h = CURSOR_RECT
+        L = Layout(out)
+        rows = [(n, e) for n, e in L.comps() if n.startswith('mc_List')]
+        self.assertEqual(len(rows), res['after'])
+        for name, e in rows:
+            rects = L.rects(e)
+            self.assertEqual(sorted(rects), sorted(ROW_RECTS), name)
+            self.assertEqual(rects['rect_Base'], (tuple(f32(v) for v in CURSOR_RECT), CURSOR_PX), name)
+            for nm in ('rect_Cursor', 'rect_CursorHi'):
+                (rx, ry, rw, rh), px = rects[nm]
+                self.assertAlmostEqual(rw, w * fw, places=5, msg=(name, nm))
+                self.assertAlmostEqual(rh, h * fh, places=5, msg=(name, nm))
+                self.assertAlmostEqual(rx + rw / 2, x + w / 2, places=5, msg=(name, nm))    # the center stays
+                self.assertAlmostEqual(ry + rh / 2, y + h / 2, places=5, msg=(name, nm))
+                self.assertEqual(px, (round(-234 * fw), round(-68 * fh), round(234 * fw), round(68 * fh)), (name, nm))
+        # a panel that fits as it is, or a layout kind without the setting: the cursor rects stay as they are
+        for args in ((2, ('cursor=%g,%g' % (kw, kh),)), (60, ())):
+            res, out = self.run_check(build(cursor=True), args[0], fit=2, also=args[1])
+            L = Layout(out)
+            for name, e in L.comps():
+                if name.startswith('mc_List'):
+                    self.assertEqual(L.rects(e)['rect_Cursor'], (tuple(f32(v) for v in CURSOR_RECT), CURSOR_PX))
 
     def test_not_a_layout(self):
         res, out = self.run_check(b'NOTALAYOUT' * 10, 2)

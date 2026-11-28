@@ -28,6 +28,8 @@
 //   header band is part of the window's picture and stretches with it, its rows also move down by the band's growth
 //   and the window and the move up grow by as much (RegionLayoutKind.band); the FN tab's panel is made a little wider
 //   once (room for a longer region name: the window, the icon columns and their header).
+// A panel too tall for the screen is then scaled down as a whole (fit), and Map Shortcuts' cursor rects grow to make
+// up for the part of the cursor's picture that keeps its size (cursor_grow).
 // Nothing else in the file changes; the open and close animations need no change (seen in game).
 #include "region_layout.h"
 #include <math.h>
@@ -703,6 +705,54 @@ static double fit(Lagp *L, FitWork *F, int apply) {
     return s;
 }
 
+// The rows' cursor in a panel scaled by s: Map Shortcuts' cursor box is drawn a fixed amount inside its rect
+// (rect_Cursor and its highlight rect_CursorHi in each row; the game sets their scale when the cursor moves), the same
+// amount at any scale, so scaled down it would come out narrower than its row (measured at s 0.51 on a 2560 px wide
+// screen: 216 px for a 263 px row, with 616 s - 95 px across and 85 s - 7 px down). Each such rect grows about its center
+// by 1 + k (1/s - 1), k the share of the rect the picture leaves empty at full size (kind->cursor_w across, cursor_h
+// down), its pixel box with it, so the box lands on its row. Rows may share a rect table: each rect is grown once.
+static void cursor_grow(uint8_t *data, size_t n, double s, double kw, double kh) {
+    Lagp L = {{data, n, n, 0}, 0, 0};
+    if (!lagp_ok(&L.b) || s <= 0 || s >= 1) return;
+    L.u4 = rd32(&L.b, 0x18);
+    L.u13 = rd32(&L.b, 0x3c);
+    Comp *c = malloc(sizeof(Comp) * MAXC);
+    size_t *seen = malloc(sizeof(size_t) * MAXC);
+    int nc = c ? comps_of(&L, c) : -1, ns = 0;
+    double fw = 1 + kw * (1 / s - 1), fh = 1 + kh * (1 / s - 1);
+    for (int i = 0; seen && i < nc; i++) {
+        if (strncmp(comp_name(&L, &c[i]), "mc_List", 7) || !c[i].e[4]) continue;
+        size_t b = L.u13 + c[i].e[4];
+        uint32_t cnt = rd32(&L.b, b), off = rd32(&L.b, b + 4);
+        if (cnt > MAXC || !in_range(&L.b, b + off, (size_t)cnt * 32)) continue;
+        for (uint32_t j = 0; j < cnt; j++) {
+            size_t o = b + off + 32 * j;
+            const char *nm = cstr(&L.b, L.u13 + rd32(&L.b, o));
+            if (strcmp(nm, "rect_Cursor") && strcmp(nm, "rect_CursorHi")) continue;
+            int dup = 0;
+            for (int k = 0; k < ns; k++) dup |= seen[k] == o;
+            if (dup || ns >= MAXC) continue;
+            seen[ns++] = o;
+            double x = rdf(&L.b, o + 8), y = rdf(&L.b, o + 12), w = rdf(&L.b, o + 16), h = rdf(&L.b, o + 20);
+            wrf(&L.b, o + 8, x + w / 2 - w * fw / 2);
+            wrf(&L.b, o + 12, y + h / 2 - h * fh / 2);
+            wrf(&L.b, o + 16, w * fw);
+            wrf(&L.b, o + 20, h * fh);
+            int16_t px[4];                      // the rect's pixel box: x0, y0, x1, y1
+            memcpy(px, L.b.d + o + 24, 8);
+            double mx = (px[0] + px[2]) / 2.0, my = (px[1] + px[3]) / 2.0, hw = (px[2] - px[0]) * fw / 2,
+                   hh = (px[3] - px[1]) * fh / 2;
+            px[0] = (int16_t)lround(mx - hw);
+            px[1] = (int16_t)lround(my - hh);
+            px[2] = (int16_t)lround(mx + hw);
+            px[3] = (int16_t)lround(my + hh);
+            memcpy(L.b.d + o + 24, px, 8);
+        }
+    }
+    free(seen);
+    free(c);
+}
+
 int region_layout_grow(uint8_t **data, size_t *n, int rows, const RegionLayoutKind *kind) {
     Lagp L = {{*data, *n, *n, 0}, 0, 0};
     if (!lagp_ok(&L.b)) return 0;
@@ -769,6 +819,8 @@ int region_layout_grow_fit(uint8_t **data, size_t *n, int rows, const RegionLayo
         }
     }
     if (s > 0 && s < 1) s = region_layout_fit(*data, *n, 1);   // 0 when it can't be scaled (no scale keys)
+    if (s > 0 && s < 1 && (kind->cursor_w > 0 || kind->cursor_h > 0))
+        cursor_grow(*data, *n, s, kind->cursor_w, kind->cursor_h);
     free(src);
     if (scale) *scale = s;
     return added;
@@ -787,13 +839,15 @@ int region_layout_grow_fit(uint8_t **data, size_t *n, int rows, const RegionLayo
 static const char *const fn_widen[] = {"rect_TextIndex02", NULL};
 static const struct { const char *key; RegionLayoutKind kind; } layouts[] = {
     // Region Intel, on the Segments and Map tabs
-    {"ui/image/04010_parts05.wilay", {REGION_PANEL_INTEL, REGION_INTEL_GAME_ROWS, 0, 0.0, NULL, 0.0}},
+    {"ui/image/04010_parts05.wilay", {REGION_PANEL_INTEL, REGION_INTEL_GAME_ROWS, 0, 0.0, NULL, 0.0, 0.0, 0.0}},
     // Map Shortcuts
     // its header band grows 0.0075 screen widths per unit of window scale (measured: 53 px at the game's 8 rows, about
-    // 104 px at 34, on a 2560 px wide screen)
-    {"ui/image/04010_parts04.wilay", {REGION_PANEL_SHORTCUTS, REGION_SHORTCUTS_GAME_ROWS, 1, 0.0, NULL, 0.0075}},
+    // 104 px at 34, on a 2560 px wide screen); its cursor box leaves 95 of its rect's 616 px across and 7 of 85 down
+    // empty at any scale (measured at full size and at 51%, cursor_grow)
+    {"ui/image/04010_parts04.wilay",
+     {REGION_PANEL_SHORTCUTS, REGION_SHORTCUTS_GAME_ROWS, 1, 0.0, NULL, 0.0075, 95.0 / 616, 7.0 / 85}},
     // Region Intel on the FrontierNav tab
-    {"ui/image/04030_frontiernet_parts08.wilay", {REGION_PANEL_FN, REGION_FN_GAME_ROWS, 0, 0.016, fn_widen, 0.0}},
+    {"ui/image/04030_frontiernet_parts08.wilay", {REGION_PANEL_FN, REGION_FN_GAME_ROWS, 0, 0.016, fn_widen, 0.0, 0.0, 0.0}},
 };
 #define NLAYOUTS ((int)(sizeof layouts / sizeof *layouts))
 

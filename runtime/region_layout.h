@@ -19,7 +19,8 @@ uint32_t region_panel_rows(RegionPanel panel);
 // picture and stretches with it, so the rows move down by that much; 0 for a window whose header keeps its size), and
 // for a panel scaled down to fit, the share of its rows' cursor rects (rect_Cursor, rect_CursorHi) that the cursor's
 // picture leaves empty across and down whatever the scale (Map Shortcuts': the box is drawn a fixed amount inside its
-// rect, so a scaled-down box would come out narrower than its row; the rects grow to make up for it; 0: no cursor).
+// rect, so a scaled-down box would come out narrower than its row; the rects grow to make up for it; 0: the cursor rects
+// are left as they are).
 typedef struct {
     RegionPanel panel;
     int game_rows, move_up;

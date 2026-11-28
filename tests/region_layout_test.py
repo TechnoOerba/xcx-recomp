@@ -39,11 +39,12 @@ def row_y(r, rows):
     return (rows - 2) * STEP + MIRA_GAP - STEP if r == rows else (r - 2) * STEP
 
 
-def build(rows=3, kid=False, top_frame=True, lines=False, cursor=False):
+def build(rows=3, kid=False, top_frame=True, lines=False, cursor=False, share_rects=False):
     """A layout: components top, mc_Top, mc_ListNN..01 (each optionally followed by a child component mc_Kid), the
     window rect in mc_Top, placement nodes for top (2 position + 2 scale keys), the window and each row. lines: a
     divider line above each row as Region Intel has them (rects rect_LineNN, the last one on a special node). cursor:
-    each row has Map Shortcuts' rects rect_Base, rect_Cursor and rect_CursorHi (CURSOR_RECT, pixel box CURSOR_PX)."""
+    each row has Map Shortcuts' rects rect_Base, rect_Cursor and rect_CursorHi (CURSOR_RECT, pixel box CURSOR_PX);
+    share_rects: all the rows point at one rect table."""
     # ---- placement nodes: table at +64, arrays after it
     nnodes = 2 + rows + (rows if lines else 0)
     arrays = bytearray()
@@ -131,7 +132,9 @@ def build(rows=3, kid=False, top_frame=True, lines=False, cursor=False):
             kids = [(0, 0, i + 1, 0)] if kid else []
             fr = put(struct.pack('<2I', 8, len(kids)) + b''.join(struct.pack('<2I', 0, 0 << 16 | 0xffff) for _ in kids))
             dl = put(display(kids, [[0] if kid else [], [], []]))
-            if cursor:
+            if cursor and share_rects and row_rects:
+                rc = row_rects[0] - 8
+            elif cursor:
                 rc = put(struct.pack('<2I', len(ROW_RECTS), 8) + b''.join(
                     struct.pack('<2I4f4h', 0, 0, *CURSOR_RECT, *CURSOR_PX) for _ in ROW_RECTS))
                 row_rects.append(rc + 8)             # named below
@@ -423,9 +426,22 @@ class RegionLayout(unittest.TestCase):
 
     def test_cursor_rects_grow_with_a_scaled_panel(self):
         # Map Shortcuts: its cursor picture leaves a fixed share of its rect empty, so a scaled-down panel's cursor rects
-        # grow by 1 + k (1/s - 1) about their centers, once each (rows copied from one another included)
+        # grow by 1 + k (1/s - 1) about their centers, once each (also when several rows point at one rect table)
         kw, kh = 0.15, 0.08
-        res, out = self.run_check(build(cursor=True), 60, fit=2, also=('cursor=%g,%g' % (kw, kh),))
+        for share in (False, True):
+            self.check_cursor_grown(build(cursor=True, share_rects=share), kw, kh)
+        # a panel that fits as it is, or a layout kind without the setting: the cursor rects stay as they are
+        for rows, also in ((2, ('cursor=%g,%g' % (kw, kh),)), (60, ())):
+            res, out = self.run_check(build(cursor=True), rows, fit=2, also=also)
+            if rows == 2:
+                self.assertEqual(res['fit'], 1.0)
+            L = Layout(out)
+            for name, e in L.comps():
+                if name.startswith('mc_List'):
+                    self.assertEqual(L.rects(e)['rect_Cursor'], (tuple(f32(v) for v in CURSOR_RECT), CURSOR_PX))
+
+    def check_cursor_grown(self, data, kw, kh):
+        res, out = self.run_check(data, 60, fit=2, also=('cursor=%g,%g' % (kw, kh),))
         s = res['fit']
         self.assertLess(s, 1.0)
         fw, fh = 1 + kw * (1 / s - 1), 1 + kh * (1 / s - 1)
@@ -444,13 +460,6 @@ class RegionLayout(unittest.TestCase):
                 self.assertAlmostEqual(rx + rw / 2, x + w / 2, places=5, msg=(name, nm))    # the center stays
                 self.assertAlmostEqual(ry + rh / 2, y + h / 2, places=5, msg=(name, nm))
                 self.assertEqual(px, (round(-234 * fw), round(-68 * fh), round(234 * fw), round(68 * fh)), (name, nm))
-        # a panel that fits as it is, or a layout kind without the setting: the cursor rects stay as they are
-        for args in ((2, ('cursor=%g,%g' % (kw, kh),)), (60, ())):
-            res, out = self.run_check(build(cursor=True), args[0], fit=2, also=args[1])
-            L = Layout(out)
-            for name, e in L.comps():
-                if name.startswith('mc_List'):
-                    self.assertEqual(L.rects(e)['rect_Cursor'], (tuple(f32(v) for v in CURSOR_RECT), CURSOR_PX))
 
     def test_not_a_layout(self):
         res, out = self.run_check(b'NOTALAYOUT' * 10, 2)
